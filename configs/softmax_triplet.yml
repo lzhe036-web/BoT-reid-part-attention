@@ -1,6 +1,6 @@
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: '/home/haoluo/.torch/models/resnet50-19c8e357.pth'
+  PRETRAIN_PATH: "D:/thesis_reid/pretrained/resnet50-19c8e357.pth"
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'on'
   IF_WITH_CENTER: 'no'
@@ -16,7 +16,7 @@ INPUT:
   PADDING: 10
 
 DATASETS:
-  NAMES: ('market1501')
+  ROOT_DIR: "D:/thesis_reid/datasets"
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -62,6 +62,6 @@ TEST:
   NECK_FEAT: 'after'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: "/home/haoluo/log/gu/reid_baseline_review/Opensource_test/market1501/Experiment-all-tricks-256x128-bs16x4-warmup10-erase0_5-labelsmooth_on-laststride1-bnneck_on"
+OUTPUT_DIR: "D:/thesis_reid/experiments/BoT/softmax_triplet_market1501"
 
 
