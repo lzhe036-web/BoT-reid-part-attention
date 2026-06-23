@@ -1,0 +1,166 @@
+# =========================
+# BoT / ReID custom ignores
+# =========================
+
+# Dataset folders accidentally placed inside code
+data/Market1501/
+data/market1501/
+data/DukeMTMC-reID/
+data/dukemtmc-reid/
+data/Market-1501-v15.09.15/
+
+Market1501/
+market1501/
+DukeMTMC-reID/
+dukemtmc-reid/
+Market-1501-v15.09.15/
+
+# ReID dataset subfolders
+bounding_box_train/
+bounding_box_test/
+query/
+gt_bbox/
+
+# Image data
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# Model weights / checkpoints
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Training logs / outputs
+log/
+logs/
+output/
+outputs/
+runs/
+results/
+checkpoints/
+saved-models/
+events.out.tfevents.*
+
+# Unused old script
+train_imagenet.py
+
+
+# =========================
+# Python cache
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+
+# =========================
+# Python environments
+# =========================
+
+.env
+.env/
+.venv
+.venv/
+.venv1
+.venv1/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+bot-venv1/
+envs/
+
+
+# =========================
+# Distribution / packaging
+# =========================
+
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# =========================
+# Installer logs
+# =========================
+
+pip-log.txt
+pip-delete-this-directory.txt
+
+
+# =========================
+# Unit test / coverage
+# =========================
+
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+
+# =========================
+# Jupyter Notebook
+# =========================
+
+.ipynb_checkpoints/
+
+
+# =========================
+# IDE / editor
+# =========================
+
+.idea/
+.vscode/
+.spyderproject
+.spyproject
+.ropeproject
+.mypy_cache/
+
+
+# =========================
+# OS files
+# =========================
+
+.DS_Store
+.Spotlight-V100
+.Trashes
+._*
+Thumbs.db
+
+
+# =========================
+# Documentation / misc
+# =========================
+
+docs/_build/
+/site
+target/
+.python-version
+celerybeat-schedule
+*.sage.py
