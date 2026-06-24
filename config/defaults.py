@@ -42,6 +42,10 @@ _C.MODEL.METRIC_LOSS_TYPE = 'triplet'
 
 # If train with label smooth, options: 'on', 'off'
 _C.MODEL.IF_LABELSMOOTH = 'on'
+# If use lightweight part-aware attention on the backbone feature map
+_C.MODEL.PART_ATTENTION = False
+# Number of horizontal parts for part-aware attention
+_C.MODEL.PART_ATTENTION_PARTS = 6
 
 
 # -----------------------------------------------------------------------------

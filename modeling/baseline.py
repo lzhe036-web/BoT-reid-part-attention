@@ -6,7 +6,9 @@
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
+from config import cfg
 from .backbones.resnet import ResNet, BasicBlock, Bottleneck
 from .backbones.senet import SENet, SEResNetBottleneck, SEBottleneck, SEResNeXtBottleneck
 from .backbones.resnet_ibn_a import resnet50_ibn_a
@@ -35,10 +37,36 @@ def weights_init_classifier(m):
             nn.init.constant_(m.bias, 0.0)
 
 
+class PartAttentionHead(nn.Module):
+    def __init__(self, in_planes, num_parts=6):
+        super(PartAttentionHead, self).__init__()
+        self.num_parts = num_parts
+        self.attention = nn.Linear(in_planes, 1)
+        nn.init.normal_(self.attention.weight, std=0.001)
+        nn.init.constant_(self.attention.bias, 0.0)
+
+    def forward(self, x):
+        part_feats = []
+        height = x.size(2)
+        for part_idx in range(self.num_parts):
+            start = height * part_idx // self.num_parts
+            end = height * (part_idx + 1) // self.num_parts
+            part = x[:, :, start:end, :]
+            part_feat = F.adaptive_avg_pool2d(part, 1).view(x.size(0), -1)
+            part_feats.append(part_feat)
+
+        part_feats = torch.stack(part_feats, dim=1)
+        attention_scores = self.attention(part_feats).squeeze(-1)
+        attention_weights = F.softmax(attention_scores, dim=1).unsqueeze(-1)
+        part_feat = torch.sum(part_feats * attention_weights, dim=1)
+        return part_feat
+
+
 class Baseline(nn.Module):
     in_planes = 2048
 
-    def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice):
+    def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice,
+                 part_attention=None, part_attention_parts=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -137,6 +165,14 @@ class Baseline(nn.Module):
         self.num_classes = num_classes
         self.neck = neck
         self.neck_feat = neck_feat
+        if part_attention is None:
+            part_attention = cfg.MODEL.PART_ATTENTION
+        if part_attention_parts is None:
+            part_attention_parts = cfg.MODEL.PART_ATTENTION_PARTS
+        self.part_attention = part_attention
+
+        if self.part_attention:
+            self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.in_planes, self.num_classes)
@@ -152,8 +188,12 @@ class Baseline(nn.Module):
 
     def forward(self, x):
 
-        global_feat = self.gap(self.base(x))  # (b, 2048, 1, 1)
+        feature_map = self.base(x)
+        global_feat = self.gap(feature_map)  # (b, 2048, 1, 1)
         global_feat = global_feat.view(global_feat.shape[0], -1)  # flatten to (bs, 2048)
+        if self.part_attention:
+            part_feat = self.part_attention_head(feature_map)
+            global_feat = global_feat + part_feat
 
         if self.neck == 'no':
             feat = global_feat
