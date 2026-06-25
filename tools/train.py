@@ -8,6 +8,7 @@ import argparse
 import os
 import sys
 import torch
+from datetime import datetime
 
 from torch.backends import cudnn
 
@@ -19,6 +20,7 @@ from modeling import build_model
 from layers import make_loss, make_loss_with_center
 from solver import make_optimizer, make_optimizer_with_center, WarmupMultiStepLR
 
+from utils.experiment_record import write_experiment_record
 from utils.logger import setup_logger
 
 
@@ -56,7 +58,7 @@ def train(cfg):
 
         arguments = {}
 
-        do_train(
+        return do_train(
             cfg,
             model,
             train_loader,
@@ -99,7 +101,7 @@ def train(cfg):
         else:
             print('Only support pretrain_choice for imagenet and self, but got {}'.format(cfg.MODEL.PRETRAIN_CHOICE))
 
-        do_train_with_center(
+        return do_train_with_center(
             cfg,
             model,
             center_criterion,
@@ -114,6 +116,7 @@ def train(cfg):
         )
     else:
         print("Unsupported value for cfg.MODEL.IF_WITH_CENTER {}, only support yes or no!\n".format(cfg.MODEL.IF_WITH_CENTER))
+        return {}
 
 
 def main():
@@ -151,7 +154,11 @@ def main():
     if cfg.MODEL.DEVICE == "cuda":
         os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
     cudnn.benchmark = True
-    train(cfg)
+    start_time = datetime.now()
+    train_result = train(cfg)
+    end_time = datetime.now()
+    record_path = write_experiment_record(cfg, args.config_file, start_time, end_time, train_result)
+    logger.info("Experiment record saved to {}".format(record_path))
 
 
 if __name__ == '__main__':

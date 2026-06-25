@@ -39,6 +39,10 @@ _C.MODEL.IF_WITH_CENTER = 'no'
 _C.MODEL.METRIC_LOSS_TYPE = 'triplet'
 # For example, if loss type is cross entropy loss + triplet loss + center loss
 # the setting should be: _C.MODEL.METRIC_LOSS_TYPE = 'triplet_center' and _C.MODEL.IF_WITH_CENTER = 'yes'
+# If use adaptive hard sample weights for batch hard triplet loss
+_C.MODEL.ADAPTIVE_HARD_TRIPLET = False
+# Temperature for adaptive hard sample weighting
+_C.MODEL.ADAPTIVE_HARD_TRIPLET_TAU = 0.2
 
 # If train with label smooth, options: 'on', 'off'
 _C.MODEL.IF_LABELSMOOTH = 'on'

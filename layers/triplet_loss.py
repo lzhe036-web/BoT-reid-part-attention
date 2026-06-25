@@ -5,6 +5,7 @@
 """
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 
 def normalize(x, axis=-1):
@@ -95,8 +96,13 @@ class TripletLoss(object):
     Related Triplet Loss theory can be found in paper 'In Defense of the Triplet
     Loss for Person Re-Identification'."""
 
-    def __init__(self, margin=None):
+    def __init__(self, margin=None, adaptive_hard=False, adaptive_tau=0.2):
         self.margin = margin
+        self.adaptive_hard = adaptive_hard
+        self.adaptive_tau = adaptive_tau
+        self.last_stats = {}
+        if self.adaptive_hard and self.adaptive_tau <= 0:
+            raise ValueError('ADAPTIVE_HARD_TRIPLET_TAU must be positive')
         if margin is not None:
             self.ranking_loss = nn.MarginRankingLoss(margin=margin)
         else:
@@ -109,10 +115,26 @@ class TripletLoss(object):
         dist_ap, dist_an = hard_example_mining(
             dist_mat, labels)
         y = dist_an.new().resize_as_(dist_an).fill_(1)
-        if self.margin is not None:
+        if self.adaptive_hard:
+            gap = dist_an - dist_ap
+            weight = torch.sigmoid(-gap / self.adaptive_tau).detach()
+            if self.margin is not None:
+                base_loss = F.relu(dist_ap - dist_an + self.margin)
+            else:
+                base_loss = F.softplus(dist_ap - dist_an)
+            loss = (weight * base_loss).mean()
+            self.last_stats = {
+                'dist_ap_mean': dist_ap.detach().mean().item(),
+                'dist_an_mean': dist_an.detach().mean().item(),
+                'gap_mean': gap.detach().mean().item(),
+                'weight_mean': weight.mean().item()
+            }
+        elif self.margin is not None:
             loss = self.ranking_loss(dist_an, dist_ap, y)
+            self.last_stats = {}
         else:
             loss = self.ranking_loss(dist_an - dist_ap, y)
+            self.last_stats = {}
         return loss, dist_ap, dist_an
 
 class CrossEntropyLabelSmooth(nn.Module):
