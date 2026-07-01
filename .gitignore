@@ -3,6 +3,8 @@
 # =========================
 
 # Dataset folders accidentally placed inside code
+data/
+datasets/
 data/Market1501/
 data/market1501/
 data/DukeMTMC-reID/
@@ -28,12 +30,15 @@ gt_bbox/
 *.bmp
 
 # Model weights / checkpoints
+pretrained/
 *.pth
 *.pt
+*.pkl
 *.ckpt
 *.onnx
 
 # Training logs / outputs
+experiments/
 log/
 logs/
 output/
@@ -53,6 +58,7 @@ train_imagenet.py
 # =========================
 
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 *.so
