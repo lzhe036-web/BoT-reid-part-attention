@@ -4,6 +4,14 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | E001 | 待填写 | 待填写 | main-autodl | configs/softmax_triplet_part_attention_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + Part Attention, K=6, AutoDL |
 
+## Tau Sensitivity Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | config 文件 | K | tau | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T001 | 待填写 | 待填写 | part-attention-tau-sensitivity | configs/softmax_triplet_part_attention_k6_tau01_autodl.yml | 6 | 0.1 | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + Part Attention tau sensitivity |
+| T002 | 待填写 | 待填写 | part-attention-tau-sensitivity | configs/softmax_triplet_part_attention_k6_tau02_autodl.yml | 6 | 0.2 | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + Part Attention tau sensitivity |
+| T003 | 待填写 | 待填写 | part-attention-tau-sensitivity | configs/softmax_triplet_part_attention_k6_tau05_autodl.yml | 6 | 0.5 | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + Part Attention tau sensitivity |
+
 ## 字段填写说明
 
 1. commit id：运行前执行 `git rev-parse --short HEAD` 获取。

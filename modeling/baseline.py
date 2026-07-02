@@ -38,9 +38,12 @@ def weights_init_classifier(m):
 
 
 class PartAttentionHead(nn.Module):
-    def __init__(self, in_planes, num_parts=6):
+    def __init__(self, in_planes, num_parts=6, tau=1.0):
         super(PartAttentionHead, self).__init__()
         self.num_parts = num_parts
+        if tau <= 0:
+            raise ValueError('part attention tau must be positive')
+        self.tau = tau
         self.attention = nn.Linear(in_planes, 1)
         nn.init.normal_(self.attention.weight, std=0.001)
         nn.init.constant_(self.attention.bias, 0.0)
@@ -57,7 +60,7 @@ class PartAttentionHead(nn.Module):
 
         part_feats = torch.stack(part_feats, dim=1)
         attention_scores = self.attention(part_feats).squeeze(-1)
-        attention_weights = F.softmax(attention_scores, dim=1).unsqueeze(-1)
+        attention_weights = F.softmax(attention_scores / self.tau, dim=1).unsqueeze(-1)
         part_feat = torch.sum(part_feats * attention_weights, dim=1)
         return part_feat
 
@@ -66,7 +69,7 @@ class Baseline(nn.Module):
     in_planes = 2048
 
     def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice,
-                 part_attention=None, part_attention_parts=None):
+                 part_attention=None, part_attention_parts=None, part_attention_tau=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -169,10 +172,16 @@ class Baseline(nn.Module):
             part_attention = cfg.MODEL.PART_ATTENTION
         if part_attention_parts is None:
             part_attention_parts = cfg.MODEL.PART_ATTENTION_PARTS
+        if part_attention_tau is None:
+            part_attention_tau = cfg.MODEL.PART_ATTENTION_TAU
         self.part_attention = part_attention
 
         if self.part_attention:
-            self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
+            self.part_attention_head = PartAttentionHead(
+                self.in_planes,
+                part_attention_parts,
+                part_attention_tau,
+            )
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.in_planes, self.num_classes)

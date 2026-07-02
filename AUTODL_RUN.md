@@ -21,6 +21,16 @@ Script command:
 bash scripts/train_part_attention_autodl.sh
 ```
 
+## Tau Sensitivity Experiments
+
+Run the K=6 part attention tau sensitivity experiments with:
+
+```bash
+bash scripts/train_part_attention_k6_tau01_autodl.sh
+bash scripts/train_part_attention_k6_tau02_autodl.sh
+bash scripts/train_part_attention_k6_tau05_autodl.sh
+```
+
 ## Run In tmux
 
 Create a tmux session:

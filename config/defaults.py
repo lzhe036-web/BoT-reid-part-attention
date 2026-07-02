@@ -46,6 +46,8 @@ _C.MODEL.IF_LABELSMOOTH = 'on'
 _C.MODEL.PART_ATTENTION = False
 # Number of horizontal parts for part-aware attention
 _C.MODEL.PART_ATTENTION_PARTS = 6
+# Temperature for part-aware attention softmax
+_C.MODEL.PART_ATTENTION_TAU = 1.0
 
 
 # -----------------------------------------------------------------------------
