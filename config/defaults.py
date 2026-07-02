@@ -43,6 +43,8 @@ _C.MODEL.METRIC_LOSS_TYPE = 'triplet'
 _C.MODEL.ADAPTIVE_HARD_TRIPLET = False
 # Temperature for adaptive hard sample weighting
 _C.MODEL.ADAPTIVE_HARD_TRIPLET_TAU = 0.2
+# If normalize weighted triplet loss by the sum of weights
+_C.MODEL.NORMALIZE_WEIGHTED_LOSS = True
 
 # If train with label smooth, options: 'on', 'off'
 _C.MODEL.IF_LABELSMOOTH = 'on'

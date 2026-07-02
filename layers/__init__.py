@@ -16,7 +16,8 @@ def make_loss(cfg, num_classes):    # modified by gu
         triplet = TripletLoss(
             cfg.SOLVER.MARGIN,
             cfg.MODEL.ADAPTIVE_HARD_TRIPLET,
-            cfg.MODEL.ADAPTIVE_HARD_TRIPLET_TAU
+            cfg.MODEL.ADAPTIVE_HARD_TRIPLET_TAU,
+            cfg.MODEL.NORMALIZE_WEIGHTED_LOSS
         )  # triplet loss
     else:
         print('expected METRIC_LOSS_TYPE should be triplet'
@@ -63,7 +64,8 @@ def make_loss_with_center(cfg, num_classes):    # modified by gu
         triplet = TripletLoss(
             cfg.SOLVER.MARGIN,
             cfg.MODEL.ADAPTIVE_HARD_TRIPLET,
-            cfg.MODEL.ADAPTIVE_HARD_TRIPLET_TAU
+            cfg.MODEL.ADAPTIVE_HARD_TRIPLET_TAU,
+            cfg.MODEL.NORMALIZE_WEIGHTED_LOSS
         )  # triplet loss
         center_criterion = CenterLoss(num_classes=num_classes, feat_dim=feat_dim, use_gpu=True)  # center loss
 

@@ -96,10 +96,12 @@ class TripletLoss(object):
     Related Triplet Loss theory can be found in paper 'In Defense of the Triplet
     Loss for Person Re-Identification'."""
 
-    def __init__(self, margin=None, adaptive_hard=False, adaptive_tau=0.2):
+    def __init__(self, margin=None, adaptive_hard=False, adaptive_tau=0.2,
+                 normalize_weighted_loss=True):
         self.margin = margin
         self.adaptive_hard = adaptive_hard
         self.adaptive_tau = adaptive_tau
+        self.normalize_weighted_loss = normalize_weighted_loss
         self.last_stats = {}
         if self.adaptive_hard and self.adaptive_tau <= 0:
             raise ValueError('ADAPTIVE_HARD_TRIPLET_TAU must be positive')
@@ -122,7 +124,13 @@ class TripletLoss(object):
                 base_loss = F.relu(dist_ap - dist_an + self.margin)
             else:
                 base_loss = F.softplus(dist_ap - dist_an)
-            loss = (weight * base_loss).mean()
+            weighted_loss_sum = torch.sum(weight * base_loss)
+            if self.normalize_weighted_loss:
+                weight_sum = torch.sum(weight)
+                normalized_weighted_loss = weighted_loss_sum / (weight_sum + 1e-12)
+                loss = normalized_weighted_loss
+            else:
+                loss = (weight * base_loss).mean()
             self.last_stats = {
                 'dist_ap_mean': dist_ap.detach().mean().item(),
                 'dist_an_mean': dist_an.detach().mean().item(),
