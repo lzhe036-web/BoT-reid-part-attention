@@ -58,12 +58,28 @@ def inference(
     logger.info("Enter inferencing")
     if cfg.TEST.RE_RANKING == 'no':
         print("Create evaluator")
-        evaluator = create_supervised_evaluator(model, metrics={'r1_mAP': R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)},
-                                                device=device)
+        evaluator = create_supervised_evaluator(
+            model,
+            metrics={'r1_mAP': R1_mAP(
+                num_query,
+                max_rank=50,
+                feat_norm=cfg.TEST.FEAT_NORM,
+                camera_mean_debias_enabled=cfg.TEST.CAMERA_MEAN_DEBIAS
+            )},
+            device=device
+        )
     elif cfg.TEST.RE_RANKING == 'yes':
         print("Create evaluator for reranking")
-        evaluator = create_supervised_evaluator(model, metrics={'r1_mAP': R1_mAP_reranking(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)},
-                                                device=device)
+        evaluator = create_supervised_evaluator(
+            model,
+            metrics={'r1_mAP': R1_mAP_reranking(
+                num_query,
+                max_rank=50,
+                feat_norm=cfg.TEST.FEAT_NORM,
+                camera_mean_debias_enabled=cfg.TEST.CAMERA_MEAN_DEBIAS
+            )},
+            device=device
+        )
     else:
         print("Unsupported re_ranking config. Only support for no or yes, but got {}.".format(cfg.TEST.RE_RANKING))
 
@@ -73,3 +89,4 @@ def inference(
     logger.info("mAP: {:.1%}".format(mAP))
     for r in [1, 5, 10]:
         logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+    return cmc, mAP

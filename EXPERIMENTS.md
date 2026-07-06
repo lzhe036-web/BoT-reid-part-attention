@@ -3,6 +3,7 @@
 | 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | E001 | 待填写 | 待填写 | main-autodl | configs/softmax_triplet_part_attention_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + Part Attention, K=6, AutoDL |
+| E002 | 待运行/待填写 | 2b06f88 | exp-bnneck-camera-debias | configs/softmax_triplet_with_center.yml | 待填写 | 待填写 | Market1501 | 待运行/待填写 | 待运行/待填写 | 待运行/待填写 | 待运行/待填写 | TEST.CAMERA_MEAN_DEBIAS=True；BNNeck after feature；测试阶段按 camera mean 去偏置；未运行 |
 
 ## 字段填写说明
 

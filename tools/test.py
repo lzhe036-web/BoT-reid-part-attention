@@ -7,7 +7,7 @@
 import argparse
 import os
 import sys
-from os import mkdir
+from datetime import datetime
 
 import torch
 from torch.backends import cudnn
@@ -17,6 +17,7 @@ from config import cfg
 from data import make_data_loader
 from engine.inference import inference
 from modeling import build_model
+from tools.record_experiment import record_experiment
 from utils.logger import setup_logger
 
 
@@ -39,7 +40,7 @@ def main():
 
     output_dir = cfg.OUTPUT_DIR
     if output_dir and not os.path.exists(output_dir):
-        mkdir(output_dir)
+        os.makedirs(output_dir)
 
     logger = setup_logger("reid_baseline", output_dir, 0)
     logger.info("Using {} GPUS".format(num_gpus))
@@ -52,15 +53,33 @@ def main():
             logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))
 
+    if cfg.TEST.CAMERA_MEAN_DEBIAS and cfg.TEST.NECK_FEAT != 'after':
+        raise ValueError("TEST.CAMERA_MEAN_DEBIAS requires TEST.NECK_FEAT to be 'after'.")
+
     if cfg.MODEL.DEVICE == "cuda":
         os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
     cudnn.benchmark = True
 
+    start_time = datetime.now()
     train_loader, val_loader, num_query, num_classes = make_data_loader(cfg)
     model = build_model(cfg, num_classes)
     model.load_param(cfg.TEST.WEIGHT)
 
-    inference(cfg, model, val_loader, num_query)
+    cmc, mAP = inference(cfg, model, val_loader, num_query)
+    end_time = datetime.now()
+    try:
+        experiments_path = record_experiment(
+            cfg,
+            args.config_file,
+            start_time,
+            end_time,
+            cmc=cmc,
+            mAP=mAP,
+            note="auto test record",
+        )
+        logger.info("Experiment record appended to {}".format(experiments_path))
+    except Exception as exc:
+        logger.warning("Failed to append experiment record: {}".format(exc))
 
 
 if __name__ == '__main__':

@@ -157,6 +157,8 @@ _C.TEST.WEIGHT = ""
 _C.TEST.NECK_FEAT = 'after'
 # Whether feature is nomalized before test, if yes, it is equivalent to cosine distance
 _C.TEST.FEAT_NORM = 'yes'
+# Whether subtract per-camera feature mean before distance computation during test
+_C.TEST.CAMERA_MEAN_DEBIAS = False
 
 # ---------------------------------------------------------------------------- #
 # Misc options
