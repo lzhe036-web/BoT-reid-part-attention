@@ -155,6 +155,46 @@ class CameraAwareTripletLoss(object):
         return torch.stack(losses).mean()
 
 
+class CrossCameraPositiveLoss(object):
+    """Pull same-identity cross-camera positives closer without using negatives."""
+
+    def __init__(self, mode='mean'):
+        self.mode = mode
+
+    def __call__(self, features, labels, camids, normalize_feature=False):
+        if normalize_feature:
+            features = normalize(features, axis=-1)
+
+        if self.mode not in ('mean', 'hard'):
+            raise ValueError("CrossCameraPositiveLoss supports mean or hard mode, got {}".format(self.mode))
+
+        dist_mat = euclidean_dist(features, features)
+        labels = labels.view(-1)
+        camids = camids.view(-1)
+        batch_size = labels.size(0)
+
+        same_pid_mask = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+        different_cam_mask = camids.expand(batch_size, batch_size).ne(camids.expand(batch_size, batch_size).t())
+        cross_camera_pos_mask = same_pid_mask & different_cam_mask
+        valid_anchor = cross_camera_pos_mask.any(dim=1)
+
+        if valid_anchor.sum().item() == 0:
+            return features.sum() * 0.0
+
+        positive_distances = []
+        for i in range(batch_size):
+            if not valid_anchor[i]:
+                continue
+            anchor_positive_distances = dist_mat[i][cross_camera_pos_mask[i]]
+            if self.mode == 'mean':
+                cross_camera_positive_loss = anchor_positive_distances.mean()
+            else:
+                cross_camera_positive_loss = anchor_positive_distances.max()
+            positive_distances.append(cross_camera_positive_loss)
+
+        return torch.stack(positive_distances).mean()
+
+
 def count_cross_camera_positives(labels, camids):
     labels = labels.view(-1)
     camids = camids.view(-1)

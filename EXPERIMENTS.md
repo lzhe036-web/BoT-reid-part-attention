@@ -21,3 +21,9 @@
 | 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | CAT001 | 待填写 | 待填写 | exp/camera-aware-triplet-loss | configs/softmax_triplet_camera_aware_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Camera-aware triplet loss, lambda=0.5, margin=0.3, AutoDL |
+
+## Cross-Camera Positive Only Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| CCPO001 | 待填写 | 待填写 | exp/cross-camera-positive-only | configs/softmax_triplet_cross_camera_positive_only_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Cross-camera positive only, no extra hard negative, lambda=0.5, mode=mean, AutoDL |

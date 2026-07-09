@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .triplet_loss import (
     CameraAwareTripletLoss,
     CrossEntropyLabelSmooth,
+    CrossCameraPositiveLoss,
     TripletLoss,
     count_cross_camera_positives,
 )
@@ -28,6 +29,13 @@ def make_loss(cfg, num_classes):    # modified by gu
         print("label smooth on, numclasses:", num_classes)
 
     camera_triplet = None
+    cross_camera_positive = None
+    if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
+        if cfg.MODEL.CAMERA_AWARE_TRIPLET:
+            print("CROSS_CAMERA_POSITIVE_ONLY is enabled; skip CAMERA_AWARE_TRIPLET auxiliary loss.")
+        cross_camera_positive = CrossCameraPositiveLoss(
+            mode=cfg.MODEL.CROSS_CAMERA_POSITIVE_MODE
+        )
     if cfg.MODEL.CAMERA_AWARE_TRIPLET:
         camera_triplet = CameraAwareTripletLoss(
             margin=cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN,
@@ -40,20 +48,27 @@ def make_loss(cfg, num_classes):    # modified by gu
         return F.cross_entropy(score, target)
 
     def with_camera_loss(total_loss, id_loss_value, triplet_loss_value, feat, target, camids):
-        if not cfg.MODEL.CAMERA_AWARE_TRIPLET:
+        if not cfg.MODEL.CAMERA_AWARE_TRIPLET and not cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
             return total_loss
         if camids is None:
-            camera_loss = feat.sum() * 0.0
+            auxiliary_loss = feat.sum() * 0.0
             cross_camera_count = 0
-        else:
-            camera_loss = camera_triplet(feat, target, camids)
+        elif cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
+            auxiliary_loss = cross_camera_positive(feat, target, camids)
             cross_camera_count = count_cross_camera_positives(target, camids)
-        total_loss = total_loss + cfg.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA * camera_loss
+        else:
+            auxiliary_loss = camera_triplet(feat, target, camids)
+            cross_camera_count = count_cross_camera_positives(target, camids)
+        if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
+            total_loss = total_loss + cfg.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA * auxiliary_loss
+        else:
+            total_loss = total_loss + cfg.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA * auxiliary_loss
         return {
             'loss_total': total_loss,
             'loss_id': id_loss_value,
             'loss_triplet': triplet_loss_value,
-            'loss_camera_triplet': camera_loss,
+            'loss_camera_triplet': auxiliary_loss if cfg.MODEL.CAMERA_AWARE_TRIPLET and not cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY else feat.sum() * 0.0,
+            'loss_cross_camera_positive': auxiliary_loss if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY else feat.sum() * 0.0,
             'cross_camera_positive_count': cross_camera_count,
         }
 

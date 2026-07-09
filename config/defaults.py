@@ -51,6 +51,11 @@ _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5
 _C.MODEL.CAMERA_AWARE_TRIPLET_MARGIN = 0.3
 _C.MODEL.CAMERA_AWARE_TRIPLET_MODE = "hard"
+# Enable cross-camera positive-only auxiliary loss. Disabled by default to keep
+# existing experiments unchanged.
+_C.MODEL.CROSS_CAMERA_POSITIVE_ONLY = False
+_C.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA = 0.5
+_C.MODEL.CROSS_CAMERA_POSITIVE_MODE = "mean"
 
 
 # -----------------------------------------------------------------------------

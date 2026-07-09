@@ -18,6 +18,7 @@ from config import cfg
 
 PENDING = "待填写"
 SECTION_TITLE = "## Camera-Aware Triplet Loss Experiments"
+CROSS_CAMERA_POSITIVE_SECTION_TITLE = "## Cross-Camera Positive Only Experiments"
 HEADER = "| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
@@ -131,31 +132,38 @@ def build_row(args):
     return "| " + " | ".join(values) + " |"
 
 
-def ensure_section(content):
-    if SECTION_TITLE in content:
+def select_section_title(args):
+    config_name = os.path.basename(args.config)
+    if args.experiment_id.startswith("CCPO") or "cross_camera_positive_only" in config_name:
+        return CROSS_CAMERA_POSITIVE_SECTION_TITLE
+    return SECTION_TITLE
+
+
+def ensure_section(content, section_title):
+    if section_title in content:
         return content
-    section = "\n\n{}\n\n{}\n{}\n".format(SECTION_TITLE, HEADER, SEPARATOR)
+    section = "\n\n{}\n\n{}\n{}\n".format(section_title, HEADER, SEPARATOR)
     return content.rstrip() + section
 
 
-def update_experiments(row, experiment_id, path="EXPERIMENTS.md"):
+def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md"):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8", errors="ignore") as handle:
             content = handle.read()
     else:
         content = "# Experiments\n"
 
-    content = ensure_section(content)
+    content = ensure_section(content, section_title)
     lines = content.splitlines()
     replaced = False
     section_seen = False
     insert_at = len(lines)
 
     for index, line in enumerate(lines):
-        if line.strip() == SECTION_TITLE:
+        if line.strip() == section_title:
             section_seen = True
             continue
-        if section_seen and line.startswith("## ") and line.strip() != SECTION_TITLE:
+        if section_seen and line.startswith("## ") and line.strip() != section_title:
             insert_at = index
             break
         if section_seen and line.startswith("| {} |".format(experiment_id)):
@@ -187,7 +195,7 @@ def main():
     if args.dry_run or args.mode == "dry-run":
         return
 
-    update_experiments(row, args.experiment_id)
+    update_experiments(row, args.experiment_id, select_section_title(args))
 
 
 if __name__ == "__main__":

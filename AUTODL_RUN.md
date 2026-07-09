@@ -158,3 +158,76 @@ git add EXPERIMENTS.md
 git commit -m "record camera aware triplet experiment result"
 git push
 ```
+
+## Cross-Camera Positive Only
+
+1. Branch:
+
+```bash
+exp/cross-camera-positive-only
+```
+
+2. Experiment meaning:
+
+Only same-pid and different-camid cross-camera positives are used as the extra auxiliary constraint. No extra hard negative mining is used. No extra hard negative weighting is used. The original BoT triplet loss is still kept.
+
+3. Output directory:
+
+```bash
+/root/autodl-tmp/experiments/BoT/cross_camera_positive_only_market1501
+```
+
+4. Training log:
+
+```bash
+/root/autodl-tmp/experiments/BoT/cross_camera_positive_only_market1501/log.txt
+```
+
+5. Checkpoints:
+
+```bash
+/root/autodl-tmp/experiments/BoT/cross_camera_positive_only_market1501/*.pt
+```
+
+6. Automatic experiment record:
+
+```bash
+/root/autodl-tmp/BoT-reid/EXPERIMENTS.md
+```
+
+7. Check required paths before running:
+
+```bash
+ls /root/autodl-tmp/datasets/market1501
+ls /root/autodl-tmp/pretrained
+```
+
+8. Start training:
+
+```bash
+bash scripts/train_cross_camera_positive_only_autodl.sh
+```
+
+9. Run in tmux:
+
+```bash
+tmux new -s ccpo
+cd /root/autodl-tmp/BoT-reid
+bash scripts/train_cross_camera_positive_only_autodl.sh
+```
+
+10. Save the experiment record to GitHub:
+
+After training ends successfully, the script automatically updates:
+
+```bash
+/root/autodl-tmp/BoT-reid/EXPERIMENTS.md
+```
+
+To save the updated experiment record to GitHub, run:
+
+```bash
+git add EXPERIMENTS.md
+git commit -m "record cross camera positive only experiment result"
+git push
+```
