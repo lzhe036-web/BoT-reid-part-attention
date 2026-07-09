@@ -21,3 +21,9 @@
 | 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | CAT001 | 待填写 | 待填写 | exp/camera-aware-triplet-loss | configs/softmax_triplet_camera_aware_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Camera-aware triplet loss, lambda=0.5, margin=0.3, AutoDL |
+
+## Hierarchical Camera-Aware Loss Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| HCAL001 | 待填写 | 待填写 | exp/hierarchical-camera-aware-loss | configs/softmax_triplet_hierarchical_camera_aware_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Hierarchical camera-aware triplet loss, weighted negatives, lambda=0.5, margin=0.3, AutoDL |

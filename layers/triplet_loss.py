@@ -155,6 +155,60 @@ class CameraAwareTripletLoss(object):
         return torch.stack(losses).mean()
 
 
+class HierarchicalCameraAwareTripletLoss(object):
+    """Camera-aware triplet loss with anchor difficulty and weighted negatives."""
+
+    def __init__(self, margin=0.3, negative_temperature=0.1,
+                 easy_weight=0.5, boundary_weight=1.0, hard_weight=1.5):
+        self.margin = margin
+        self.negative_temperature = negative_temperature
+        self.easy_weight = easy_weight
+        self.boundary_weight = boundary_weight
+        self.hard_weight = hard_weight
+
+    def __call__(self, features, labels, camids, normalize_feature=False):
+        if normalize_feature:
+            features = normalize(features, axis=-1)
+
+        dist_mat = euclidean_dist(features, features)
+        labels = labels.view(-1)
+        camids = camids.view(-1)
+        batch_size = labels.size(0)
+
+        is_pos = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+        is_cross_camera = camids.expand(batch_size, batch_size).ne(camids.expand(batch_size, batch_size).t())
+        is_valid_pos = is_pos & is_cross_camera
+        is_neg = labels.expand(batch_size, batch_size).ne(labels.expand(batch_size, batch_size).t())
+
+        valid_anchor = is_valid_pos.any(dim=1) & is_neg.any(dim=1)
+        if valid_anchor.sum().item() == 0:
+            return features.sum() * 0.0
+
+        losses = []
+        temperature = max(float(self.negative_temperature), 1e-12)
+        for i in range(batch_size):
+            if not valid_anchor[i]:
+                continue
+
+            dist_ap = dist_mat[i][is_valid_pos[i]].max()
+            neg_dists = dist_mat[i][is_neg[i]]
+            neg_weights = torch.softmax(-neg_dists / temperature, dim=0)
+            weighted_dist_an = (neg_weights * neg_dists).sum()
+
+            violation = dist_ap - weighted_dist_an + self.margin
+            violation_value = violation.item()
+            if violation_value <= 0:
+                anchor_weight = self.easy_weight
+            elif violation_value <= self.margin:
+                anchor_weight = self.boundary_weight
+            else:
+                anchor_weight = self.hard_weight
+
+            losses.append(anchor_weight * torch.clamp(violation, min=0.0))
+
+        return torch.stack(losses).mean()
+
+
 def count_cross_camera_positives(labels, camids):
     labels = labels.view(-1)
     camids = camids.view(-1)

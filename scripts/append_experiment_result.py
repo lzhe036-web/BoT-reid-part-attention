@@ -131,31 +131,31 @@ def build_row(args):
     return "| " + " | ".join(values) + " |"
 
 
-def ensure_section(content):
-    if SECTION_TITLE in content:
+def ensure_section(content, section_title):
+    if section_title in content:
         return content
-    section = "\n\n{}\n\n{}\n{}\n".format(SECTION_TITLE, HEADER, SEPARATOR)
+    section = "\n\n{}\n\n{}\n{}\n".format(section_title, HEADER, SEPARATOR)
     return content.rstrip() + section
 
 
-def update_experiments(row, experiment_id, path="EXPERIMENTS.md"):
+def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md"):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8", errors="ignore") as handle:
             content = handle.read()
     else:
         content = "# Experiments\n"
 
-    content = ensure_section(content)
+    content = ensure_section(content, section_title)
     lines = content.splitlines()
     replaced = False
     section_seen = False
     insert_at = len(lines)
 
     for index, line in enumerate(lines):
-        if line.strip() == SECTION_TITLE:
+        if line.strip() == section_title:
             section_seen = True
             continue
-        if section_seen and line.startswith("## ") and line.strip() != SECTION_TITLE:
+        if section_seen and line.startswith("## ") and line.strip() != section_title:
             insert_at = index
             break
         if section_seen and line.startswith("| {} |".format(experiment_id)):
@@ -177,6 +177,7 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--note", default="")
+    parser.add_argument("--section-title", default=SECTION_TITLE)
     parser.add_argument("--mode", choices=["dry-run", "update"], default="dry-run")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -187,7 +188,7 @@ def main():
     if args.dry_run or args.mode == "dry-run":
         return
 
-    update_experiments(row, args.experiment_id)
+    update_experiments(row, args.experiment_id, args.section_title)
 
 
 if __name__ == "__main__":

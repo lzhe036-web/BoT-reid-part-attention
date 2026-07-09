@@ -158,3 +158,97 @@ git add EXPERIMENTS.md
 git commit -m "record camera aware triplet experiment result"
 git push
 ```
+
+## Hierarchical Camera-Aware Loss
+
+1. Branch:
+
+```bash
+exp/hierarchical-camera-aware-loss
+```
+
+2. Output locations:
+
+Training results:
+
+```bash
+/root/autodl-tmp/experiments/BoT/hierarchical_camera_aware_market1501
+```
+
+Training log:
+
+```bash
+/root/autodl-tmp/experiments/BoT/hierarchical_camera_aware_market1501/log.txt
+```
+
+Model checkpoints:
+
+```bash
+/root/autodl-tmp/experiments/BoT/hierarchical_camera_aware_market1501/*.pt
+```
+
+Automatic experiment record:
+
+```bash
+/root/autodl-tmp/BoT-reid/EXPERIMENTS.md
+```
+
+3. Check required paths before running:
+
+```bash
+ls /root/autodl-tmp/datasets/market1501
+ls /root/autodl-tmp/pretrained
+```
+
+4. Record basic information before training:
+
+```bash
+bash scripts/record_experiment_info.sh configs/softmax_triplet_hierarchical_camera_aware_autodl.yml
+```
+
+5. Start training:
+
+```bash
+bash scripts/train_hierarchical_camera_aware_autodl.sh
+```
+
+The script runs training first. If training succeeds, it automatically updates:
+
+```bash
+/root/autodl-tmp/BoT-reid/EXPERIMENTS.md
+```
+
+If training fails, `EXPERIMENTS.md` is not updated.
+
+6. Run in tmux:
+
+```bash
+tmux new -s hcal
+cd /root/autodl-tmp/BoT-reid
+bash scripts/train_hierarchical_camera_aware_autodl.sh
+```
+
+7. View Rank-1 and mAP:
+
+```bash
+grep -i "mAP" /root/autodl-tmp/experiments/BoT/hierarchical_camera_aware_market1501/log.txt
+grep -i "Rank" /root/autodl-tmp/experiments/BoT/hierarchical_camera_aware_market1501/log.txt
+```
+
+8. Manually update experiment results, if needed:
+
+```bash
+python scripts/append_experiment_result.py --config configs/softmax_triplet_hierarchical_camera_aware_autodl.yml --experiment-id HCAL001 --section-title "## Hierarchical Camera-Aware Loss Experiments" --note "Hierarchical camera-aware triplet loss, weighted negatives, lambda=0.5, margin=0.3, AutoDL" --dry-run
+```
+
+After confirming the dry-run output, remove `--dry-run` and use `--mode update`.
+
+9. Save the experiment record to GitHub:
+
+The training script does not run `git commit` or `git push`. To save the updated experiment record to GitHub, run:
+
+```bash
+git add EXPERIMENTS.md
+git commit -m "record hierarchical camera aware experiment result"
+git push
+```

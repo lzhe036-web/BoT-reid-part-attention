@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from .triplet_loss import (
     CameraAwareTripletLoss,
     CrossEntropyLabelSmooth,
+    HierarchicalCameraAwareTripletLoss,
     TripletLoss,
     count_cross_camera_positives,
 )
@@ -29,10 +30,19 @@ def make_loss(cfg, num_classes):    # modified by gu
 
     camera_triplet = None
     if cfg.MODEL.CAMERA_AWARE_TRIPLET:
-        camera_triplet = CameraAwareTripletLoss(
-            margin=cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN,
-            mode=cfg.MODEL.CAMERA_AWARE_TRIPLET_MODE
-        )
+        if cfg.MODEL.HIERARCHICAL_CAMERA_AWARE_TRIPLET:
+            camera_triplet = HierarchicalCameraAwareTripletLoss(
+                margin=cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN,
+                negative_temperature=cfg.MODEL.HIERARCHICAL_CAMERA_AWARE_NEGATIVE_TEMPERATURE,
+                easy_weight=cfg.MODEL.HIERARCHICAL_CAMERA_AWARE_EASY_WEIGHT,
+                boundary_weight=cfg.MODEL.HIERARCHICAL_CAMERA_AWARE_BOUNDARY_WEIGHT,
+                hard_weight=cfg.MODEL.HIERARCHICAL_CAMERA_AWARE_HARD_WEIGHT
+            )
+        else:
+            camera_triplet = CameraAwareTripletLoss(
+                margin=cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN,
+                mode=cfg.MODEL.CAMERA_AWARE_TRIPLET_MODE
+            )
 
     def id_loss(score, target):
         if cfg.MODEL.IF_LABELSMOOTH == 'on':
