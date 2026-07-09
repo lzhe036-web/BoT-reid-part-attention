@@ -17,6 +17,36 @@ from utils.reid_metric import R1_mAP
 global ITER
 ITER = 0
 
+
+def _unpack_train_batch(batch):
+    if len(batch) == 3:
+        img, target, camids = batch
+    else:
+        img, target = batch
+        camids = None
+    return img, target, camids
+
+
+def _loss_output_to_dict(loss_output):
+    if isinstance(loss_output, dict):
+        loss = loss_output['loss_total']
+        return loss, loss_output
+
+    return loss_output, {
+        'loss_total': loss_output,
+        'loss_id': loss_output,
+        'loss_triplet': loss_output.new_tensor(0.0),
+        'loss_camera_triplet': loss_output.new_tensor(0.0),
+        'cross_camera_positive_count': 0,
+    }
+
+
+def _item(value):
+    if torch.is_tensor(value):
+        return value.item()
+    return value
+
+
 def create_supervised_trainer(model, optimizer, loss_fn,
                               device=None):
     """
@@ -40,16 +70,25 @@ def create_supervised_trainer(model, optimizer, loss_fn,
     def _update(engine, batch):
         model.train()
         optimizer.zero_grad()
-        img, target = batch
+        img, target, camids = _unpack_train_batch(batch)
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
+        camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
         score, feat = model(img)
-        loss = loss_fn(score, feat, target)
+        loss_output = loss_fn(score, feat, target, camids)
+        loss, loss_dict = _loss_output_to_dict(loss_output)
         loss.backward()
         optimizer.step()
         # compute acc
         acc = (score.max(1)[1] == target).float().mean()
-        return loss.item(), acc.item()
+        return {
+            'loss_total': _item(loss_dict['loss_total']),
+            'loss_id': _item(loss_dict['loss_id']),
+            'loss_triplet': _item(loss_dict['loss_triplet']),
+            'loss_camera_triplet': _item(loss_dict['loss_camera_triplet']),
+            'cross_camera_positive_count': loss_dict['cross_camera_positive_count'],
+            'acc': acc.item(),
+        }
 
     return Engine(_update)
 
@@ -78,11 +117,13 @@ def create_supervised_trainer_with_center(model, center_criterion, optimizer, op
         model.train()
         optimizer.zero_grad()
         optimizer_center.zero_grad()
-        img, target = batch
+        img, target, camids = _unpack_train_batch(batch)
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
+        camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
         score, feat = model(img)
-        loss = loss_fn(score, feat, target)
+        loss_output = loss_fn(score, feat, target, camids)
+        loss, loss_dict = _loss_output_to_dict(loss_output)
         # print("Total loss is {}, center loss is {}".format(loss, center_criterion(feat, target)))
         loss.backward()
         optimizer.step()
@@ -92,7 +133,14 @@ def create_supervised_trainer_with_center(model, center_criterion, optimizer, op
 
         # compute acc
         acc = (score.max(1)[1] == target).float().mean()
-        return loss.item(), acc.item()
+        return {
+            'loss_total': _item(loss_dict['loss_total']),
+            'loss_id': _item(loss_dict['loss_id']),
+            'loss_triplet': _item(loss_dict['loss_triplet']),
+            'loss_camera_triplet': _item(loss_dict['loss_camera_triplet']),
+            'cross_camera_positive_count': loss_dict['cross_camera_positive_count'],
+            'acc': acc.item(),
+        }
 
     return Engine(_update)
 
@@ -170,8 +218,12 @@ def do_train(
                  pause=Events.ITERATION_COMPLETED, step=Events.ITERATION_COMPLETED)
 
     # average metric to attach on trainer
-    RunningAverage(output_transform=lambda x: x[0]).attach(trainer, 'avg_loss')
-    RunningAverage(output_transform=lambda x: x[1]).attach(trainer, 'avg_acc')
+    RunningAverage(output_transform=lambda x: x['loss_total']).attach(trainer, 'avg_loss')
+    RunningAverage(output_transform=lambda x: x['loss_id']).attach(trainer, 'avg_loss_id')
+    RunningAverage(output_transform=lambda x: x['loss_triplet']).attach(trainer, 'avg_loss_triplet')
+    RunningAverage(output_transform=lambda x: x['loss_camera_triplet']).attach(trainer, 'avg_loss_camera_triplet')
+    RunningAverage(output_transform=lambda x: x['cross_camera_positive_count']).attach(trainer, 'avg_cross_camera_positive_count')
+    RunningAverage(output_transform=lambda x: x['acc']).attach(trainer, 'avg_acc')
 
     @trainer.on(Events.STARTED)
     def start_training(engine):
@@ -187,10 +239,18 @@ def do_train(
         ITER += 1
 
         if ITER % log_period == 0:
-            logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
+            logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                        "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                        "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
                         .format(engine.state.epoch, ITER, len(train_loader),
-                                engine.state.metrics['avg_loss'], engine.state.metrics['avg_acc'],
+                                engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
+                                engine.state.metrics['avg_loss_triplet'],
+                                engine.state.metrics['avg_loss_camera_triplet'],
+                                engine.state.metrics['avg_cross_camera_positive_count'],
+                                engine.state.metrics['avg_acc'],
                                 scheduler.get_lr()[0]))
+            if cfg.MODEL.CAMERA_AWARE_TRIPLET and engine.state.output['cross_camera_positive_count'] == 0:
+                logger.info("No cross-camera positive anchors in current batch; camera-aware triplet loss is skipped.")
         if len(train_loader) == ITER:
             ITER = 0
 
@@ -262,8 +322,12 @@ def do_train_with_center(
                  pause=Events.ITERATION_COMPLETED, step=Events.ITERATION_COMPLETED)
 
     # average metric to attach on trainer
-    RunningAverage(output_transform=lambda x: x[0]).attach(trainer, 'avg_loss')
-    RunningAverage(output_transform=lambda x: x[1]).attach(trainer, 'avg_acc')
+    RunningAverage(output_transform=lambda x: x['loss_total']).attach(trainer, 'avg_loss')
+    RunningAverage(output_transform=lambda x: x['loss_id']).attach(trainer, 'avg_loss_id')
+    RunningAverage(output_transform=lambda x: x['loss_triplet']).attach(trainer, 'avg_loss_triplet')
+    RunningAverage(output_transform=lambda x: x['loss_camera_triplet']).attach(trainer, 'avg_loss_camera_triplet')
+    RunningAverage(output_transform=lambda x: x['cross_camera_positive_count']).attach(trainer, 'avg_cross_camera_positive_count')
+    RunningAverage(output_transform=lambda x: x['acc']).attach(trainer, 'avg_acc')
 
     @trainer.on(Events.STARTED)
     def start_training(engine):
@@ -279,10 +343,18 @@ def do_train_with_center(
         ITER += 1
 
         if ITER % log_period == 0:
-            logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
+            logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                        "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                        "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
                         .format(engine.state.epoch, ITER, len(train_loader),
-                                engine.state.metrics['avg_loss'], engine.state.metrics['avg_acc'],
+                                engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
+                                engine.state.metrics['avg_loss_triplet'],
+                                engine.state.metrics['avg_loss_camera_triplet'],
+                                engine.state.metrics['avg_cross_camera_positive_count'],
+                                engine.state.metrics['avg_acc'],
                                 scheduler.get_lr()[0]))
+            if cfg.MODEL.CAMERA_AWARE_TRIPLET and engine.state.output['cross_camera_positive_count'] == 0:
+                logger.info("No cross-camera positive anchors in current batch; camera-aware triplet loss is skipped.")
         if len(train_loader) == ITER:
             ITER = 0
 

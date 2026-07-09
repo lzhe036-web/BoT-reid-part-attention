@@ -115,6 +115,55 @@ class TripletLoss(object):
             loss = self.ranking_loss(dist_an - dist_ap, y)
         return loss, dist_ap, dist_an
 
+
+class CameraAwareTripletLoss(object):
+    """Triplet loss that uses cross-camera positives for each anchor."""
+
+    def __init__(self, margin=0.3, mode='hard'):
+        self.margin = margin
+        self.mode = mode
+
+    def __call__(self, features, labels, camids, normalize_feature=False):
+        if normalize_feature:
+            features = normalize(features, axis=-1)
+
+        if self.mode != 'hard':
+            raise ValueError("CameraAwareTripletLoss only supports hard mode, got {}".format(self.mode))
+
+        dist_mat = euclidean_dist(features, features)
+        labels = labels.view(-1)
+        camids = camids.view(-1)
+        batch_size = labels.size(0)
+
+        is_pos = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+        is_cross_camera = camids.expand(batch_size, batch_size).ne(camids.expand(batch_size, batch_size).t())
+        is_valid_pos = is_pos & is_cross_camera
+        is_neg = labels.expand(batch_size, batch_size).ne(labels.expand(batch_size, batch_size).t())
+
+        valid_anchor = is_valid_pos.any(dim=1) & is_neg.any(dim=1)
+        if valid_anchor.sum().item() == 0:
+            return features.sum() * 0.0
+
+        losses = []
+        for i in range(batch_size):
+            if not valid_anchor[i]:
+                continue
+            dist_ap = dist_mat[i][is_valid_pos[i]].max()
+            dist_an = dist_mat[i][is_neg[i]].min()
+            losses.append(torch.clamp(dist_ap - dist_an + self.margin, min=0.0))
+
+        return torch.stack(losses).mean()
+
+
+def count_cross_camera_positives(labels, camids):
+    labels = labels.view(-1)
+    camids = camids.view(-1)
+    batch_size = labels.size(0)
+    is_pos = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+    is_cross_camera = camids.expand(batch_size, batch_size).ne(camids.expand(batch_size, batch_size).t())
+    return int((is_pos & is_cross_camera).any(dim=1).sum().item())
+
+
 class CrossEntropyLabelSmooth(nn.Module):
     """Cross entropy loss with label smoothing regularizer.
 

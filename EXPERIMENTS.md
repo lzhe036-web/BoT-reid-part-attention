@@ -15,3 +15,9 @@
 7. best epoch：从训练日志中查看最佳 Rank-1/mAP 对应 epoch。
 8. Rank-1 和 mAP：从测试/评估输出中填写。
 9. 备注：记录是否使用 Part Attention、K 值、是否 reranking、是否修改 batch size 等。
+
+## Camera-Aware Triplet Loss Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| CAT001 | 待填写 | 待填写 | exp/camera-aware-triplet-loss | configs/softmax_triplet_camera_aware_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Camera-aware triplet loss, lambda=0.5, margin=0.3, AutoDL |

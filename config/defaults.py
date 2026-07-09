@@ -46,6 +46,11 @@ _C.MODEL.IF_LABELSMOOTH = 'on'
 _C.MODEL.PART_ATTENTION = False
 # Number of horizontal parts for part-aware attention
 _C.MODEL.PART_ATTENTION_PARTS = 6
+# Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
+_C.MODEL.CAMERA_AWARE_TRIPLET = False
+_C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5
+_C.MODEL.CAMERA_AWARE_TRIPLET_MARGIN = 0.3
+_C.MODEL.CAMERA_AWARE_TRIPLET_MODE = "hard"
 
 
 # -----------------------------------------------------------------------------
