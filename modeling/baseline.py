@@ -221,10 +221,28 @@ class Baseline(nn.Module):
             param_dict = param_dict['model']
 
         model_state = self.state_dict()
+        loaded_keys = []
+        skipped_keys = []
+
         for i in param_dict:
             key = i
             if key.startswith('module.'):
                 key = key[7:]
-            if key in model_state:
-                model_state[key].copy_(param_dict[i])
+
+            if key not in model_state:
+                skipped_keys.append((key, 'missing in current model'))
+                continue
+
+            if model_state[key].shape != param_dict[i].shape:
+                skipped_keys.append((key, f'shape mismatch: current {tuple(model_state[key].shape)} vs checkpoint {tuple(param_dict[i].shape)}'))
+                continue
+
+            model_state[key].copy_(param_dict[i])
+            loaded_keys.append(key)
+
+        print('Loaded {} parameters from {}'.format(len(loaded_keys), trained_path))
+        if skipped_keys:
+            print('Skipped {} parameters when loading checkpoint:'.format(len(skipped_keys)))
+            for key, reason in skipped_keys[:20]:
+                print('  - {}: {}'.format(key, reason))
 
