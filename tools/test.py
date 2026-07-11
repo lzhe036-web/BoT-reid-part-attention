@@ -67,19 +67,22 @@ def main():
 
     cmc, mAP = inference(cfg, model, val_loader, num_query)
     end_time = datetime.now()
-    try:
-        experiments_path = record_experiment(
-            cfg,
-            args.config_file,
-            start_time,
-            end_time,
-            cmc=cmc,
-            mAP=mAP,
-            note="auto test record",
-        )
-        logger.info("Experiment record appended to {}".format(experiments_path))
-    except Exception as exc:
-        logger.warning("Failed to append experiment record: {}".format(exc))
+    if cfg.TEST.AUTO_RECORD:
+        try:
+            experiments_path = record_experiment(
+                cfg,
+                args.config_file,
+                start_time,
+                end_time,
+                cmc=cmc,
+                mAP=mAP,
+                note="auto test record",
+            )
+            logger.info("Experiment record appended to {}".format(experiments_path))
+        except Exception as exc:
+            logger.warning("Failed to append experiment record: {}".format(exc))
+    else:
+        logger.info("Generic Auto Test Records disabled by TEST.AUTO_RECORD=False")
 
 
 if __name__ == '__main__':

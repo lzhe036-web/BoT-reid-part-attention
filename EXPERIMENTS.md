@@ -16,3 +16,12 @@
 7. best epoch：从训练日志中查看最佳 Rank-1/mAP 对应 epoch。
 8. Rank-1 和 mAP：从测试/评估输出中填写。
 9. 备注：记录是否使用 Part Attention、K 值、是否 reranking、是否修改 batch size 等。
+
+## Camera Bias Debias Validation Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | 训练集 | 测试集 | checkpoint | camera debias | config 文件 | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| D1-Market-Debias-Off | 待填写 | 待填写 | exp-bnneck-camera-debias | Market1501 | Market1501 | 待填写 | False | configs/test_market1501_debias_off_autodl.yml | 待填写 | 待填写 | D1 同域基线；统计协议为 joint query-gallery camera mean debias |
+| D1-Market-Debias-On | 待填写 | 待填写 | exp-bnneck-camera-debias | Market1501 | Market1501 | 待填写 | True | configs/test_market1501_debias_on_autodl.yml | 待填写 | 待填写 | D1 同域去偏；joint query-gallery camera mean debias |
+| D2-Duke2Market-Debias-Off | 待填写 | 待填写 | exp-bnneck-camera-debias | DukeMTMC-reID | Market1501 | 待填写 | False | configs/test_duke2market_debias_off_autodl.yml | 待填写 | 待填写 | D2 跨域基线；统计协议为 joint query-gallery camera mean debias |
+| D2-Duke2Market-Debias-On | 待填写 | 待填写 | exp-bnneck-camera-debias | DukeMTMC-reID | Market1501 | 待填写 | True | configs/test_duke2market_debias_on_autodl.yml | 待填写 | 待填写 | D2 跨域去偏；joint query-gallery camera mean debias |

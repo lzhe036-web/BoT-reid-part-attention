@@ -220,3 +220,22 @@ python3 tools/test.py --config_file='configs/softmax_triplet_with_center.yml' MO
 python3 tools/test.py --config_file='configs/softmax_triplet_with_center.yml' MODEL.DEVICE_ID "('your device id')" DATASETS.NAMES "('dukemtmc')" TEST.NECK_FEAT "('after')" TEST.FEAT_NORM "('yes')" MODEL.PRETRAIN_CHOICE "('self')" TEST.RE_RANKING "('yes')" TEST.WEIGHT "('your path to trained checkpoints')"
 ```
 
+## exp-bnneck-camera-debias
+
+该分支用于 Camera bias debias validation：
+
+1. 验证 camera bias 是否存在。
+2. 使用测试期 BNNeck 后特征进行 camera mean debias。
+3. 当前统计协议为 **joint query-gallery camera mean**：query 与 gallery 合并后按 `camid` 计算均值。
+4. 不修改训练 loss。
+5. 不修改模型结构。
+6. D1 是 Market1501 → Market1501。
+7. D2 是 DukeMTMC-reID → Market1501；D2 测试集必须是 Market1501。
+8. D1 判断同域性能是否持平或小涨。
+9. D2 判断跨域性能是否明显改善。
+10. D1/D2 测试脚本会按实验编号自动更新 `EXPERIMENTS.md`。
+
+D1/D2 配置关闭 `tools/test.py` 的通用 `Auto Test Records`，仅更新 `Camera Bias Debias Validation Experiments` 专用表格，避免重复记录；其他实验仍默认启用通用自动记录。
+
+AutoDL 配置、checkpoint 变量和运行命令见 `AUTODL_RUN.md`。
+

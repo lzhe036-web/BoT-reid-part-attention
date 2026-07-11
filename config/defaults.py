@@ -159,6 +159,8 @@ _C.TEST.NECK_FEAT = 'after'
 _C.TEST.FEAT_NORM = 'yes'
 # Whether subtract per-camera feature mean before distance computation during test
 _C.TEST.CAMERA_MEAN_DEBIAS = False
+# Whether tools/test.py appends a generic row to Auto Test Records
+_C.TEST.AUTO_RECORD = True
 
 # ---------------------------------------------------------------------------- #
 # Misc options

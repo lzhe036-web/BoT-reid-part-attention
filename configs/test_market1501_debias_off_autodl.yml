@@ -1,0 +1,18 @@
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PART_ATTENTION: True
+  PART_ATTENTION_PARTS: 6
+
+DATASETS:
+  NAMES: "market1501"
+  ROOT_DIR: "/root/autodl-tmp/datasets"
+
+TEST:
+  RE_RANKING: 'no'
+  WEIGHT: "path"
+  NECK_FEAT: "after"
+  FEAT_NORM: 'yes'
+  CAMERA_MEAN_DEBIAS: False
+  AUTO_RECORD: False
+
+OUTPUT_DIR: "/root/autodl-tmp/experiments/BoT/camera_bias_d1_market_debias_off"

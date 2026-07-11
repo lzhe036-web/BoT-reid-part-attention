@@ -1,0 +1,20 @@
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  # Match the default Duke baseline checkpoint path used by the D2 script.
+  PART_ATTENTION: False
+  PART_ATTENTION_PARTS: 6
+
+DATASETS:
+  # D2 evaluates a Duke-trained checkpoint on Market1501.
+  NAMES: "market1501"
+  ROOT_DIR: "/root/autodl-tmp/datasets"
+
+TEST:
+  RE_RANKING: 'no'
+  WEIGHT: "path"
+  NECK_FEAT: "after"
+  FEAT_NORM: 'yes'
+  CAMERA_MEAN_DEBIAS: True
+  AUTO_RECORD: False
+
+OUTPUT_DIR: "/root/autodl-tmp/experiments/BoT/camera_bias_d2_duke2market_debias_on"
