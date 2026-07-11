@@ -212,8 +212,19 @@ class Baseline(nn.Module):
                 return global_feat
 
     def load_param(self, trained_path):
-        param_dict = torch.load(trained_path)
+        param_dict = torch.load(trained_path, map_location='cpu')
+
+        # Compatible with both raw state_dict and wrapped checkpoints:
+        # raw: {parameter_name: tensor}
+        # wrapped: {'model': state_dict, ...}
+        if isinstance(param_dict, dict) and 'model' in param_dict:
+            param_dict = param_dict['model']
+
+        model_state = self.state_dict()
         for i in param_dict:
-            if 'classifier' in i:
-                continue
-            self.state_dict()[i].copy_(param_dict[i])
+            key = i
+            if key.startswith('module.'):
+                key = key[7:]
+            if key in model_state:
+                model_state[key].copy_(param_dict[i])
+
