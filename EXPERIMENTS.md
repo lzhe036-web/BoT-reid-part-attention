@@ -26,7 +26,7 @@
 
 | 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | lambda | margin | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| CAT-L01 | 待填写 | 待填写 | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda01_autodl.yml | 待填写 | 待填写 | Market1501 | 0.1 | 0.3 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + L_camera_triplet, camera-aware hard triplet |
-| CAT-L03 | 待填写 | 待填写 | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda03_autodl.yml | 待填写 | 待填写 | Market1501 | 0.3 | 0.3 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + L_camera_triplet, camera-aware hard triplet |
-| CAT-L05 | 待填写 | 待填写 | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda05_autodl.yml | 待填写 | 待填写 | Market1501 | 0.5 | 0.3 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + L_camera_triplet, camera-aware hard triplet |
-| CAT-L10 | 待填写 | 待填写 | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda10_autodl.yml | 待填写 | 待填写 | Market1501 | 1.0 | 0.3 | 待填写 | 待填写 | 待填写 | 待填写 | BoT + L_camera_triplet, camera-aware hard triplet |
+| CAT-L01 | 2026-07-11 | 61da0df | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda01_autodl.yml | 待填写 | NVIDIA GeForce RTX 4080 | Market1501 | 0.1 | 0.3 | 待填写 | 120 | 94.2% | 85.5% | BoT + L_camera_triplet, lambda=0.1, camera-aware hard triplet, AutoDL |
+| CAT-L03 | 2026-07-11 | 61da0df | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda03_autodl.yml | 待填写 | NVIDIA GeForce RTX 4080 | Market1501 | 0.3 | 0.3 | 待填写 | 120 | 94.2% | 85.5% | BoT + L_camera_triplet, lambda=0.3, camera-aware hard triplet, AutoDL |
+| CAT-L05 | 2026-07-11 | 61da0df | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda05_autodl.yml | 待填写 | NVIDIA GeForce RTX 4080 | Market1501 | 0.5 | 0.3 | 待填写 | 120 | 94.2% | 85.4% | BoT + L_camera_triplet, lambda=0.5, camera-aware hard triplet, AutoDL |
+| CAT-L10 | 2026-07-11 | 61da0df | exp/camera-aware-triplet-lambda-sensitivity | configs/softmax_triplet_camera_aware_lambda10_autodl.yml | 待填写 | NVIDIA GeForce RTX 4080 | Market1501 | 1.0 | 0.3 | 待填写 | 120 | 94.1% | 84.8% | BoT + L_camera_triplet, lambda=1.0, camera-aware hard triplet, AutoDL |
