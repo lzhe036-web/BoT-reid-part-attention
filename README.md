@@ -1,5 +1,9 @@
 # Bag of Tricks and A Strong ReID Baseline
 
+## Camera-Aware Triplet Lambda Sensitivity Branch
+
+`exp/camera-aware-triplet-lambda-sensitivity` is for the lambda sensitivity study of the BoT + L_camera_triplet main experiment. It only changes `MODEL.CAMERA_AWARE_TRIPLET_LAMBDA` across 0.1, 0.3, 0.5, and 1.0. It keeps `CAMERA_AWARE_TRIPLET=True`, `CAMERA_AWARE_TRIPLET_MARGIN=0.3`, and the core `CameraAwareTripletLoss` logic unchanged. L_camera_triplet continues to use cross-camera positives and hard negative mining. This is not a cross-camera-positive-only experiment and does not modify `CROSS_CAMERA_POSITIVE_LAMBDA`. Each run has an independent config, `OUTPUT_DIR`, and experiment ID, and successful training automatically updates `EXPERIMENTS.md`.
+
 Bag of Tricks and A Strong Baseline for Deep Person Re-identification. CVPRW2019, Oral.
 
 A Strong Baseline and Batch Normalization Neck for Deep Person Re-identification. IEEE Transactions on Multimedia (Accepted).

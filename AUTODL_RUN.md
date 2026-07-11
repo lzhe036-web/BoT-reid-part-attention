@@ -158,3 +158,76 @@ git add EXPERIMENTS.md
 git commit -m "record camera aware triplet experiment result"
 git push
 ```
+
+## Camera-Aware Triplet Lambda Sensitivity
+
+1. Branch: `exp/camera-aware-triplet-lambda-sensitivity`.
+
+2. Only `CAMERA_AWARE_TRIPLET_LAMBDA` is adjusted on top of BoT + L_camera_triplet. L_camera_triplet uses cross-camera positives and hard negative mining. No hierarchical difficulty, hard negative weighting, pseudo labels, memory bank, or HNIE is added. This is not a cross-camera-positive-only experiment.
+
+3. Configs:
+
+- `configs/softmax_triplet_camera_aware_lambda01_autodl.yml`
+- `configs/softmax_triplet_camera_aware_lambda03_autodl.yml`
+- `configs/softmax_triplet_camera_aware_lambda05_autodl.yml`
+- `configs/softmax_triplet_camera_aware_lambda10_autodl.yml`
+
+4. Output directories:
+
+- `/root/autodl-tmp/experiments/BoT/camera_aware_triplet_lambda01_market1501`
+- `/root/autodl-tmp/experiments/BoT/camera_aware_triplet_lambda03_market1501`
+- `/root/autodl-tmp/experiments/BoT/camera_aware_triplet_lambda05_market1501`
+- `/root/autodl-tmp/experiments/BoT/camera_aware_triplet_lambda10_market1501`
+
+5. These independent directories do not overwrite the existing `camera_aware_triplet_market1501`, `cross_camera_positive_only_market1501`, `normalized_weighted_loss_market1501`, `softmax_triplet_part_attention_k6_tau01_market1501`, or `softmax_triplet_part_attention_k6_tau02_market1501` directories under `/root/autodl-tmp/experiments/BoT/`.
+
+6. Recommended AutoDL clone directory:
+
+```bash
+cd /root/autodl-tmp
+git clone -b exp/camera-aware-triplet-lambda-sensitivity https://github.com/lzhe036-web/BoT-reid-part-attention.git BoT-reid-cat-lambda
+cd /root/autodl-tmp/BoT-reid-cat-lambda
+```
+
+7. Dataset path: `/root/autodl-tmp/datasets/market1501`. If the actual directory is `data`:
+
+```bash
+cd /root/autodl-tmp
+rm -f datasets
+ln -s data datasets
+```
+
+8. Pretrained weight: `/root/autodl-tmp/pretrained/resnet50-19c8e357.pth`.
+
+9. Individual runs:
+
+```bash
+bash scripts/train_camera_aware_triplet_lambda01_autodl.sh
+bash scripts/train_camera_aware_triplet_lambda03_autodl.sh
+bash scripts/train_camera_aware_triplet_lambda05_autodl.sh
+bash scripts/train_camera_aware_triplet_lambda10_autodl.sh
+```
+
+10. Sequential run:
+
+```bash
+bash scripts/train_camera_aware_triplet_lambda_sensitivity_autodl.sh
+```
+
+11. nohup example and log:
+
+```bash
+cd /root/autodl-tmp/BoT-reid-cat-lambda
+nohup bash scripts/train_camera_aware_triplet_lambda_sensitivity_autodl.sh > cat_lambda_sensitivity.out 2>&1 &
+tail -f cat_lambda_sensitivity.out
+```
+
+12. Each successful run automatically updates `/root/autodl-tmp/BoT-reid-cat-lambda/EXPERIMENTS.md`.
+
+13. Save completed records to GitHub manually:
+
+```bash
+git add EXPERIMENTS.md
+git commit -m "record camera aware triplet lambda sensitivity results"
+git push
+```

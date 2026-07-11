@@ -18,8 +18,11 @@ from config import cfg
 
 PENDING = "待填写"
 SECTION_TITLE = "## Camera-Aware Triplet Loss Experiments"
+LAMBDA_SECTION_TITLE = "## Camera-Aware Triplet Lambda Sensitivity Experiments"
 HEADER = "| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+LAMBDA_HEADER = "| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | lambda | margin | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
+LAMBDA_SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 def run_command(command):
@@ -122,40 +125,57 @@ def build_row(args):
         config_info["seed"],
         get_gpu_name(),
         config_info["dataset"],
+    ]
+    if args.experiment_id.startswith("CAT-L"):
+        local_cfg = cfg.clone()
+        local_cfg.merge_from_file(args.config)
+        values.extend([
+            str(local_cfg.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA),
+            str(local_cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN),
+        ])
+    values.extend([
         metrics["runtime"],
         metrics["best_epoch"],
         metrics["rank1"],
         metrics["map"],
         args.note,
-    ]
+    ])
     return "| " + " | ".join(values) + " |"
 
 
-def ensure_section(content):
-    if SECTION_TITLE in content:
+def select_section_title(experiment_id):
+    if experiment_id.startswith("CAT-L"):
+        return LAMBDA_SECTION_TITLE
+    return SECTION_TITLE
+
+
+def ensure_section(content, section_title):
+    if section_title in content:
         return content
-    section = "\n\n{}\n\n{}\n{}\n".format(SECTION_TITLE, HEADER, SEPARATOR)
+    header = LAMBDA_HEADER if section_title == LAMBDA_SECTION_TITLE else HEADER
+    separator = LAMBDA_SEPARATOR if section_title == LAMBDA_SECTION_TITLE else SEPARATOR
+    section = "\n\n{}\n\n{}\n{}\n".format(section_title, header, separator)
     return content.rstrip() + section
 
 
-def update_experiments(row, experiment_id, path="EXPERIMENTS.md"):
+def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md"):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8", errors="ignore") as handle:
             content = handle.read()
     else:
         content = "# Experiments\n"
 
-    content = ensure_section(content)
+    content = ensure_section(content, section_title)
     lines = content.splitlines()
     replaced = False
     section_seen = False
     insert_at = len(lines)
 
     for index, line in enumerate(lines):
-        if line.strip() == SECTION_TITLE:
+        if line.strip() == section_title:
             section_seen = True
             continue
-        if section_seen and line.startswith("## ") and line.strip() != SECTION_TITLE:
+        if section_seen and line.startswith("## ") and line.strip() != section_title:
             insert_at = index
             break
         if section_seen and line.startswith("| {} |".format(experiment_id)):
@@ -187,7 +207,7 @@ def main():
     if args.dry_run or args.mode == "dry-run":
         return
 
-    update_experiments(row, args.experiment_id)
+    update_experiments(row, args.experiment_id, select_section_title(args.experiment_id))
 
 
 if __name__ == "__main__":
