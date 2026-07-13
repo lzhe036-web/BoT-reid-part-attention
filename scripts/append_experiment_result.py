@@ -26,6 +26,16 @@ HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据�
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
+def get_cfg_value(node, key, default=PENDING):
+    if node is None:
+        return default
+    try:
+        value = getattr(node, key)
+    except (AttributeError, KeyError):
+        return default
+    return default if value is None else value
+
+
 def run_command(command):
     try:
         return subprocess.check_output(command, stderr=subprocess.DEVNULL).decode("utf-8").strip()
@@ -54,14 +64,16 @@ def normalize_dataset_name(name):
 def collect_config(config_file):
     local_cfg = cfg.clone()
     local_cfg.merge_from_file(config_file)
+    model_cfg = get_cfg_value(local_cfg, "MODEL", None)
     return {
         "dataset": normalize_dataset_name(local_cfg.DATASETS.NAMES),
         "output_dir": local_cfg.OUTPUT_DIR,
         "seed": str(local_cfg.SEED) if "SEED" in local_cfg else PENDING,
-        "cross_camera_enabled": local_cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY,
-        "cross_camera_lambda": local_cfg.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA,
-        "same_camera_enabled": local_cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY,
-        "same_camera_lambda": local_cfg.MODEL.SAME_CAMERA_POSITIVE_LAMBDA,
+        "cross_camera_enabled": get_cfg_value(model_cfg, "CROSS_CAMERA_POSITIVE_ONLY", False),
+        "cross_camera_lambda": get_cfg_value(model_cfg, "CROSS_CAMERA_POSITIVE_LAMBDA"),
+        "same_camera_enabled": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_ONLY", False),
+        "same_camera_lambda": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_LAMBDA"),
+        "same_camera_mode": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_MODE"),
     }
 
 
@@ -71,7 +83,7 @@ def parse_metrics(output_dir):
         "best_epoch": PENDING,
         "rank1": PENDING,
         "map": PENDING,
-        "log_path": os.path.join(output_dir, "log.txt") if output_dir else PENDING,
+        "log_path": PENDING,
     }
     if not output_dir or not os.path.isdir(output_dir):
         return result
@@ -91,7 +103,8 @@ def parse_metrics(output_dir):
         except OSError:
             continue
 
-        result["log_path"] = path
+        if result["log_path"] == PENDING:
+            result["log_path"] = path
 
         current_epoch = None
         current_map = None
