@@ -38,6 +38,7 @@ pretrained/
 *.onnx
 
 # Training logs / outputs
+*.out
 experiments/
 log/
 logs/
