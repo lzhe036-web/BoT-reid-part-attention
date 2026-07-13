@@ -236,6 +236,27 @@ git push
 
 - Baseline control: `bash scripts/train_c2_baseline_control_autodl.sh`
 - C2 repeat: `bash scripts/train_cross_camera_positive_only_repeat_autodl.sh`
-- C2 lambda sequence (0.1, 0.3, 0.5, 1.0): `bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh`
 
 Each successful training script updates `EXPERIMENTS.md` with `--mode update`; use `--dry-run` to preview records without writing.
+
+## C2 Lambda Sensitivity
+
+Run the C2 lambda sensitivity sequence only from branch
+`exp/cross-camera-positive-lambda-sensitivity`. Before running, either switch an
+existing clone to that branch:
+
+```bash
+git switch exp/cross-camera-positive-lambda-sensitivity
+bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh
+```
+
+Or clone the lambda branch directly:
+
+```bash
+git clone --branch exp/cross-camera-positive-lambda-sensitivity --single-branch https://github.com/lzhe036-web/BoT-reid-part-attention.git BoT-reid-c2-lambda
+cd BoT-reid-c2-lambda
+bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh
+```
+
+The sequence runs lambda values 0.1, 0.3, 0.5, and 1.0 in order. Each successful
+training script updates `EXPERIMENTS.md` with `--mode update`.
