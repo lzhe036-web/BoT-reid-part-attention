@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -e
+bash scripts/train_cross_camera_positive_lambda01_autodl.sh
+bash scripts/train_cross_camera_positive_lambda03_autodl.sh
+bash scripts/train_cross_camera_positive_lambda05_autodl.sh
+bash scripts/train_cross_camera_positive_lambda10_autodl.sh

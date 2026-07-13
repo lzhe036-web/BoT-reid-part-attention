@@ -35,3 +35,12 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | C2-Baseline-Control | 待填写 | 待填写 | exp/cross-camera-positive-only | Baseline control | Market1501 | configs/softmax_triplet_c2_baseline_control_autodl.yml | /root/autodl-tmp/experiments/BoT/c2_baseline_control_market1501 | /root/autodl-tmp/experiments/BoT/c2_baseline_control_market1501/log.txt | 待填写 | 待填写 | 0 (disabled) | 待填写 | 待填写 | 待填写 | 待填写 | Baseline control under C2 setting, cross-camera positive loss disabled, other settings aligned with C2. |
 
+## C2 Lambda Sensitivity Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C2-L01 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda01_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda01_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda01_market1501/log.txt | 待填写 | 待填写 | 0.1 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
+| C2-L03 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda03_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda03_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda03_market1501/log.txt | 待填写 | 待填写 | 0.3 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
+| C2-L05 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda05_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda05_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda05_market1501/log.txt | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
+| C2-L10 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda10_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501/log.txt | 待填写 | 待填写 | 1.0 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
+
