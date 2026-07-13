@@ -56,6 +56,11 @@ _C.MODEL.CAMERA_AWARE_TRIPLET_MODE = "hard"
 _C.MODEL.CROSS_CAMERA_POSITIVE_ONLY = False
 _C.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA = 0.5
 _C.MODEL.CROSS_CAMERA_POSITIVE_MODE = "mean"
+# Enable same-camera positive-only auxiliary loss. Mutually exclusive with the
+# cross-camera positive-only experiment in supplied configs.
+_C.MODEL.SAME_CAMERA_POSITIVE_ONLY = False
+_C.MODEL.SAME_CAMERA_POSITIVE_LAMBDA = 0.5
+_C.MODEL.SAME_CAMERA_POSITIVE_MODE = "mean"
 
 
 # -----------------------------------------------------------------------------

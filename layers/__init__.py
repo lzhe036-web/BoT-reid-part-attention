@@ -10,8 +10,10 @@ from .triplet_loss import (
     CameraAwareTripletLoss,
     CrossEntropyLabelSmooth,
     CrossCameraPositiveLoss,
+    SameCameraPositiveLoss,
     TripletLoss,
     count_cross_camera_positives,
+    count_same_camera_positives,
 )
 from .center_loss import CenterLoss
 
@@ -30,12 +32,17 @@ def make_loss(cfg, num_classes):    # modified by gu
 
     camera_triplet = None
     cross_camera_positive = None
+    same_camera_positive = None
+    if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY and cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY:
+        raise ValueError("Cross-camera and same-camera positive-only losses cannot both be enabled.")
     if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
         if cfg.MODEL.CAMERA_AWARE_TRIPLET:
             print("CROSS_CAMERA_POSITIVE_ONLY is enabled; skip CAMERA_AWARE_TRIPLET auxiliary loss.")
         cross_camera_positive = CrossCameraPositiveLoss(
             mode=cfg.MODEL.CROSS_CAMERA_POSITIVE_MODE
         )
+    if cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY:
+        same_camera_positive = SameCameraPositiveLoss(mode=cfg.MODEL.SAME_CAMERA_POSITIVE_MODE)
     if cfg.MODEL.CAMERA_AWARE_TRIPLET:
         camera_triplet = CameraAwareTripletLoss(
             margin=cfg.MODEL.CAMERA_AWARE_TRIPLET_MARGIN,
@@ -48,7 +55,7 @@ def make_loss(cfg, num_classes):    # modified by gu
         return F.cross_entropy(score, target)
 
     def with_camera_loss(total_loss, id_loss_value, triplet_loss_value, feat, target, camids):
-        if not cfg.MODEL.CAMERA_AWARE_TRIPLET and not cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
+        if not (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY or cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY):
             return total_loss
         if camids is None:
             auxiliary_loss = feat.sum() * 0.0
@@ -56,11 +63,21 @@ def make_loss(cfg, num_classes):    # modified by gu
         elif cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
             auxiliary_loss = cross_camera_positive(feat, target, camids)
             cross_camera_count = count_cross_camera_positives(target, camids)
+            same_camera_count = 0
+        elif cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY:
+            auxiliary_loss = same_camera_positive(feat, target, camids)
+            cross_camera_count = 0
+            same_camera_count = count_same_camera_positives(target, camids)
         else:
             auxiliary_loss = camera_triplet(feat, target, camids)
             cross_camera_count = count_cross_camera_positives(target, camids)
+            same_camera_count = 0
+        if camids is None:
+            same_camera_count = 0
         if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
             total_loss = total_loss + cfg.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA * auxiliary_loss
+        elif cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY:
+            total_loss = total_loss + cfg.MODEL.SAME_CAMERA_POSITIVE_LAMBDA * auxiliary_loss
         else:
             total_loss = total_loss + cfg.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA * auxiliary_loss
         return {
@@ -69,7 +86,9 @@ def make_loss(cfg, num_classes):    # modified by gu
             'loss_triplet': triplet_loss_value,
             'loss_camera_triplet': auxiliary_loss if cfg.MODEL.CAMERA_AWARE_TRIPLET and not cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY else feat.sum() * 0.0,
             'loss_cross_camera_positive': auxiliary_loss if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY else feat.sum() * 0.0,
+            'loss_same_camera_positive': auxiliary_loss if cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY else feat.sum() * 0.0,
             'cross_camera_positive_count': cross_camera_count,
+            'same_camera_positive_count': same_camera_count,
         }
 
     if sampler == 'softmax':

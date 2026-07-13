@@ -42,6 +42,7 @@
 | `exp/camera-aware-triplet-loss` | Camera-aware hard triplet loss 实验版本，使用 same pid + different camid 的 cross-camera positive，并包含 hard negative mining。 |
 | `exp/hierarchical-camera-aware-loss` | Hierarchical camera-aware loss 实验版本，包含 easy / boundary / hard anchor、hard negative weighting 等增强逻辑。 |
 | `exp/cross-camera-positive-only` | 只使用 cross-camera positive 的消融实验版本，不额外使用 hard negative mining / hard negative weighting。 |
+| `exp/same-camera-positive-only` | S2 同摄像头正样本消融；排除 self pair，不使用 negative 或 hard negative。 |
 
 ### 四、实验记录规则
 
@@ -162,6 +163,7 @@ tmux attach -t <name>
 - `scripts/train_cross_camera_positive_only_autodl.sh`
 - `scripts/train_c2_baseline_control_autodl.sh`
 - `scripts/train_cross_camera_positive_only_repeat_autodl.sh`
+- `scripts/train_same_camera_positive_only_autodl.sh`
 
 ### 八、维护注意事项
 

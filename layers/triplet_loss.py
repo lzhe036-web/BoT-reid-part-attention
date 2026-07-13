@@ -195,6 +195,39 @@ class CrossCameraPositiveLoss(object):
         return torch.stack(positive_distances).mean()
 
 
+class SameCameraPositiveLoss(object):
+    """Pull same-identity same-camera positives closer without negatives."""
+
+    def __init__(self, mode='mean'):
+        self.mode = mode
+
+    def __call__(self, features, labels, camids, normalize_feature=False):
+        if normalize_feature:
+            features = normalize(features, axis=-1)
+        if self.mode not in ('mean', 'hard'):
+            raise ValueError("SameCameraPositiveLoss supports mean or hard mode, got {}".format(self.mode))
+
+        dist_mat = euclidean_dist(features, features)
+        labels = labels.view(-1)
+        camids = camids.view(-1)
+        batch_size = labels.size(0)
+        same_pid = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+        same_camera = camids.expand(batch_size, batch_size).eq(camids.expand(batch_size, batch_size).t())
+        not_self = ~torch.eye(batch_size, dtype=torch.bool, device=labels.device)
+        valid_mask = same_pid & same_camera & not_self
+        valid_anchor = valid_mask.any(dim=1)
+        if valid_anchor.sum().item() == 0:
+            return features.sum() * 0.0
+
+        losses = []
+        for i in range(batch_size):
+            if not valid_anchor[i]:
+                continue
+            distances = dist_mat[i][valid_mask[i]]
+            losses.append(distances.mean() if self.mode == 'mean' else distances.max())
+        return torch.stack(losses).mean()
+
+
 def count_cross_camera_positives(labels, camids):
     labels = labels.view(-1)
     camids = camids.view(-1)
@@ -202,6 +235,16 @@ def count_cross_camera_positives(labels, camids):
     is_pos = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
     is_cross_camera = camids.expand(batch_size, batch_size).ne(camids.expand(batch_size, batch_size).t())
     return int((is_pos & is_cross_camera).any(dim=1).sum().item())
+
+
+def count_same_camera_positives(labels, camids):
+    labels = labels.view(-1)
+    camids = camids.view(-1)
+    batch_size = labels.size(0)
+    same_pid = labels.expand(batch_size, batch_size).eq(labels.expand(batch_size, batch_size).t())
+    same_camera = camids.expand(batch_size, batch_size).eq(camids.expand(batch_size, batch_size).t())
+    not_self = ~torch.eye(batch_size, dtype=torch.bool, device=labels.device)
+    return int((same_pid & same_camera & not_self).any(dim=1).sum().item())
 
 
 class CrossEntropyLabelSmooth(nn.Module):

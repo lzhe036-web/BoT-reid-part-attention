@@ -236,5 +236,6 @@ git push
 
 - Baseline control: `bash scripts/train_c2_baseline_control_autodl.sh`
 - C2 repeat: `bash scripts/train_cross_camera_positive_only_repeat_autodl.sh`
+- S2 same-camera positive only: `bash scripts/train_same_camera_positive_only_autodl.sh`
 
-Each successful training script updates `EXPERIMENTS.md` with `--mode update`; use `--dry-run` to preview records without writing.
+S2 uses only same-pid, same-camid positive pairs, excludes self pairs, and uses no negatives or hard-negative mining. Each successful training script updates `EXPERIMENTS.md` with `--mode update`; use `--dry-run` to preview records without writing.
