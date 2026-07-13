@@ -19,8 +19,11 @@ from config import cfg
 PENDING = "待填写"
 SECTION_TITLE = "## Camera-Aware Triplet Loss Experiments"
 CROSS_CAMERA_POSITIVE_SECTION_TITLE = "## Cross-Camera Positive Only Experiments"
-HEADER = "| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
-SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+SAME_CAMERA_POSITIVE_SECTION_TITLE = "## Same-Camera Positive Only Ablation"
+LAMBDA_SECTION_TITLE = "## C2 Lambda Sensitivity Experiments"
+BASELINE_SECTION_TITLE = "## C2 Baseline-Control Experiments"
+HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
+SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 def run_command(command):
@@ -55,6 +58,10 @@ def collect_config(config_file):
         "dataset": normalize_dataset_name(local_cfg.DATASETS.NAMES),
         "output_dir": local_cfg.OUTPUT_DIR,
         "seed": str(local_cfg.SEED) if "SEED" in local_cfg else PENDING,
+        "cross_camera_enabled": local_cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY,
+        "cross_camera_lambda": local_cfg.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA,
+        "same_camera_enabled": local_cfg.MODEL.SAME_CAMERA_POSITIVE_ONLY,
+        "same_camera_lambda": local_cfg.MODEL.SAME_CAMERA_POSITIVE_LAMBDA,
     }
 
 
@@ -64,6 +71,7 @@ def parse_metrics(output_dir):
         "best_epoch": PENDING,
         "rank1": PENDING,
         "map": PENDING,
+        "log_path": os.path.join(output_dir, "log.txt") if output_dir else PENDING,
     }
     if not output_dir or not os.path.isdir(output_dir):
         return result
@@ -74,6 +82,8 @@ def parse_metrics(output_dir):
         reverse=True,
     )
     best = None
+    first_timestamp = None
+    last_timestamp = None
     for path in log_paths:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as handle:
@@ -81,9 +91,19 @@ def parse_metrics(output_dir):
         except OSError:
             continue
 
+        result["log_path"] = path
+
         current_epoch = None
         current_map = None
         for line in lines:
+            timestamp_match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+            if timestamp_match:
+                try:
+                    timestamp = datetime.strptime(timestamp_match.group(1), "%Y-%m-%d %H:%M:%S")
+                    first_timestamp = timestamp if first_timestamp is None else min(first_timestamp, timestamp)
+                    last_timestamp = timestamp if last_timestamp is None else max(last_timestamp, timestamp)
+                except ValueError:
+                    pass
             epoch_match = re.search(r"Validation Results - Epoch:\s*(\d+)", line)
             if epoch_match:
                 current_epoch = epoch_match.group(1)
@@ -108,21 +128,36 @@ def parse_metrics(output_dir):
         result["best_epoch"] = best[2]
         result["rank1"] = best[3]
         result["map"] = best[4]
+    if first_timestamp is not None and last_timestamp is not None:
+        result["runtime"] = str(last_timestamp - first_timestamp)
     return result
+
+
+def experiment_type_and_lambda(config_info):
+    if config_info["same_camera_enabled"]:
+        return "Same-camera positive only", str(config_info["same_camera_lambda"])
+    if config_info["cross_camera_enabled"]:
+        return "Cross-camera positive only", str(config_info["cross_camera_lambda"])
+    return "Baseline control", "0 (disabled)"
 
 
 def build_row(args):
     config_info = collect_config(args.config)
     metrics = parse_metrics(config_info["output_dir"])
+    experiment_type, loss_lambda = experiment_type_and_lambda(config_info)
     values = [
         args.experiment_id,
         datetime.now().strftime("%Y-%m-%d"),
         run_command(["git", "rev-parse", "--short", "HEAD"]),
         run_command(["git", "branch", "--show-current"]),
-        args.config,
-        config_info["seed"],
-        get_gpu_name(),
+        experiment_type,
         config_info["dataset"],
+        args.config,
+        config_info["output_dir"],
+        metrics["log_path"],
+        get_gpu_name(),
+        config_info["seed"],
+        loss_lambda,
         metrics["runtime"],
         metrics["best_epoch"],
         metrics["rank1"],
@@ -134,7 +169,13 @@ def build_row(args):
 
 def select_section_title(args):
     config_name = os.path.basename(args.config)
-    if args.experiment_id.startswith("CCPO") or "cross_camera_positive_only" in config_name:
+    if args.experiment_id.startswith("S2-") or "same_camera_positive" in config_name:
+        return SAME_CAMERA_POSITIVE_SECTION_TITLE
+    if args.experiment_id.startswith("C2-L") or "positive_lambda" in config_name:
+        return LAMBDA_SECTION_TITLE
+    if args.experiment_id == "C2-Baseline-Control":
+        return BASELINE_SECTION_TITLE
+    if args.experiment_id.startswith("C2-") or "cross_camera_positive_only" in config_name:
         return CROSS_CAMERA_POSITIVE_SECTION_TITLE
     return SECTION_TITLE
 

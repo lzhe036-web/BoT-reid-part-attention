@@ -160,6 +160,8 @@ tmux attach -t <name>
 - `scripts/train_camera_aware_triplet_autodl.sh`
 - `scripts/train_hierarchical_camera_aware_autodl.sh`
 - `scripts/train_cross_camera_positive_only_autodl.sh`
+- `scripts/train_c2_baseline_control_autodl.sh`
+- `scripts/train_cross_camera_positive_only_repeat_autodl.sh`
 
 ### 八、维护注意事项
 

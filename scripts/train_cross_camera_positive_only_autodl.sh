@@ -16,8 +16,8 @@ echo "Training finished successfully. Updating EXPERIMENTS.md..."
 
 python scripts/append_experiment_result.py \
   --config ${CONFIG} \
-  --experiment-id CCPO001 \
-  --note "Cross-camera positive only, no extra hard negative, lambda=0.5, mode=mean, AutoDL" \
+  --experiment-id C2-CCPO-Market \
+  --note "Cross-camera positive only, no extra hard negative, Market1501, AutoDL" \
   --mode update
 
 echo "EXPERIMENTS.md updated."

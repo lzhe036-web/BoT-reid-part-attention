@@ -231,3 +231,10 @@ git add EXPERIMENTS.md
 git commit -m "record cross camera positive only experiment result"
 git push
 ```
+
+## C2 Ablations and Reproduction
+
+- Baseline control: `bash scripts/train_c2_baseline_control_autodl.sh`
+- C2 repeat: `bash scripts/train_cross_camera_positive_only_repeat_autodl.sh`
+
+Each successful training script updates `EXPERIMENTS.md` with `--mode update`; use `--dry-run` to preview records without writing.

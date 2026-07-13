@@ -24,6 +24,14 @@
 
 ## Cross-Camera Positive Only Experiments
 
-| 实验编号 | 日期 | commit id | 分支 | config 文件 | seed | GPU | 数据集 | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| CCPO001 | 待填写 | 待填写 | exp/cross-camera-positive-only | configs/softmax_triplet_cross_camera_positive_only_autodl.yml | 待填写 | 待填写 | Market1501 | 待填写 | 待填写 | 待填写 | 待填写 | Cross-camera positive only, no extra hard negative, lambda=0.5, mode=mean, AutoDL |
+| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C2-CCPO-Market | 2026-07-09 | 0eeb467 | exp/cross-camera-positive-only | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_only_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_only_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_only_market1501/log.txt | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | Cross-camera positive only, no extra hard negative, Market1501, AutoDL。 |
+| C2-CCPO-Repeat | 待填写 | 待填写 | exp/cross-camera-positive-only | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_only_repeat_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_only_repeat_market1501 | /root/autodl-tmp/experiments/BoT/cross_camera_positive_only_repeat_market1501/log.txt | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | C2 repeat run to verify stability, cross-camera positive only, no extra hard negative. |
+
+## C2 Baseline-Control Experiments
+
+| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C2-Baseline-Control | 待填写 | 待填写 | exp/cross-camera-positive-only | Baseline control | Market1501 | configs/softmax_triplet_c2_baseline_control_autodl.yml | /root/autodl-tmp/experiments/BoT/c2_baseline_control_market1501 | /root/autodl-tmp/experiments/BoT/c2_baseline_control_market1501/log.txt | 待填写 | 待填写 | 0 (disabled) | 待填写 | 待填写 | 待填写 | 待填写 | Baseline control under C2 setting, cross-camera positive loss disabled, other settings aligned with C2. |
+
