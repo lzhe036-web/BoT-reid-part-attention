@@ -39,5 +39,4 @@
 
 | 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| S2-SCPO-Market | 待填写 | 待填写 | exp/same-camera-positive-only | Same-camera positive only | Market1501 | configs/softmax_triplet_same_camera_positive_only_autodl.yml | /root/autodl-tmp/experiments/BoT/same_camera_positive_only_market1501 | 待填写 | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | Same-camera positive only, self pairs excluded, no negative or hard-negative mining, Market1501, AutoDL. |
-
+| S2-SCPO-Market | 2026-07-14 | f1f1692 | exp/same-camera-positive-only | Same-camera positive only | Market1501 | configs/softmax_triplet_same_camera_positive_only_autodl.yml | /root/autodl-tmp/experiments/BoT/same_camera_positive_only_market1501 | /root/autodl-tmp/experiments/BoT/same_camera_positive_only_market1501/log.txt | NVIDIA GeForce RTX 4090 | 待填写 | 0.5 | 0:41:36 | 120 | 94.4% | 86.8% | Same-camera positive only, no negative or hard-negative mining, Market1501, AutoDL. |
