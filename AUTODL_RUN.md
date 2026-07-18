@@ -260,3 +260,46 @@ bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh
 
 The sequence runs lambda values 0.1, 0.3, 0.5, and 1.0 in order. Each successful
 training script updates `EXPERIMENTS.md` with `--mode update`.
+
+## Duke C2-L03 Validation
+
+Run this validation from the correct branch:
+
+```bash
+git switch exp/c2-l03-duke-validation
+```
+
+The DukeMTMC-reID dataset registration name must be `dukemtmc`.
+
+Expected AutoDL dataset structure:
+
+```text
+/root/autodl-tmp/datasets/dukemtmc-reid/DukeMTMC-reID/bounding_box_train
+```
+
+If the dataset is instead located at `/root/autodl-tmp/datasets/DukeMTMC-reID`,
+create the expected link:
+
+```bash
+cd /root/autodl-tmp/datasets
+mkdir -p dukemtmc-reid
+ln -s ../DukeMTMC-reID dukemtmc-reid/DukeMTMC-reID
+```
+
+Run either experiment separately:
+
+```bash
+bash scripts/train_duke_baseline_control_autodl.sh
+bash scripts/train_duke_c2_l03_autodl.sh
+```
+
+Or run the complete validation sequence:
+
+```bash
+bash scripts/train_duke_c2_l03_validation_autodl.sh
+```
+
+The validation sequence runs `Duke-Baseline-Control` first and `Duke-C2-L03`
+second. It uses `set -e`, so it stops immediately if either experiment fails.
+Each successful experiment automatically updates the Duke validation section in
+`EXPERIMENTS.md`.

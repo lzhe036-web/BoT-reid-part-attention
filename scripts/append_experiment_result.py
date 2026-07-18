@@ -22,6 +22,7 @@ CROSS_CAMERA_POSITIVE_SECTION_TITLE = "## Cross-Camera Positive Only Experiments
 SAME_CAMERA_POSITIVE_SECTION_TITLE = "## Same-Camera Positive Only Ablation"
 LAMBDA_SECTION_TITLE = "## C2 Lambda Sensitivity Experiments"
 BASELINE_SECTION_TITLE = "## C2 Baseline-Control Experiments"
+DUKE_VALIDATION_SECTION_TITLE = "## Duke Validation Experiments"
 HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
@@ -182,6 +183,8 @@ def build_row(args):
 
 def select_section_title(args):
     config_name = os.path.basename(args.config)
+    if args.experiment_id.startswith("Duke-"):
+        return DUKE_VALIDATION_SECTION_TITLE
     if args.experiment_id.startswith("S2-") or "same_camera_positive" in config_name:
         return SAME_CAMERA_POSITIVE_SECTION_TITLE
     if args.experiment_id.startswith("C2-L") or "positive_lambda" in config_name:
@@ -224,7 +227,7 @@ def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md")
             lines[index] = row
             replaced = True
             break
-        if section_seen and line.startswith("| "):
+        if section_seen and line.startswith("|"):
             insert_at = index + 1
 
     if not replaced:

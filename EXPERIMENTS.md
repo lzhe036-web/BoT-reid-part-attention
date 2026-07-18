@@ -44,3 +44,12 @@
 | C2-L05 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda05_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda05_market1501 | 待填写 | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
 | C2-L10 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda10_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501 | 待填写 | 待填写 | 待填写 | 1.0 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
 
+## Duke Validation Experiments
+
+Market1501 current best: C2-L03, lambda=0.3, Rank-1=95.0, mAP=87.8.
+
+This section compares the baseline control with C2-L03 on DukeMTMC-reID to verify that the C2-L03 improvement is not limited to Market1501. Duke Rank-1 and mAP results are appended automatically by the training scripts after successful runs; no Duke metrics are reported before training.
+
+| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
