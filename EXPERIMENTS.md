@@ -52,4 +52,5 @@ This section compares the baseline control with C2-L03 on DukeMTMC-reID to verif
 
 | 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-
+| Duke-Baseline-Control | 2026-07-18 | 3ce4724 | exp/c2-l03-duke-validation | Baseline control | DukeMTMC-reID | configs/softmax_triplet_c2_l03_duke_baseline_autodl.yml | /root/autodl-tmp/experiments/BoT/duke_baseline_control | /root/autodl-tmp/experiments/BoT/duke_baseline_control/log.txt | NVIDIA GeForce RTX 4090 | 待填写 | 0 (disabled) | 0:47:46 | 80 | 86.7% | 75.7% | DukeMTMC-reID baseline control: BoT + Part Attention, cross-camera positive loss disabled; settings aligned with C2-L03. |
+| Duke-C2-L03 | 2026-07-18 | 3ce4724 | exp/c2-l03-duke-validation | Cross-camera positive only | DukeMTMC-reID | configs/softmax_triplet_c2_l03_duke_autodl.yml | /root/autodl-tmp/experiments/BoT/duke_c2_l03 | /root/autodl-tmp/experiments/BoT/duke_c2_l03/log.txt | NVIDIA GeForce RTX 4090 | 待填写 | 0.3 | 0:53:21 | 120 | 88.4% | 78.7% | DukeMTMC-reID C2-L03: cross-camera positive only, lambda=0.3, mode=mean; no extra hard negative mining/weighting, same-camera positive, or hierarchical difficulty. |
