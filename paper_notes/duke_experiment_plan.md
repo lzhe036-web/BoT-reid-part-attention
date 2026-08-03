@@ -1,6 +1,6 @@
 # DukeMTMC-reID 跨数据集验证记录
 
-更新时间：2026-07-19。
+更新时间：2026-07-22。
 
 ## 1. 当前状态
 
@@ -9,8 +9,16 @@ Duke Baseline-Control 与 Duke C2-L03 已完成配置、运行、Git 结果登�
 - 配置与运行入口提交：`3ce47246d67c1c43befd651ea44082216167478f`
 - 结果登记提交：`6f49104f6c9413b91df515c8a934eaa42d7a2ff3`
 - 当前结果证据：Git 已登记，且外部证据包中的原始 log、config 和 checkpoint 已核验
-- 固定 seed：未记录
+- 固定 seed：`not_recorded`
 - re-ranking：两组均关闭
+
+正式证据 ID 为 `EV-TRAIN-DUK-BASELINE` 与 `EV-TRAIN-DUK-C2-L03`；两行均为
+单次运行 `n=1`、证据等级 E2。
+
+Duke 必须在论文中单独成表，不与 Market 主结果拼成同一数据集表。当前结论固定为：
+C2-L03 相对 Duke Baseline-Control 的 Rank-1 与 mAP 分别提高 **1.7** 和
+**3.0** 个百分点，说明当前正向差值并非只出现在 Market1501；该表述不扩展为
+“所有数据集均有效”。
 
 证据根目录：
 
@@ -110,3 +118,8 @@ C2-L03：
 2. 至少 3 个固定 seed 的独立重复实验及均值、标准差；
 3. 原始运行环境快照，包括 CUDA、PyTorch、驱动和依赖版本；
 4. 原始 log 中可直接核验的 GPU 型号。RTX 4090 目前来自归档实验记录，而非训练 log 的设备型号输出。
+
+距离与覆盖率分析工具已由提交
+`1d5f48ddd85a3e0bdb3396e86be22d9eeaebb9f9` 纳入版本管理；这不改变 Duke
+训练所对应的 `3ce4724` 训练版本，也不能将后来工作区新增的 seed 42 回填到历史
+Duke 运行。

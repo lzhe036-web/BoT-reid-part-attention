@@ -86,14 +86,16 @@ class DukeMTMCreID(BaseImageDataset):
             raise RuntimeError("'{}' is not available".format(self.gallery_dir))
 
     def _process_dir(self, dir_path, relabel=False):
-        img_paths = glob.glob(osp.join(dir_path, '*.jpg'))
+        # Filesystem enumeration order is not guaranteed.  Sorting keeps the
+        # sample order and relabelled training identities stable across hosts.
+        img_paths = sorted(glob.glob(osp.join(dir_path, '*.jpg')))
         pattern = re.compile(r'([-\d]+)_c(\d)')
 
         pid_container = set()
         for img_path in img_paths:
             pid, _ = map(int, pattern.search(img_path).groups())
             pid_container.add(pid)
-        pid2label = {pid: label for label, pid in enumerate(pid_container)}
+        pid2label = {pid: label for label, pid in enumerate(sorted(pid_container))}
 
         dataset = []
         for img_path in img_paths:

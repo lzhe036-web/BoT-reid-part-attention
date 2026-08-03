@@ -6,7 +6,6 @@
 
 import copy
 import random
-import torch
 from collections import defaultdict
 
 import numpy as np
@@ -23,10 +22,12 @@ class RandomIdentitySampler(Sampler):
     - batch_size (int): number of examples in a batch.
     """
 
-    def __init__(self, data_source, batch_size, num_instances):
+    def __init__(self, data_source, batch_size, num_instances, seed=0):
         self.data_source = data_source
         self.batch_size = batch_size
         self.num_instances = num_instances
+        self.seed = int(seed) % (2 ** 32)
+        self.epoch = 0
         self.num_pids_per_batch = self.batch_size // self.num_instances
         self.index_dic = defaultdict(list)
         for index, (_, pid, _) in enumerate(self.data_source):
@@ -43,13 +44,17 @@ class RandomIdentitySampler(Sampler):
             self.length += num - num % self.num_instances
 
     def __iter__(self):
+        epoch_seed = (self.seed + self.epoch) % (2 ** 32)
+        self.epoch += 1
+        python_rng = random.Random(epoch_seed)
+        numpy_rng = np.random.RandomState(epoch_seed)
         batch_idxs_dict = defaultdict(list)
 
         for pid in self.pids:
             idxs = copy.deepcopy(self.index_dic[pid])
             if len(idxs) < self.num_instances:
-                idxs = np.random.choice(idxs, size=self.num_instances, replace=True)
-            random.shuffle(idxs)
+                idxs = numpy_rng.choice(idxs, size=self.num_instances, replace=True).tolist()
+            python_rng.shuffle(idxs)
             batch_idxs = []
             for idx in idxs:
                 batch_idxs.append(idx)
@@ -61,7 +66,7 @@ class RandomIdentitySampler(Sampler):
         final_idxs = []
 
         while len(avai_pids) >= self.num_pids_per_batch:
-            selected_pids = random.sample(avai_pids, self.num_pids_per_batch)
+            selected_pids = python_rng.sample(avai_pids, self.num_pids_per_batch)
             for pid in selected_pids:
                 batch_idxs = batch_idxs_dict[pid].pop(0)
                 final_idxs.extend(batch_idxs)
@@ -87,9 +92,11 @@ class RandomIdentitySampler_alignedreid(Sampler):
         data_source (Dataset): dataset to sample from.
         num_instances (int): number of instances per identity.
     """
-    def __init__(self, data_source, num_instances):
+    def __init__(self, data_source, num_instances, seed=0):
         self.data_source = data_source
         self.num_instances = num_instances
+        self.seed = int(seed) % (2 ** 32)
+        self.epoch = 0
         self.index_dic = defaultdict(list)
         for index, (_, pid, _) in enumerate(data_source):
             self.index_dic[pid].append(index)
@@ -97,13 +104,18 @@ class RandomIdentitySampler_alignedreid(Sampler):
         self.num_identities = len(self.pids)
 
     def __iter__(self):
-        indices = torch.randperm(self.num_identities)
+        epoch_seed = (self.seed + self.epoch) % (2 ** 32)
+        self.epoch += 1
+        python_rng = random.Random(epoch_seed)
+        numpy_rng = np.random.RandomState(epoch_seed)
+        indices = list(range(self.num_identities))
+        python_rng.shuffle(indices)
         ret = []
         for i in indices:
             pid = self.pids[i]
             t = self.index_dic[pid]
             replace = False if len(t) >= self.num_instances else True
-            t = np.random.choice(t, size=self.num_instances, replace=replace)
+            t = numpy_rng.choice(t, size=self.num_instances, replace=replace)
             ret.extend(t)
         return iter(ret)
 

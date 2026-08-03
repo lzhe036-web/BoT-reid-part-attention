@@ -10,6 +10,7 @@ from .collate_batch import train_collate_fn, val_collate_fn
 from .datasets import init_dataset, ImageDataset
 from .samplers import RandomIdentitySampler, RandomIdentitySampler_alignedreid  # New add by gu
 from .transforms import build_transforms
+from utils.reproducibility import seed_worker
 
 
 def make_data_loader(cfg):
@@ -27,19 +28,24 @@ def make_data_loader(cfg):
     if cfg.DATALOADER.SAMPLER == 'softmax':
         train_loader = DataLoader(
             train_set, batch_size=cfg.SOLVER.IMS_PER_BATCH, shuffle=True, num_workers=num_workers,
-            collate_fn=train_collate_fn
+            collate_fn=train_collate_fn, worker_init_fn=seed_worker
         )
     else:
         train_loader = DataLoader(
             train_set, batch_size=cfg.SOLVER.IMS_PER_BATCH,
-            sampler=RandomIdentitySampler(dataset.train, cfg.SOLVER.IMS_PER_BATCH, cfg.DATALOADER.NUM_INSTANCE),
+            sampler=RandomIdentitySampler(
+                dataset.train,
+                cfg.SOLVER.IMS_PER_BATCH,
+                cfg.DATALOADER.NUM_INSTANCE,
+                seed=cfg.SEED,
+            ),
             # sampler=RandomIdentitySampler_alignedreid(dataset.train, cfg.DATALOADER.NUM_INSTANCE),      # new add by gu
-            num_workers=num_workers, collate_fn=train_collate_fn
+            num_workers=num_workers, collate_fn=train_collate_fn, worker_init_fn=seed_worker
         )
 
     val_set = ImageDataset(dataset.query + dataset.gallery, val_transforms)
     val_loader = DataLoader(
         val_set, batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False, num_workers=num_workers,
-        collate_fn=val_collate_fn
+        collate_fn=val_collate_fn, worker_init_fn=seed_worker
     )
     return train_loader, val_loader, len(dataset.query), num_classes

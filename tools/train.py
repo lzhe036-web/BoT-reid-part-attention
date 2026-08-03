@@ -7,9 +7,12 @@
 import argparse
 import os
 import sys
-import torch
 
-from torch.backends import cudnn
+# Set before importing torch so supported CUDA runtimes can choose a
+# deterministic cuBLAS workspace configuration.
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+import torch
 
 sys.path.append('.')
 from config import cfg
@@ -20,6 +23,12 @@ from layers import make_loss, make_loss_with_center
 from solver import make_optimizer, make_optimizer_with_center, WarmupMultiStepLR
 
 from utils.logger import setup_logger
+from utils.reproducibility import (
+    ensure_python_hash_seed,
+    seed_everything,
+    validate_seed,
+    write_reproducibility_record,
+)
 
 
 def train(cfg):
@@ -133,9 +142,19 @@ def main():
     cfg.merge_from_list(args.opts)
     cfg.freeze()
 
+    # Fail before constructing a dataset or model if reproducibility cannot be
+    # guaranteed and documented for this run.
+    training_seed = validate_seed(cfg.SEED)
+    ensure_python_hash_seed(training_seed)
     output_dir = cfg.OUTPUT_DIR
+    if not output_dir:
+        raise ValueError("OUTPUT_DIR must be set so the training seed can be recorded")
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
+
+    if cfg.MODEL.DEVICE == "cuda":
+        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
+    seed_state = seed_everything(training_seed)
 
     logger = setup_logger("reid_baseline", output_dir, 0)
     logger.info("Using {} GPUS".format(num_gpus))
@@ -148,9 +167,20 @@ def main():
             logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))
 
-    if cfg.MODEL.DEVICE == "cuda":
-        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
-    cudnn.benchmark = True
+    metadata_path, _ = write_reproducibility_record(
+        output_dir=output_dir,
+        cfg=cfg,
+        seed_state=seed_state,
+        config_file=args.config_file,
+        cli_overrides=args.opts,
+        command=sys.argv,
+    )
+    logger.info(
+        "Reproducibility fixed explicitly: training_seed={}, Python=True, NumPy=True, "
+        "PyTorch=True, CUDA_all={}, cudnn.deterministic=True, cudnn.benchmark=False"
+        .format(training_seed, seed_state["torch_cuda_all_seeded"])
+    )
+    logger.info("Reproducibility metadata saved to {}".format(metadata_path))
     train(cfg)
 
 

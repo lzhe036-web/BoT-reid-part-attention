@@ -303,3 +303,69 @@ The validation sequence runs `Duke-Baseline-Control` first and `Duke-C2-L03`
 second. It uses `set -e`, so it stops immediately if either experiment fails.
 Each successful experiment automatically updates the Duke validation section in
 `EXPERIMENTS.md`.
+
+Registered results (commit `6f49104`):
+
+- Duke-Baseline-Control: Rank-1 86.7%, mAP 75.7%.
+- Duke-C2-L03: Rank-1 88.4%, mAP 78.7%.
+
+The corresponding AutoDL logs and checkpoints are not stored in this repository.
+The seed and Rank-5/Rank-10 values remain to be recovered from the original
+experiment environment.
+
+## C2 Mechanism Analysis
+
+### Cross-camera-positive batch coverage
+
+This analysis uses only training metadata and reproduces the
+`RandomIdentitySampler` grouping rule. It measures supervision opportunity, not
+model performance. Use a new output directory for every run; the tool refuses
+to overwrite a non-empty directory:
+
+```bash
+python tools/analyze_cross_camera_batch_coverage.py \
+  --config-file configs/softmax_triplet_c2_baseline_control_autodl.yml \
+  --compare-config-file configs/softmax_triplet_cross_camera_positive_lambda03_autodl.yml \
+  --dataset market1501 \
+  --data-root /root/autodl-tmp/datasets \
+  --output-dir /root/autodl-tmp/analysis/market_batch_coverage \
+  --seed 42 \
+  --epochs 10
+```
+
+For Duke, replace the two configs and dataset:
+
+```bash
+python tools/analyze_cross_camera_batch_coverage.py \
+  --config-file configs/softmax_triplet_c2_l03_duke_baseline_autodl.yml \
+  --compare-config-file configs/softmax_triplet_c2_l03_duke_autodl.yml \
+  --dataset dukemtmc \
+  --data-root /root/autodl-tmp/datasets \
+  --output-dir /root/autodl-tmp/analysis/duke_batch_coverage \
+  --seed 42 \
+  --epochs 10
+```
+
+### Baseline vs C2-L03 distance distributions
+
+Run only after both aligned checkpoints are available:
+
+```bash
+python tools/analyze_distance_distributions.py \
+  --baseline-config-file configs/softmax_triplet_c2_baseline_control_autodl.yml \
+  --baseline-weight /path/to/baseline_checkpoint.pth \
+  --c2-config-file configs/softmax_triplet_cross_camera_positive_lambda03_autodl.yml \
+  --c2-weight /path/to/c2_l03_checkpoint.pth \
+  --dataset market1501 \
+  --data-root /root/autodl-tmp/datasets \
+  --output-dir /root/autodl-tmp/analysis/market_distance_distribution \
+  --seed 42 \
+  --max-different-id-pairs 200000
+```
+
+The script uses the same query+gallery sample order and unordered pair indices
+for both models. It analyzes L2-normalized BNNeck-after retrieval features using
+squared Euclidean distance. It does not use re-ranking or camera-mean debiasing.
+It also verifies the full resolved configs differ only in the C2 switch,
+auxiliary lambda, and output path; requires C2 lambda=0.3/mode=mean; and refuses
+to overwrite a non-empty output directory.

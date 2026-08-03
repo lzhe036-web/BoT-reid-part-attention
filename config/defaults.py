@@ -16,6 +16,11 @@ from yacs.config import CfgNode as CN
 
 _C = CN()
 
+# Every training run must use an explicit seed.  The training entry point
+# applies this value to Python, NumPy, PyTorch and all visible CUDA devices,
+# then records it together with the resolved configuration in OUTPUT_DIR.
+_C.SEED = 42
+
 _C.MODEL = CN()
 # Using cuda or cpu for training
 _C.MODEL.DEVICE = "cuda"

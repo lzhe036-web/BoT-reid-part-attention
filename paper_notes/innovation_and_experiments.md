@@ -1,7 +1,8 @@
 # C2 创新点、证据边界与实验设计
 
-> 证据快照：2026-07-19。本文档区分“代码可核验”“Git 已登记”“原始日志/
-> checkpoint 已核验”“归档实验记录”和“待核实”，不把配置文件名当作实验结果。
+> 证据快照：2026-07-22。论文正式表使用 `c2_l03_final_evidence/UNIFIED_TABLES.md`
+> 与 E0—E4 门槛制；本文件同时保留代码、Git、原始日志/checkpoint 和归档层面的
+> 细节，不把配置文件名当作实验结果。
 
 ## 1. 论文主方法与统一命名
 
@@ -153,8 +154,9 @@ C2 同时使用 pid 和 camid 构造监督集合，把新增优化项集中在�
 - 配对 checkpoint 的距离分布检验检索嵌入结构；
 - 离线 sampler 覆盖率说明 C2 在多少 anchor 上有机会生效。
 
-三类证据不能互相替代。尤其是 Market 距离结果并不支持“跨摄像头距离整体
-收缩”，因此论文不能把 C2 的机制写成已在所有数据集上得到一致验证。
+三类证据不能互相替代。Market 第一版距离结果因 `pid=0` 污染已废弃；正式
+person-only v2 与 Duke matched-epoch 结果均提供当前 checkpoint 下的描述性
+距离证据。它们仍不是多 seed 重复，论文不能把 C2 的机制写成普遍规律。
 
 ### 3.4 Part Attention 的定位
 
@@ -187,17 +189,26 @@ Market 控制组 epoch 120 checkpoint 的 SHA256 为
 
 同一归档服务器实验记录给出的 Market1501 序列为：
 
-| 配置 | \(\lambda\) | epoch | Rank-1 | mAP | 运行时间 | 当前证据 |
-|---|---:|---:|---:|---:|---:|---|
-| C2-L01 | 0.1 | 120 | 94.7% | 87.5% | 0:52:25 | 归档实验表；原始日志/checkpoint 未随当前证据归档 |
-| **C2-L03** | **0.3** | **120** | **95.0%** | **87.8%** | **0:52:35** | **原始日志/checkpoint 已核验** |
-| C2-L05 | 0.5 | 120 | 94.8% | 87.5% | 0:51:46 | 归档实验表；原始日志/checkpoint 未随当前证据归档 |
-| C2-L10 | 1.0 | 120 | 94.6% | 87.0% | 0:51:47 | 归档实验表；原始日志/checkpoint 未随当前证据归档 |
+| 配置 | \(\lambda\) | epoch | Rank-1 | Rank-5 | Rank-10 | mAP | 运行时间 | 当前证据 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| C2-L01 | 0.1 | 120 | 94.7% | 98.2% | 99.1% | 87.5% | 0:52:25 | 原始日志与三轮 checkpoint 已核验 |
+| **C2-L03** | **0.3** | **120** | **95.0%** | **98.5%** | **99.1%** | **87.8%** | **0:52:35** | **原始日志与 checkpoint 已核验** |
+| C2-L05 | 0.5 | 120 | 94.8% | 98.1% | 98.9% | 87.5% | 0:51:46 | 原始日志与三轮 checkpoint 已核验 |
+| C2-L10 | 1.0 | 120 | 94.6% | 98.2% | 99.0% | 87.0% | 0:51:47 | 原始日志与三轮 checkpoint 已核验 |
 
-该归档序列登记训练 commit 为 `7b8195d`，seed 未记录。在这组单次序列内，
+2026-07-22 新取得的 L01/L05/L10 证据包已补齐原始日志、epoch 40/80/120
+完整指标、三轮 checkpoint 及 SHA256。该序列训练 commit 为 `7b8195d`，seed
+仍未记录；实验表是训练 commit 上的未提交工作树记录，未找到独立 result commit。
+在这组单次序列内，
 \(\lambda=0.3\) 同时取得最高 Rank-1 和 mAP，因此作为当前最终配置。早期独立
 C2 \(\lambda=0.5\) 运行的 95.0%/87.7% 及其重复运行 95.0%/87.3% 属于另一组
 Git 登记实验，不能与上表的 C2-L05 94.8%/87.5% 混为同一次运行。
+
+| 配置 | 原始日志 SHA256 | epoch-120 checkpoint SHA256 | 下载归档 SHA256 |
+|---|---|---|---|
+| C2-L01 | `534316d1bc5053b459746f4494284a14dca0495159479c86d35b034125b05031` | `dced2f0d039ada704b36181f808d3ff622f6cc6e086226bd4a11be374853c670` | `1884feabf45e96cefeba7e85d58bb05c10b085cecb94fafcdfc341f97d2e1a4b` |
+| C2-L05 | `d91ef17ef901a3ac723fe942b0b3ab58aeed137078c04f46b0f4ac030ae3582d` | `43afdb5f388afe630ca8de1668cee603e00a0a1c210e737826ad82200ce1d582` | `70fade357f5ecd8a01fd06b4b442e5f2af0338f750db3ddefc685efcaf9c87a5` |
+| C2-L10 | `26da90e6e46a2088ca81b9246a51c2f59133dd3c7904b1e84e1c8395fd8d3e8b` | `5b3026767cd9c15d174a741db7c8559136a89450321d69d533eea03d41f10c58` | `4c0fa776dffa4bda0f078b0b36c70ca0e19a9078191ce7cbc0104a84382a01d4` |
 
 ### 4.3 DukeMTMC-reID 跨数据集验证
 
@@ -222,16 +233,24 @@ Duke 主表按各自登记 checkpoint 汇报，因此 Baseline 取 epoch 80、C2
 
 ### 4.4 CAAT、S2 与历史 C2 消融
 
-| 方法 | \(\lambda\) | Rank-1 | mAP | 证据与定位 |
-|---|---:|---:|---:|---|
-| 完整 CAAT-L05 | 0.5 | 94.2% | 85.4% | Git `73a44c0` 登记；消融 |
-| S2-SCPO | 0.5 | 94.4% | 86.8% | Git `a4a42b3` 登记；消融 |
-| C2-CCPO | 0.5 | 95.0% | 87.7% | Git `9b81850` 登记；历史 C2 |
-| C2-CCPO-Repeat | 0.5 | 95.0% | 87.3% | Git `9b81850` 登记；无固定 seed 的历史重复 |
-| **C2-L03** | **0.3** | **95.0%** | **87.8%** | **原始日志/checkpoint 已核验；当前主方法** |
+| 方法 | \(\lambda\) | Rank-1 | Rank-5 | Rank-10 | mAP | 证据与定位 |
+|---|---:|---:|---:|---:|---:|---|
+| 完整 CAAT-L05 | 0.5 | 94.2% | 98.0% | 98.8% | 85.4% | Git `73a44c0` 登记，原始日志/三轮 checkpoint 已核验；消融 |
+| S2-SCPO | 0.5 | 94.4% | 98.2% | 98.8% | 86.8% | Git `a4a42b3` 登记，原始日志/三轮 checkpoint 已核验；消融 |
+| C2-CCPO | 0.5 | 95.0% | not_archived | not_archived | 87.7% | E1；Git `9b81850` 登记；历史 C2 |
+| C2-CCPO-Repeat | 0.5 | 95.0% | not_archived | not_archived | 87.3% | E1；Git `9b81850` 登记；无固定 seed 的历史重复 |
+| **C2-L03** | **0.3** | **95.0%** | **98.5%** | **99.1%** | **87.8%** | **原始日志/checkpoint 已核验；当前主方法** |
 
-CAAT、S2 和历史 C2 \(\lambda=0.5\) 的原始日志/checkpoint 尚未随当前证据
-归档，表中只能标作 Git 已登记结果。
+2026-07-22 新证据已将 CAAT λ 系列、独立 CAT001 与 S2 从“只有结果登记”
+升级为“原始 config/log/三轮 checkpoint 及 SHA256 已核验”。训练 seed 仍未记录，
+GPU 型号只由实验表登记，且没有多 seed 重复。CAT001 仍是另一条无 result
+commit 的历史运行，不能替换 Git 已登记的 CAAT-L05。早期 C2 λ=0.5 两次运行
+仍未取得本轮新增的原始产物。
+
+| 消融 | 原始日志 SHA256 | epoch-120 checkpoint SHA256 | 下载归档 SHA256 |
+|---|---|---|---|
+| CAAT-L05 | `e9f3810c6bcb95527abe47825bbe1164c7ad12d84bdb43d95c41db5c8e6dcc6c` | `603c9accd704f0ad67184aaff7684c35654e7aad8b23adfdd648097c536c1675` | `b36bab18d63b0ed4aaab62d0ee5542a0ef08d2ef1b6629adbe28df174756ef05` |
+| S2-SCPO | `a4c903ce839b63ffa706048119f93633c34cab1bb8dc6adc6ab624361d99a5f6` | `1e725a2d8333cc9fbd7bb7f48986ab7b313871bbbee7026735f1b3d0bc375c1e` | `f9e63013a384df9e1703b2a2960b16ca8de7fcce004084919ba6967beff0ba30` |
 
 ## 5. 公平对照与实验设计
 
@@ -270,7 +289,7 @@ sampler、batch size、每身份样本数、optimizer、epoch、学习率策略�
 
 | 数据集 | 样本数 | sample hash | pair hash |
 |---|---:|---|---|
-| Market1501 | 19,281 | `ede26d3a28aece193741f618d26bd5b3ceecacce8ed359589322030a01d14461` | `193dd9ccfd552c6fcf7c402e2d31ad469ee51633cafc30142e2f3a835b522084` |
+| Market1501 person-only v2 | 16,483 | `c923b061a62243a08c7adc66a040302bb9662cbdfe92b0d350dfe5f5baa47fad` | `bd4093c0a557b55f43e6d2342c8ce9bb1cb2a85a0f5cb2aeade70dccedba464e` |
 | DukeMTMC-reID | 19,889 | `be498c3a413de371c27b610728b7a4c2465307e6c6e74ee5184b4e92df2a7f2e` | `1e0ffcd68de323d8c0f56d69737a673d0cdda11db1c0b4c423ccae59e96a234b` |
 
 | 数据集 | 距离分析 checkpoint | SHA256 |
@@ -285,30 +304,30 @@ sampler、batch size、每身份样本数、optimizer、epoch、学习率策略�
 `pair_types_mutually_exclusive` 检查均通过，checkpoint 加载无 missing/
 skipped 参数。
 
-### 6.2 Market1501
+### 6.2 Market1501 person-only v2（epoch 120 配对）
+
+第一版 Market 输出受 `pid=0` background 污染，已标记为 E0/superseded。
+正式 v2 结果使用 `--pid-filter positive-only`，在特征提取和 pair 生成前排除
+2,798 张 `pid=0` gallery，最终分析 16,483 张 `pid>0` 样本。
 
 | pair 类别 | count | Baseline mean±std | C2-L03 mean±std | Baseline median | C2-L03 median |
 |---|---:|---:|---:|---:|---:|
-| same-ID same-camera | 717,000 | 1.698396 ± 0.348022 | 1.701136 ± 0.365142 | 1.783479 | 1.794443 |
-| same-ID different-camera | 3,408,766 | 1.773591 ± 0.270782 | 1.772773 ± 0.291417 | 1.825205 | 1.832293 |
-| different-ID | 200,000 | 1.988320 ± 0.141430 | 1.989686 ± 0.151847 | 2.001366 | 2.008878 |
+| same-ID same-camera | 45,776 | 0.744444 ± 0.337128 | 0.655998 ± 0.318625 | 0.721556 | 0.616974 |
+| same-ID different-camera | 166,987 | 0.980708 ± 0.279031 | 0.856452 ± 0.283329 | 0.954839 | 0.822299 |
+| different-ID | 200,000 | 1.986254 ± 0.145640 | 1.988719 ± 0.156476 | 2.000804 | 2.009332 |
 
 | pair 类别 | Baseline q05/q25/q75/q95 | C2-L03 q05/q25/q75/q95 |
 |---|---|---|
-| same-ID same-camera | 0.896448 / 1.603586 / 1.914227 / 2.064273 | 0.810956 / 1.613689 / 1.923648 / 2.071109 |
-| same-ID different-camera | 1.233907 / 1.675943 / 1.945302 / 2.090542 | 1.181387 / 1.682981 / 1.951205 / 2.095465 |
-| different-ID | 1.741437 / 1.911494 / 2.082514 / 2.191031 | 1.718618 / 1.915006 / 2.088958 / 2.195377 |
+| same-ID same-camera | 0.213158 / 0.503314 / 0.957050 / 1.338907 | 0.191510 / 0.425832 / 0.846842 / 1.236588 |
+| same-ID different-camera | 0.568262 / 0.777812 / 1.157930 / 1.476210 | 0.456323 / 0.647833 / 1.029423 / 1.372043 |
+| different-ID | 1.729285 / 1.908711 / 2.083568 / 2.192818 | 1.706774 / 1.914379 / 2.090418 / 2.198465 |
 
-Market 的 same-ID different-camera 均值仅下降 0.000818（-0.046%），但
-median 上升 0.007088（+0.388%），q25、q75、q95 均上升，std 从
-0.270782 增至 0.291417。`different-ID − same-ID different-camera` 的均值
-间隔由 0.214728 增至 0.216913（+0.002185，+1.017%），median 间隔仅由
-0.176162 增至 0.176585（+0.000424，+0.241%）。
-
-因此，**Market 当前全 pair 描述统计不支持“C2 使跨摄像头同身份距离整体
-收缩”**。微小均值下降主要与低分位变化并存，而中位数和主要高分位没有同向
-下降；不能只挑选均值来证明预期机制。不同身份距离没有整体不利左移，间隔
-略增，但幅度很小。
+Market 的 same-ID different-camera 均值下降 0.124255（-12.670%），median
+下降 0.132540（-13.881%），q05、q25、q75、q95 均下降。different-ID 均值
+略升 0.002464（+0.124%），mean gap 由 1.005547 增至 1.132267
+（+12.602%），median gap 由 1.045965 增至 1.187034（+13.487%）。
+这支持当前 checkpoint 下更有利的距离结构，但 same-ID different-camera std
+小幅增加、different-ID q05 略降，不能表述为所有 pair 均改善。
 
 ### 6.3 DukeMTMC-reID（epoch 120 配对）
 
@@ -343,15 +362,17 @@ Duke 的 same-ID different-camera 均值下降 0.086020（-7.365%），median
 
 ### 6.4 跨数据集机制结论
 
-检索指标在 Market 和 Duke 上都向好，但距离分布证据并不完全一致：
+检索指标在 Market 和 Duke 上都向好，person-only Market 与 Duke 的当前
+matched-epoch 距离结果也都观察到更有利的结构：
 
-- Market：没有观察到跨摄像头同身份距离的整体收缩；
+- Market：person-only v2 中跨摄像头同身份均值、中位数及主要分位数均下降，
+  different-ID 均值略升，描述性 gap 扩大；
 - Duke：在 epoch 120 公平配对下观察到均值、中位数和全部主要分位数下降，
   且类间间隔扩大。
 
-论文应如实报告这种差异。当前结果支持“C2 能够改善检索性能，并在 Duke 的
-当前检索空间中呈现预期结构变化”，不支持“C2 在所有数据集上都通过全局拉近
-跨摄像头同身份距离起效”。
+论文应写为：“C2-L03 改善了检索性能，并在部分数据集/特征空间中观察到更有利
+的距离结构变化。”两组当前结果支持该限定表述；单 checkpoint 描述统计仍不
+支持“C2 一定拉近所有数据集、所有 checkpoint 或所有跨摄像头距离”。
 
 ## 7. Batch 内有效 cross-camera positive 覆盖率
 
@@ -394,19 +415,24 @@ Duke 的 same-ID different-camera 均值下降 0.086020（-7.365%），median
 
 其中 Market 和 Duke 的完整距离结果分别位于：
 
-- `analysis_results\market_epoch120_control\`
+- `analysis_results\market_epoch120_person_only_v2\`
 - `analysis_results\duke_epoch120_control\`
 
 当前仍缺少或需要补强：
 
 1. Market 与 Duke 的显式固定训练 seed，以及至少多 seed 重复实验的均值和
    标准差；现有结果不能支持统计显著性。
-2. C2-L01、C2-L05、C2-L10 的原始日志/checkpoint；当前只有归档服务器实验
-   表，不能把这些行提升为“原始产物已核验”。
-3. 完整 CAAT、S2 和早期 C2 \(\lambda=0.5\) 的原始日志/checkpoint；当前
-   只有 Git 登记。
-4. Market 距离机制的进一步预注册分析，例如 hardest-positive、query-gallery
-   检索局部邻域或训练特征空间分析；在补充前必须保留当前不支持整体收缩的
-   结论，不能选择性解释。
-5. Part Attention/C2 的参数量、FLOPs、训练与推理开销。
-6. 注意力可视化、检索成功/失败案例，以及相关工作对“创新性”的系统比较。
+2. C2 λ 系列虽已补齐原始日志/checkpoint，但 L01/L05/L10 的独立 result
+   commit 不可得；所有 λ 仍缺训练 seed 与重复实验。
+3. 完整 CAAT 与 S2 已补齐原始日志/checkpoint；CAT001 仍没有 result commit，
+   五组 CAAT/S2 均缺训练 seed、多 seed 重复和日志内直接 GPU 型号证据。
+4. 早期 C2 \(\lambda=0.5\) 与其 repeat 仍只有 Git 登记，缺本轮新增的原始
+   日志/checkpoint。
+5. 不同 checkpoint epoch 与多 seed 下的距离结构复验；旧
+   `market_epoch120_control` 已废弃，不得引用。
+6. Part Attention/C2 的参数量、FLOPs、训练与推理开销。
+7. 注意力可视化、检索成功/失败案例，以及相关工作对“创新性”的系统比较。
+
+分析工具已由 `1d5f48ddd85a3e0bdb3396e86be22d9eeaebb9f9` 纳入 Git。
+当前工作区后来新增的 `SEED=42` 与确定性 sampler 修改尚未提交，也没有参与
+上述历史训练，不能用于回填历史 seed。

@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import json
 import os
 import re
 import subprocess
@@ -23,8 +24,11 @@ SAME_CAMERA_POSITIVE_SECTION_TITLE = "## Same-Camera Positive Only Ablation"
 LAMBDA_SECTION_TITLE = "## C2 Lambda Sensitivity Experiments"
 BASELINE_SECTION_TITLE = "## C2 Baseline-Control Experiments"
 DUKE_VALIDATION_SECTION_TITLE = "## Duke Validation Experiments"
-HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
-SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | Rank-5 | Rank-10 | mAP | re-ranking | 备注 |"
+SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+LEGACY_COLUMN_COUNT = 17
+PRE_RERANK_COLUMN_COUNT = 19
+CURRENT_COLUMN_COUNT = 20
 
 
 def get_cfg_value(node, key, default=PENDING):
@@ -69,12 +73,16 @@ def collect_config(config_file):
     return {
         "dataset": normalize_dataset_name(local_cfg.DATASETS.NAMES),
         "output_dir": local_cfg.OUTPUT_DIR,
-        "seed": str(local_cfg.SEED) if "SEED" in local_cfg else PENDING,
+        # The current code default must never be used to backfill a historical
+        # run.  build_row obtains the actual training seed from artifacts in
+        # that run's OUTPUT_DIR instead.
+        "seed": PENDING,
         "cross_camera_enabled": get_cfg_value(model_cfg, "CROSS_CAMERA_POSITIVE_ONLY", False),
         "cross_camera_lambda": get_cfg_value(model_cfg, "CROSS_CAMERA_POSITIVE_LAMBDA"),
         "same_camera_enabled": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_ONLY", False),
         "same_camera_lambda": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_LAMBDA"),
         "same_camera_mode": get_cfg_value(model_cfg, "SAME_CAMERA_POSITIVE_MODE"),
+        "reranking": str(local_cfg.TEST.RE_RANKING),
     }
 
 
@@ -83,20 +91,36 @@ def parse_metrics(output_dir):
         "runtime": PENDING,
         "best_epoch": PENDING,
         "rank1": PENDING,
+        "rank5": PENDING,
+        "rank10": PENDING,
         "map": PENDING,
         "log_path": PENDING,
+        "seed": PENDING,
     }
     if not output_dir or not os.path.isdir(output_dir):
         return result
+
+    metadata_path = os.path.join(output_dir, "reproducibility.json")
+    if os.path.isfile(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                metadata_seed = json.load(handle).get("seed")
+            if (
+                    isinstance(metadata_seed, int)
+                    and not isinstance(metadata_seed, bool)
+                    and 0 <= metadata_seed < 2 ** 32):
+                result["seed"] = str(metadata_seed)
+        except (OSError, TypeError, ValueError):
+            pass
 
     log_paths = sorted(
         glob.glob(os.path.join(output_dir, "*.txt")) + glob.glob(os.path.join(output_dir, "*.log")),
         key=os.path.getmtime,
         reverse=True,
     )
-    best = None
-    first_timestamp = None
-    last_timestamp = None
+    candidates = []
+    runtimes_by_path = {}
+    seeds_by_path = {}
     for path in log_paths:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as handle:
@@ -107,9 +131,21 @@ def parse_metrics(output_dir):
         if result["log_path"] == PENDING:
             result["log_path"] = path
 
-        current_epoch = None
-        current_map = None
+        current = None
+        recorded_seeds = set()
+        first_timestamp = None
+        last_timestamp = None
         for line in lines:
+            seed_match = re.search(
+                r"Reproducibility fixed explicitly:\s*training_seed=(\d+)",
+                line,
+            )
+            if seed_match:
+                recorded_seeds.add(seed_match.group(1))
+            resolved_seed_match = re.match(r"^SEED:\s*(\d+)\s*$", line.strip())
+            if resolved_seed_match:
+                recorded_seeds.add(resolved_seed_match.group(1))
+
             timestamp_match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
             if timestamp_match:
                 try:
@@ -120,30 +156,57 @@ def parse_metrics(output_dir):
                     pass
             epoch_match = re.search(r"Validation Results - Epoch:\s*(\d+)", line)
             if epoch_match:
-                current_epoch = epoch_match.group(1)
-                current_map = None
+                if current is not None:
+                    candidates.append(current)
+                current = {
+                    "epoch": epoch_match.group(1),
+                    "map": PENDING,
+                    "rank1": PENDING,
+                    "rank5": PENDING,
+                    "rank10": PENDING,
+                    "log_path": path,
+                }
                 continue
 
             map_match = re.search(r"mAP:\s*([0-9.]+%)", line)
-            if map_match and current_epoch is not None:
-                current_map = map_match.group(1)
+            if map_match and current is not None:
+                current["map"] = map_match.group(1)
                 continue
 
-            rank_match = re.search(r"Rank-1\s*:\s*([0-9.]+%)", line)
-            if rank_match and current_epoch is not None:
-                rank1 = rank_match.group(1)
-                rank_value = float(rank1.rstrip("%"))
-                map_value = float(current_map.rstrip("%")) if current_map else -1.0
-                candidate = (rank_value, map_value, current_epoch, rank1, current_map or PENDING)
-                if best is None or candidate[:2] > best[:2]:
-                    best = candidate
+            rank_match = re.search(r"Rank-(1|5|10)\s*:\s*([0-9.]+%)", line)
+            if rank_match and current is not None:
+                current["rank{}".format(rank_match.group(1))] = rank_match.group(2)
+        if current is not None:
+            candidates.append(current)
+        if first_timestamp is not None and last_timestamp is not None:
+            runtimes_by_path[path] = str(last_timestamp - first_timestamp)
+        if recorded_seeds:
+            seeds_by_path[path] = recorded_seeds
 
-    if best is not None:
-        result["best_epoch"] = best[2]
-        result["rank1"] = best[3]
-        result["map"] = best[4]
-    if first_timestamp is not None and last_timestamp is not None:
-        result["runtime"] = str(last_timestamp - first_timestamp)
+    valid_candidates = [
+        candidate for candidate in candidates if candidate["rank1"] != PENDING
+    ]
+    if valid_candidates:
+        best = max(
+            valid_candidates,
+            key=lambda candidate: (
+                float(candidate["rank1"].rstrip("%")),
+                float(candidate["map"].rstrip("%"))
+                if candidate["map"] != PENDING
+                else -1.0,
+            ),
+        )
+        result["best_epoch"] = best["epoch"]
+        result["rank1"] = best["rank1"]
+        result["rank5"] = best["rank5"]
+        result["rank10"] = best["rank10"]
+        result["map"] = best["map"]
+        result["log_path"] = best["log_path"]
+        result["runtime"] = runtimes_by_path.get(best["log_path"], PENDING)
+    if result["seed"] == PENDING:
+        selected_seeds = seeds_by_path.get(result["log_path"], set())
+        if len(selected_seeds) == 1:
+            result["seed"] = next(iter(selected_seeds))
     return result
 
 
@@ -170,12 +233,15 @@ def build_row(args):
         config_info["output_dir"],
         metrics["log_path"],
         get_gpu_name(),
-        config_info["seed"],
+        metrics["seed"],
         loss_lambda,
         metrics["runtime"],
         metrics["best_epoch"],
         metrics["rank1"],
+        metrics["rank5"],
+        metrics["rank10"],
         metrics["map"],
+        config_info["reranking"],
         args.note,
     ]
     return "| " + " | ".join(values) + " |"
@@ -197,10 +263,45 @@ def select_section_title(args):
 
 
 def ensure_section(content, section_title):
-    if section_title in content:
-        return content
-    section = "\n\n{}\n\n{}\n{}\n".format(section_title, HEADER, SEPARATOR)
-    return content.rstrip() + section
+    if section_title not in content:
+        section = "\n\n{}\n\n{}\n{}\n".format(section_title, HEADER, SEPARATOR)
+        return content.rstrip() + section
+
+    lines = content.splitlines()
+    section_seen = False
+    for index, line in enumerate(lines):
+        if line.strip() == section_title:
+            section_seen = True
+            continue
+        if section_seen and line.startswith("## "):
+            break
+        if not section_seen or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and cells[0] == "实验编号":
+            lines[index] = HEADER
+            continue
+        if cells and all(cell and set(cell) == {"-"} for cell in cells):
+            lines[index] = SEPARATOR
+            continue
+        if len(cells) == LEGACY_COLUMN_COUNT:
+            migrated = (
+                cells[:15]
+                + [PENDING, PENDING]
+                + cells[15:16]
+                + [PENDING]
+                + cells[16:]
+            )
+            if len(migrated) != CURRENT_COLUMN_COUNT:
+                raise RuntimeError("Failed to migrate legacy experiment row.")
+            lines[index] = "| " + " | ".join(migrated) + " |"
+            continue
+        if len(cells) == PRE_RERANK_COLUMN_COUNT:
+            migrated = cells[:18] + [PENDING] + cells[18:]
+            if len(migrated) != CURRENT_COLUMN_COUNT:
+                raise RuntimeError("Failed to add re-ranking to experiment row.")
+            lines[index] = "| " + " | ".join(migrated) + " |"
+    return "\n".join(lines)
 
 
 def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md"):

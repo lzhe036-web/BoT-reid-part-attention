@@ -1,5 +1,7 @@
 # 研究生论文目录草案
 
+> 更新时间：2026-07-22。最终方法固定为 C2-L03；本稿按最新原始证据包更新。
+
 ## 建议题目
 
 > 基于跨摄像头正样本显式优化的行人重识别方法研究
@@ -28,9 +30,9 @@ Positive Only 只在消融实验出现。
 - 机制分析：
   - 固定 64/4 PK 采样协议下，Market 和 Duke 的离线有效 anchor 覆盖率
     分别为 97.8496% 和 94.0543%。
-  - Market 的全体无序 pair 描述统计不支持“跨摄像头同身份距离整体明显
-    拉近”；Duke 的 matched-epoch-120 分析则观察到跨摄像头同身份距离
-    下降且与异身份均值距离的间隔扩大。
+  - Market person-only v2 已在特征提取和 pair 生成前排除 `pid<=0`；Market
+    与 Duke 的 matched-epoch-120 分析均观察到跨摄像头同身份距离下降及
+    描述性间隔扩大，但只代表当前 checkpoint/检索特征空间。
 - 证据边界：训练 seed 未记录，尚无固定 seed 重复实验；上述变化只能按
   当前 checkpoint 与分析协议陈述，不写“统计显著”或“普遍有效”。
 
@@ -234,23 +236,23 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 
 ### 4.2 实验设置与证据等级
 
-- 软件、GPU、输入尺寸、增强、采样、优化器、epoch。
-- 证据分为“代码可核验”“Git 已登记”“原始日志/checkpoint 已核验”
-  “用户确认”和“待核实/待实验”。
-- Market C2-L03、Market Baseline-Control、Duke C2-L03 和 Duke
-  Baseline-Control 的原始日志与 checkpoint 已在外部证据包中核验；距离
-  分析的 metadata、sample hash、pair hash 和 checkpoint SHA256 也已核对。
-- 训练 seed 未记录，且没有固定 seed 重复运行，所有主指标和距离变化均按
-  当前单次运行/当前 checkpoint 描述。
-- GPU 型号可引用已归档实验登记，但应注明原始训练日志只记录了单 GPU，
-  未保存直接的设备查询输出。
+- 正式表源为 `paper_notes/c2_l03_final_evidence/UNIFIED_TABLES.md`；机器表源、
+  字段和等级规范分别见同目录 CSV 与 `TABLE_SCHEMA.md`。
+- 证据采用 E0—E4 门槛制：E0 不可用，E1 仅登记，E2 可核验单次运行，
+  E3 可复现单次运行，E4 为至少 3 个预先记录独立 seed 的重复实验统计。
+- 缺训练 seed 的训练结果最高为 E2；派生分析结论不得高于关键输入
+  checkpoint 的最低等级。
+- 当前所有训练实验均为 `n=1`、`training_seed=not_recorded`，所以统一为 E2；
+  不报告均值、标准差、置信区间或显著性。
+- 缺失值只写 `not_recorded`、`not_archived` 或 `not_applicable`；分析 seed 42
+  不得回填为训练 seed。
 
 ### 4.3 Market1501 主结果
 
-| 方法 | checkpoint epoch | Rank-1 | Rank-5 | Rank-10 | mAP | 证据 |
-|---|---:|---:|---:|---:|---:|---|
-| Baseline-Control | 120 | 94.4% | 98.1% | 98.9% | 85.5% | 原始日志/checkpoint 已核验 |
-| C2-L03 | 120 | **95.0%** | **98.5%** | **99.1%** | **87.8%** | 原始日志/checkpoint 已核验 |
+| 实验 ID | 角色 | 数据集 | 方法/变体 | λ_aux | 模式 | 选定 Epoch | Rank-1 | Rank-5 | Rank-10 | mAP | ΔRank-1 | ΔmAP | n | 训练 seed | 证据 |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| C2-Baseline-Control | 对照 | Market-1501 | Baseline-Control | 不适用 | 不适用 | 120 | 94.4 | 98.1 | 98.9 | 85.5 | 0.0 | 0.0 | 1 | not_recorded | E2 |
+| C2-L03 | 主方法 | Market-1501 | Cross-Camera Positive Only | 0.3 | mean | 120 | **95.0** | **98.5** | **99.1** | **87.8** | **+0.6** | **+2.3** | 1 | not_recorded | E2 |
 
 - 当前单次运行差值：Rank-1 +0.6、mAP +2.3 个百分点。
 - C2-L03 原始训练记录对应 commit `7b8195d`，运行时长约 52 分 35 秒；
@@ -263,10 +265,10 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 
 ### 4.4 Duke 跨数据集验证
 
-| 方法 | 登记 checkpoint epoch | Rank-1 | Rank-5 | Rank-10 | mAP | 证据 |
-|---|---:|---:|---:|---:|---:|---|
-| Duke-Baseline-Control | 80 | 86.7% | 94.0% | 95.8% | 75.7% | 原始日志/checkpoint 已核验 |
-| Duke-C2-L03 | 120 | **88.4%** | **95.2%** | **96.8%** | **78.7%** | 原始日志/checkpoint 已核验 |
+| 实验 ID | 角色 | 数据集 | 方法/变体 | λ_aux | 模式 | 选定 Epoch | Rank-1 | Rank-5 | Rank-10 | mAP | ΔRank-1 | ΔmAP | n | 训练 seed | 证据 |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| Duke-Baseline-Control | 对照 | DukeMTMC-reID | Baseline-Control | 不适用 | 不适用 | 80 | 86.7 | 94.0 | 95.8 | 75.7 | 0.0 | 0.0 | 1 | not_recorded | E2 |
+| Duke-C2-L03 | 主方法 | DukeMTMC-reID | Cross-Camera Positive Only | 0.3 | mean | 120 | **88.4** | **95.2** | **96.8** | **78.7** | **+1.7** | **+3.0** | 1 | not_recorded | E2 |
 
 - 两组仅 C2 开关不同。
 - 按当前登记 checkpoint，Rank-1、Rank-5、Rank-10 和 mAP 差值分别为
@@ -283,29 +285,31 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 
 ### 4.5 λ 敏感性
 
-| 配置 | λ | Rank-1 | mAP | 当前证据 |
-|---|---:|---:|---:|---|
-| C2-L01 | 0.1 | 94.7% | 87.5% | 服务器归档实验记录 |
-| C2-L03 | 0.3 | **95.0%** | **87.8%** | 原始日志/checkpoint 已核验 |
-| C2-L05 | 0.5 | 94.8% | 87.5% | 服务器归档实验记录 |
-| C2-L10 | 1.0 | 94.6% | 87.0% | 服务器归档实验记录 |
+| 实验 ID | 角色 | 数据集 | 方法/变体 | λ_aux | 模式 | 选定 Epoch | Rank-1 | Rank-5 | Rank-10 | mAP | ΔRank-1 | ΔmAP | n | 训练 seed | 证据 |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| C2-L01 | 候选 | Market-1501 | Cross-Camera Positive Only | 0.1 | mean | 120 | 94.7 | 98.2 | 99.1 | 87.5 | +0.3 | +2.0 | 1 | not_recorded | E2 |
+| C2-L03 | 最终选择 | Market-1501 | Cross-Camera Positive Only | 0.3 | mean | 120 | **95.0** | **98.5** | **99.1** | **87.8** | **+0.6** | **+2.3** | 1 | not_recorded | E2 |
+| C2-L05 | 候选 | Market-1501 | Cross-Camera Positive Only | 0.5 | mean | 120 | 94.8 | 98.1 | 98.9 | 87.5 | +0.4 | +2.0 | 1 | not_recorded | E2 |
+| C2-L10 | 候选 | Market-1501 | Cross-Camera Positive Only | 1.0 | mean | 120 | 94.6 | 98.2 | 99.0 | 87.0 | +0.2 | +1.5 | 1 | not_recorded | E2 |
 
 - 同一归档序列中 λ=0.3 数值最高，因此选为当前主配置。
-- L01/L05/L10 尚未逐一核验原始日志和 checkpoint；该表用于当前实验整理，
-  不能替代固定 seed 重复实验，也不能证明 λ=0.3 在随机波动下必然最优。
+- 四组均对应训练 commit `7b8195d`；L01/L05/L10 没有独立 result commit，
+  其结果表是训练快照上的未提交归档记录。四组训练 seed 均未记录。
+- 原始产物齐全不能替代固定 seed 重复实验，也不能证明 λ=0.3 在随机波动下
+  必然最优。
 
 ### 4.6 CAAT 与 S2 消融
 
-| 方法 | 新增正样本 | 聚合 | 新增负样本 | Rank-1 | mAP | 当前证据 |
-|---|---|---|---|---:|---:|---|
-| 完整 CAAT-L05 | 跨 camera | hardest | hardest negative | 94.2% | 85.4% | Git/文档登记，原始产物待核实 |
-| S2 | 同 camera | mean | 无 | 94.4% | 86.8% | Git/文档登记，原始产物待核实 |
-| C2-L03 | 跨 camera | mean | 无 | **95.0%** | **87.8%** | 原始日志/checkpoint 已核验 |
+| 实验 ID | 角色 | 数据集 | 方法/变体 | λ_aux | 模式 | 选定 Epoch | Rank-1 | Rank-5 | Rank-10 | mAP | ΔRank-1 | ΔmAP | n | 训练 seed | 证据 |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| CAAT-L05 | 完整 CAAT 消融 | Market-1501 | Full Camera-Aware Triplet | 0.5 | hard | 120 | 94.2 | 98.0 | 98.8 | 85.4 | -0.2 | -0.1 | 1 | not_recorded | E2 |
+| S2-SCPO-Market | 同摄像头正样本消融 | Market-1501 | Same-Camera Positive Only | 0.5 | mean | 120 | 94.4 | 98.2 | 98.8 | 86.8 | 0.0 | +1.3 | 1 | not_recorded | E2 |
+| C2-L03 | 主方法 | Market-1501 | Cross-Camera Positive Only | 0.3 | mean | 120 | **95.0** | **98.5** | **99.1** | **87.8** | **+0.6** | **+2.3** | 1 | not_recorded | E2 |
 
 - 完整 CAAT 和 S2 仅用于解释正样本范围、聚合方式及额外辅助负样本的作用，
   不作为最终方法。
-- 三行证据等级不同；在补齐 CAAT/S2 原始日志、checkpoint、配置哈希和
-  seed 前，消融讨论只作当前登记结果的描述性比较。
+- CAAT-L05 与 S2 的原始配置、日志和三轮 checkpoint 均已核验，但训练 seed
+  仍未记录，且没有固定 seed 重复；消融讨论仍限于当前单次运行的描述性比较。
 
 ### 4.7 距离分布分析
 
@@ -319,25 +323,25 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 
 | 数据集 | same-ID same-camera | same-ID different-camera | different-ID |
 |---|---:|---:|---:|
-| Market1501 | 717,000 | 3,408,766 | 200,000 |
+| Market1501 person-only v2 | 45,776 | 166,987 | 200,000 |
 | DukeMTMC-reID | 325,738 | 179,162 | 200,000 |
 
 跨摄像头同身份距离与分离间隔的核心描述统计：
 
 | 数据集与统计量 | Baseline | C2-L03 | C2 − Baseline |
 |---|---:|---:|---:|
-| Market cross-camera mean | 1.773591 | 1.772773 | -0.000818（-0.046%） |
-| Market cross-camera median | 1.825205 | 1.832293 | +0.007088（+0.388%） |
-| Market different-ID mean | 1.988320 | 1.989686 | +0.001366（+0.069%） |
-| Market mean gap | 0.214728 | 0.216913 | +0.002185（+1.017%） |
+| Market cross-camera mean | 0.980708 | 0.856452 | -0.124255（-12.670%） |
+| Market cross-camera median | 0.954839 | 0.822299 | -0.132540（-13.881%） |
+| Market different-ID mean | 1.986254 | 1.988719 | +0.002464（+0.124%） |
+| Market mean gap | 1.005547 | 1.132267 | +0.126720（+12.602%） |
 | Duke cross-camera mean | 1.167991 | 1.081971 | -0.086020（-7.365%） |
 | Duke cross-camera median | 1.132603 | 1.039084 | -0.093520（-8.257%） |
 | Duke different-ID mean | 1.975909 | 1.965717 | -0.010192（-0.516%） |
 | Duke mean gap | 0.807918 | 0.883746 | +0.075828（+9.386%） |
 
-- Market：cross-camera mean 仅微降，而 median、q25、q75、q95 上升且
-  标准差增大，因此不支持“跨摄像头同身份距离整体明显拉近”。different-ID
-  mean 略升，mean gap 略增；检索指标改善与“全体正样本整体左移”并不等价。
+- Market：person-only v2 排除 2,798 张 `pid=0` background 后，cross-camera
+  mean、median 与 q05/q25/q75/q95 均下降；different-ID mean 略升，mean gap
+  扩大 0.126720，median gap 扩大 0.141069。旧污染结果仅保留为废弃审计记录。
 - Duke：matched epoch 120 下，cross-camera mean、median 以及
   q05/q25/q75/q95 均下降；different-ID mean 也下降，但幅度较小，mean
   gap 扩大 0.075828，median gap 扩大 0.088117（+10.279%）。因此只能写：
@@ -345,18 +349,22 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
   检索嵌入距离，并扩大了描述统计上的类间间隔。”
 - pair 并非相互独立，且没有跨 seed 重复；不把 pair 数量大写成统计显著，
   也不把 Duke 结论外推为所有数据集上的普遍机制。
+- 论文总括统一写成：“C2 改善了检索性能，并在部分数据集/特征空间中观察到
+  更有利的距离结构变化。”
+- Market person-only v2 的分析执行可复现性为 E3，但受 E2 训练 checkpoint
+  限制，论文结论等级为 E2；Duke 距离分析与结论均为 E2。
 - 完整的 count、std、分位数、hash、直方图和箱线图在
-  `paper_notes/distance_analysis.md` 展开。
+  `paper_notes/c2_l03_final_evidence/UNIFIED_TABLES.md` 展开。
 
 ### 4.8 有效 cross-camera anchor 覆盖率
 
-- 协议：RandomIdentitySampler，batch size=64、K=4、seed=42，各离线
+- 协议：RandomIdentitySampler，batch size=64、K=4、分析 seed=42，各离线
   模拟 10 个完整 epoch。
 
-| 数据集 | 总 anchor | 有效 anchor | 加权有效率 | batch 比例均值 ± 总体标准差 | min/median/max | 零有效 batch |
-|---|---:|---:|---:|---:|---:|---:|
-| Market1501 | 117,376 | 114,852 | 97.8496% | 97.8496% ± 3.6160% | 81.25%/100%/100% | 0/1,834 |
-| DukeMTMC-reID | 144,576 | 135,980 | 94.0543% | 94.0543% ± 7.0234% | 43.75%/93.75%/100% | 0/2,259 |
+| 证据 ID | 数据集 | 总 anchor | 有效 anchor | 加权有效率 | batch 比例均值 ± 总体标准差 | min/median/max | 零有效 batch | n | 结论等级 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| EV-ANALYSIS-MKT-COVERAGE | Market-1501 | 117,376 | 114,852 | 97.8496% | 97.8496% ± 3.6160% | 81.25%/100%/100% | 0/1,834 | 1 | E2 |
+| EV-ANALYSIS-DUK-COVERAGE | DukeMTMC-reID | 144,576 | 135,980 | 94.0543% | 94.0543% ± 7.0234% | 43.75%/93.75%/100% | 0/2,259 | 1 | E2 |
 
 - 两数据集每 batch 的唯一 pid 均固定为 16；Market 唯一 camid 数均值
   5.9771（范围 5—6），Duke 为 7.8601（范围 5—8）。
@@ -365,6 +373,8 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 - 这是离线 sampler 的监督机会覆盖率，不是历史训练 batch 的精确回放，
   不是模型准确率，也不能单独证明 C2 带来性能提升；解释时须与 Rank-1/mAP
   和距离分布共同使用。
+- 命令依据元数据重建，执行时脚本哈希未嵌入结果，因此分析与结论均为 E2；
+  分析 seed 42 不是训练 seed。
 
 ### 4.9 可视化与失败案例
 
@@ -379,9 +389,10 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 ### 4.11 结果讨论与局限
 
 - 训练 seed 未记录，主结果和机制分析均缺少固定 seed 重复实验。
-- Market 的全体 pair 分布不支持“C2 整体拉近跨摄像头同身份距离”，而
-  Duke 支持；机制具有数据集/当前 checkpoint 依赖，需进一步复验。
-- L01/L05/L10、CAAT 和 S2 尚缺逐项原始日志/checkpoint 证据。
+- Market person-only v2 与 Duke 当前 checkpoint 均支持更有利的距离结构；
+  仍需不同 checkpoint 和跨 seed 复验。
+- C2 λ、CAAT 与 S2 的原始日志/checkpoint 已补齐，但训练 seed 和多次独立
+  重复仍缺失。
 - 固定水平条带的姿态错位问题。
 - C2 依赖 camid。
 - 当前距离分析针对 BNNeck-after 检索空间，而 C2 在 BNNeck-before
@@ -417,14 +428,14 @@ L=L_{\mathrm{id}}+L_{\mathrm{tri}}+\lambda L_{\mathrm{C2}},
 - 总结 C2 方法、Market/Duke 原始日志核验结果和机制分析框架。
 - 报告 C2-L03 在 Market 的 95.0% Rank-1/87.8% mAP，以及在 Duke
   的 88.4%/78.7%；同时说明这些是缺少重复 seed 的单次实验结果。
-- 机制结论分数据集陈述：Market 未观察到跨摄像头同身份全局距离整体明显
-  收缩；Duke matched epoch 120 观察到收缩且分离间隔扩大。
+- 机制结论分数据集陈述：Market person-only v2 与 Duke matched epoch 120
+  均观察到跨摄像头同身份距离收缩且描述性分离间隔扩大；不外推为普遍规律。
 - 覆盖率结论只说明 C2 在当前 PK 采样中有较高的潜在生效机会。
 
 ### 6.2 局限性
 
 - seed 未记录、缺少重复实验与置信区间。
-- λ 其余档位及 CAAT/S2 原始产物尚未逐项归档核验。
+- C2 λ、CAAT/S2 已有原始产物，但仍缺训练 seed、多 seed 重复和置信区间。
 - 训练 BNNeck-before 空间与检索 BNNeck-after 空间之间的机制差异。
 - camid 依赖、固定局部划分和跨数据集机制一致性不足。
 

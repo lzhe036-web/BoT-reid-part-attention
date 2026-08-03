@@ -1,6 +1,6 @@
 # Baseline-Control 与 C2-L03 距离分布分析
 
-更新时间：2026-07-19。
+更新时间：2026-07-22。
 
 ## 1. 证据状态与数据位置
 
@@ -12,8 +12,14 @@ Market1501 和 DukeMTMC-reID 的真实距离分析均已完成，不再是“待
 
 完整结果目录：
 
-- Market1501：`analysis_results\market_epoch120_control`
+- Market1501 正式结果：`analysis_results\market_epoch120_person_only_v2`
+- Market1501 旧结果：`analysis_results\market_epoch120_control`（含 pid=0，已标记为 superseded，仅保留审计）
 - DukeMTMC-reID：`analysis_results\duke_epoch120_control`
+
+论文统一表位于 `paper_notes/c2_l03_final_evidence/UNIFIED_TABLES.md`，机器可读
+正式距离表为 `distance_distribution_formal.csv`。Market person-only v2 的
+证据 ID 为 `EV-ANALYSIS-MKT-DIST-PIDGT0`，分析执行 E3、论文结论 E2；Duke
+证据 ID 为 `EV-ANALYSIS-DUK-DIST-E120`，分析与结论均为 E2。
 
 用户提供的源压缩包：
 
@@ -31,7 +37,8 @@ Market1501 和 DukeMTMC-reID 的真实距离分析均已完成，不再是“待
 | 项目 | Market1501 | DukeMTMC-reID |
 |---|---:|---:|
 | 样本范围 | query + gallery | query + gallery |
-| 样本数 | 19,281（3,368 + 15,913） | 19,889（2,228 + 17,661） |
+| PID 过滤 | `pid>0`，特征提取和 pair 生成前执行 | 无额外过滤；样本中无非正 pid |
+| 样本数 | 16,483（3,368 + 13,115；排除 2,798 张 pid=0） | 19,889（2,228 + 17,661） |
 | 特征 | BNNeck-after，2048 维 | 相同 |
 | normalization | 显式 L2 | 相同 |
 | 距离 | squared Euclidean | 相同 |
@@ -61,7 +68,8 @@ Market1501 和 DukeMTMC-reID 的真实距离分析均已完成，不再是“待
 - Baseline 与 C2-L03 复用同一份 `pair_indices.csv`；
 - `pair_indices.csv` 与 `pair_distances.csv` 逐行对齐；
 - 四个 checkpoint 均无 missing/skipped 参数；
-- 从 CSV 独立重算的统计与 JSON 一致，最大绝对误差约为 `4.3e-10`。
+- Market metadata 还确认全部分析 pid 为正，过滤在特征提取和 pair 生成前执行；
+- 从 CSV 独立重算的统计与 JSON 一致。
 
 需要特别区分两个特征空间：
 
@@ -70,11 +78,15 @@ Market1501 和 DukeMTMC-reID 的真实距离分析均已完成，不再是“待
 
 因此，本节检验的是“C2 训练后检索嵌入空间的距离结构”，不能表述为 C2 直接优化了 post-BN、L2-normalized 的 squared Euclidean 距离。
 
+Market 的第一版输出因 loader 保留 `pid=0` background 而失效；正式修正版使用
+`--pid-filter positive-only`，在特征提取和 pair 生成前排除全部 2,798 张
+`pid=0` gallery。旧目录保留为 E0/superseded 审计记录，不再进入论文定量结论。
+
 ## 3. 样本、pair 与 checkpoint 哈希
 
 | 数据集 | sample order SHA256 | pair index SHA256 |
 |---|---|---|
-| Market1501 | `ede26d3a28aece193741f618d26bd5b3ceecacce8ed359589322030a01d14461` | `193dd9ccfd552c6fcf7c402e2d31ad469ee51633cafc30142e2f3a835b522084` |
+| Market1501（person-only v2） | `c923b061a62243a08c7adc66a040302bb9662cbdfe92b0d350dfe5f5baa47fad` | `bd4093c0a557b55f43e6d2342c8ce9bb1cb2a85a0f5cb2aeade70dccedba464e` |
 | DukeMTMC-reID | `be498c3a413de371c27b610728b7a4c2465307e6c6e74ee5184b4e92df2a7f2e` | `1e0ffcd68de323d8c0f56d69737a673d0cdda11db1c0b4c423ccae59e96a234b` |
 
 | 数据集/模型 | checkpoint | epoch | SHA256 |
@@ -86,30 +98,36 @@ Market1501 和 DukeMTMC-reID 的真实距离分析均已完成，不再是“待
 
 Duke 论文主表中的 Baseline 报告点为 epoch 80，但本节为避免 checkpoint epoch 差异，使用 Baseline 与 C2-L03 均为 epoch 120 的对照。对应检索指标为 Baseline `86.4/76.3`，C2-L03 `88.4/78.7`（Rank-1/mAP）。不能把这里的 Baseline checkpoint 称为“最佳指标 checkpoint”。
 
-## 4. Market1501 结果
+## 4. Market1501 person-only v2 正式结果
 
-### 4.1 完整描述统计
+### 4.1 样本过滤与完整描述统计
 
+Market `bounding_box_test` 共 19,732 张图像；loader 先排除 3,819 张
+`pid=-1` junk，再由分析脚本在特征提取前排除 2,798 张 `pid=0` background。
+最终使用 3,368 张 query 与 13,115 张 gallery，共 16,483 张 `pid>0` 样本。
 下表中 std 为总体标准差。
 
 | pair 类型 | 模型 | count | mean | std | median | q25 | q75 | q05 | q95 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| same-ID same-camera | Baseline | 717,000 | 1.698396 | 0.348022 | 1.783479 | 1.603586 | 1.914227 | 0.896448 | 2.064273 |
-| same-ID same-camera | C2-L03 | 717,000 | 1.701136 | 0.365142 | 1.794443 | 1.613689 | 1.923648 | 0.810956 | 2.071109 |
-| same-ID different-camera | Baseline | 3,408,766 | 1.773591 | 0.270782 | 1.825205 | 1.675943 | 1.945302 | 1.233907 | 2.090542 |
-| same-ID different-camera | C2-L03 | 3,408,766 | 1.772773 | 0.291417 | 1.832293 | 1.682981 | 1.951205 | 1.181387 | 2.095465 |
-| different-ID | Baseline | 200,000 | 1.988320 | 0.141430 | 2.001366 | 1.911494 | 2.082514 | 1.741437 | 2.191031 |
-| different-ID | C2-L03 | 200,000 | 1.989686 | 0.151847 | 2.008878 | 1.915006 | 2.088958 | 1.718618 | 2.195377 |
+| same-ID same-camera | Baseline | 45,776 | 0.744444 | 0.337128 | 0.721556 | 0.503314 | 0.957050 | 0.213158 | 1.338907 |
+| same-ID same-camera | C2-L03 | 45,776 | 0.655998 | 0.318625 | 0.616974 | 0.425832 | 0.846842 | 0.191510 | 1.236588 |
+| same-ID different-camera | Baseline | 166,987 | 0.980708 | 0.279031 | 0.954839 | 0.777812 | 1.157930 | 0.568262 | 1.476210 |
+| same-ID different-camera | C2-L03 | 166,987 | 0.856452 | 0.283329 | 0.822299 | 0.647833 | 1.029423 | 0.456323 | 1.372043 |
+| different-ID | Baseline | 200,000 | 1.986254 | 0.145640 | 2.000804 | 1.908711 | 2.083568 | 1.729285 | 2.192818 |
+| different-ID | C2-L03 | 200,000 | 1.988719 | 0.156476 | 2.009332 | 1.914379 | 2.090418 | 1.706774 | 2.198465 |
 
 ### 4.2 C2-L03 相对 Baseline 的变化
 
 | pair 类型 | Δmean | Δstd | Δmedian | Δq25 | Δq75 | Δq05 | Δq95 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| same-ID same-camera | +0.002740（+0.161%） | +0.017119（+4.919%） | +0.010963（+0.615%） | +0.010103 | +0.009421 | −0.085492 | +0.006836 |
-| same-ID different-camera | **−0.000818（−0.046%）** | **+0.020636（+7.621%）** | **+0.007088（+0.388%）** | +0.007038 | +0.005903 | −0.052520 | +0.004923 |
-| different-ID | +0.001366（+0.069%） | +0.010416（+7.365%） | +0.007511（+0.375%） | +0.003512 | +0.006444 | −0.022820 | +0.004346 |
+| same-ID same-camera | −0.088446（−11.881%） | −0.018504（−5.489%） | −0.104582（−14.494%） | −0.077482 | −0.110208 | −0.021648 | −0.102319 |
+| same-ID different-camera | **−0.124255（−12.670%）** | +0.004298（+1.540%） | **−0.132540（−13.881%）** | −0.129980 | −0.128507 | −0.111939 | −0.104167 |
+| different-ID | +0.002464（+0.124%） | +0.010836（+7.441%） | +0.008528（+0.426%） | +0.005669 | +0.006850 | −0.022511 | +0.005647 |
 
-Market 的 `same-ID different-camera` 均值只下降 `0.000818`，相对变化为 `−0.046%`；但 median、q25、q75 和 q95 均略微上升，std 增加 `7.621%`。q05 向左移动说明低距离尾部有所变化，但不能代表主体分布整体收缩。
+Market 的 `same-ID different-camera` mean、median、q05、q25、q75 和 q95
+全部下降，说明主体和主要分位数均发生左移；std 小幅增加，故不写成“所有 pair
+都变近”。different-ID mean 与 median 略有上升，未观察到总体类间距离同步收缩；
+但 q05 略降，仍需保留低距离尾部风险。
 
 ### 4.3 类间间隔
 
@@ -123,18 +141,22 @@ d(\text{same-ID different-camera}).
 
 | 统计量 | Baseline | C2-L03 | 绝对变化 | 相对变化 |
 |---|---:|---:|---:|---:|
-| mean gap | 0.214728 | 0.216913 | +0.002185 | +1.017% |
-| median gap | 0.176162 | 0.176585 | +0.000424 | +0.241% |
+| mean gap | 1.005547 | 1.132267 | +0.126720 | +12.602% |
+| median gap | 1.045965 | 1.187034 | +0.141069 | +13.487% |
 
-Market 的类间间隔略有扩大，different-ID 均值也未出现不利左移，但变化幅度很小。
+Market 的 mean 与 median separation gap 均扩大。
 
 ### 4.4 Market 结论
 
-不能写“C2-L03 在 Market1501 上整体拉近了跨摄像头同身份距离”。与数据一致的表述是：
+> 在当前 Market1501 person-only epoch-120 checkpoint 和统一分析协议下，
+> C2-L03 的跨摄像头同身份距离均值、中位数及主要分位数均下降，其中均值下降
+> 12.670%，中位数下降 13.881%；different-ID 均值未下降，mean/median
+> separation gap 分别扩大 12.602% 和 13.487%。该结果支持当前检索嵌入空间中
+> 更有利的距离结构，但不构成统计显著性或普遍规律证明。
 
-> 在当前 Market1501 epoch-120 checkpoint 和统一检索嵌入协议下，C2-L03 的跨摄像头同身份距离均值仅下降 0.046%，而中位数及多数主要分位数略有上升，离散度增加。类间间隔略有扩大，但幅度很小。因此，当前全 pair 距离分布不足以支持“跨摄像头同身份检索嵌入被整体明显拉近”的机制解释。
-
-Market 的 Rank-1/mAP 从 `94.4/85.5` 提高到 `95.0/87.8`，说明检索指标与“全体跨摄像头 pair 整体左移”并不等价。当前证据只能报告这种不一致，不能选择性使用极小的均值下降来宣称机制已得到验证。
+旧 `market_epoch120_control` 中 94.8431% 的 same-ID pair 为 pid0-pid0，已由
+`SUPERSEDED.md` 和证据等级 E0 标记为废弃；旧数值仅保留协议审计价值，不得与
+person-only v2 合并或择优使用。
 
 ## 5. DukeMTMC-reID 结果
 
@@ -182,15 +204,18 @@ different-ID mean 也下降 `0.516%`，但远小于跨摄像头同身份距离�
 
 | 问题 | Market1501 | DukeMTMC-reID |
 |---|---|---|
-| 跨摄像头同身份 mean 是否下降 | 是，−0.046%，幅度极小 | 是，−7.365% |
-| median 与主体分位数是否同向下降 | 否 | 是 |
-| different-ID mean 是否下降 | 否，+0.069% | 是，−0.516% |
-| mean separation gap | +1.017% | +9.386% |
-| 是否支持“整体拉近” | **不支持** | **在当前协议下支持** |
+| 跨摄像头同身份统计是否具备人物语义 | 是；person-only v2 全部 `pid>0` | 是 |
+| same-ID different-camera mean/median 变化 | −12.670% / −13.881% | −7.365% / −8.257% |
+| different-ID mean 变化 | +0.124% | −0.516% |
+| mean separation gap | +12.602% | +9.386% |
+| 是否支持更有利的距离结构 | **当前 checkpoint 下支持** | **当前 checkpoint 下支持** |
 
 综合表述：
 
-> 距离机制证据具有数据集差异。DukeMTMC-reID 的主体分布与间隔变化支持 C2 对跨摄像头类内结构的改善；Market1501 虽取得更高 Rank-1/mAP，但全 pair 检索距离并未呈现一致的整体收缩。论文应同时报告两者，并将“C2 的作用必然表现为所有跨摄像头正 pair 的全局左移”保留为未被普遍验证的假设。
+> C2-L03 改善了当前 Market1501 与 DukeMTMC-reID 运行的检索指标，并在两个
+> 当前 epoch-120 检索特征空间中观察到更有利的跨摄像头距离结构变化。该观察
+> 来自各一组 checkpoint 的描述统计，不支持“C2 一定拉近所有数据集、所有
+> checkpoint 或所有跨摄像头样本距离”。
 
 ## 7. 机器可读结果与图表
 
@@ -208,23 +233,26 @@ different-ID mean 也下降 `0.516%`，但远小于跨摄像头同身份距离�
 - `distance_histogram.png`
 - `distance_boxplot.png`
 
-Market 图表：
+Market 正式图表：
 
-- `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\market_epoch120_control\distance_histogram.png`
-- `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\market_epoch120_control\distance_boxplot.png`
+- `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\market_epoch120_person_only_v2\distance_histogram.png`
+- `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\market_epoch120_person_only_v2\distance_boxplot.png`
 
 Duke 图表：
 
 - `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\duke_epoch120_control\distance_histogram.png`
 - `D:\thesis_reid\thesis_evidence\distance_analysis\2026-07-18\analysis_results\duke_epoch120_control\distance_boxplot.png`
 
-图中已注明 dataset、两组 checkpoint、BNNeck-after、L2 normalization、squared Euclidean、same-ID 全量 pair，以及 different-ID 均匀无放回抽样 `n=200000, seed=42`。
+图中已注明 dataset、两组 checkpoint、BNNeck-after、L2 normalization、squared Euclidean、same-ID 全量 pair，以及 different-ID 均匀无放回抽样 `n=200000, seed=42`。Market 图还对应 `pid>0` 的 person-only 协议。
+
+分析工具已由提交 `1d5f48ddd85a3e0bdb3396e86be22d9eeaebb9f9` 纳入版本管理；Market 修正版 metadata 记录的 Windows 工作树文件 SHA256 为 `5a48cd50769b50972e52c27ed93e744eb0723c13145a736b77b4a06e27c2a493`。
 
 ## 8. 证据边界与后续工作
 
 已经完成：
 
 - 两数据集样本顺序、pair 索引和 checkpoint 哈希核验；
+- Market 在特征提取和 pair 生成前排除 `pid<=0`，并完整重生成数据、统计和图片；
 - self 排除、\(i<j\)、pair 去重和三类互斥核验；
 - 全量统计复算；
 - 原始日志、checkpoint、CSV/JSON 和图表归档。
@@ -234,5 +262,5 @@ Duke 图表：
 1. 固定训练 seed 的多次独立重复实验；
 2. 对不同 checkpoint epoch 的敏感性检查；
 3. 与训练空间直接对应的 BNNeck-before、未显式 L2 特征分析；
-4. hard-positive、近邻或检索排序局部 pair 的补充分析，用于解释 Market 上“检索指标改善但全 pair 分布不整体左移”的现象；
-5. 配对样本具有相关性时更合适的不确定性估计，不能把数百万 pair 直接视为独立重复。
+4. hard-positive、近邻或检索排序局部 pair 的补充分析；
+5. 配对样本具有相关性时更合适的不确定性估计，不能把数十万 pair 直接视为独立重复。

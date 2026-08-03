@@ -1,6 +1,6 @@
 # Cross-camera positive 有效 anchor 覆盖率
 
-更新时间：2026-07-19。
+更新时间：2026-07-22。
 
 ## 1. 定义
 
@@ -51,6 +51,11 @@ r_{\mathrm{anchor}}
 
 由于所有 batch 都是 64 个 anchor，加权有效比例与 batch 比例算术均值相同。这一相等由固定 batch size 导致，不应推广到可变 batch size 情形。
 
+| 证据 ID | 数据集 | n | 训练 seed | 分析 seed | 结论等级 |
+|---|---|---:|---|---:|---|
+| EV-ANALYSIS-MKT-COVERAGE | Market1501 | 1 | not_recorded | 42 | E2 |
+| EV-ANALYSIS-DUK-COVERAGE | DukeMTMC-reID | 1 | not_recorded | 42 | E2 |
+
 ## 4. Batch 组成
 
 | 数据集 | 唯一 pid / batch | 唯一 camid 均值 | camid 总体 std | camid min | camid median | camid max |
@@ -88,7 +93,8 @@ Pair 比例小于 anchor 覆盖率并不矛盾：一个 anchor 只要拥有至�
 - 它不是历史训练 batch 的精确回放；
 - 高覆盖率说明损失有机会生效，不等于损失一定产生了正确梯度或性能收益；
 - 最终机制解释应同时结合 Rank-1/mAP 和检索距离分布；
-- 当前距离证据在两个数据集上并不完全一致：Duke 支持跨摄像头同身份距离整体下降，Market 的全 pair 主体分布未呈现一致收缩。
+- 当前 Market person-only v2 与 Duke 距离结果均观察到跨摄像头同身份距离下降，
+  但都只是一组 checkpoint 下的描述统计，不能据此推广为普遍规律。
 
 ## 7. 机器可读证据
 
@@ -96,6 +102,16 @@ Pair 比例小于 anchor 覆盖率并不矛盾：一个 anchor 只要拥有至�
 - DukeMTMC-reID：`paper_notes/analysis_results/batch_coverage_dukemtmc/`
 
 各目录包含逐 batch CSV、逐 epoch CSV、JSON 和 Markdown 摘要。现有文件均保留原样，本次仅更新论文说明。
+
+论文机器可读正式表为
+`paper_notes/c2_l03_final_evidence/anchor_coverage_formal.csv`；上述目录中的明细
+CSV/JSON 是其底层审计依据。
+
+分析工具 `tools/analyze_cross_camera_batch_coverage.py` 已由提交
+`1d5f48ddd85a3e0bdb3396e86be22d9eeaebb9f9` 纳入版本管理。落盘
+`summary.json` 没有保存原始 shell 命令全文，因此论文材料中的复现命令是依据
+config、dataset、data root、seed、epoch、batch size 和 K 等元数据重建的命令，
+不是历史命令的逐字回放。
 
 ## 8. 证据边界
 
@@ -111,3 +127,6 @@ Pair 比例小于 anchor 覆盖率并不矛盾：一个 anchor 只要拥有至�
 2. 在不同 K、batch size 或 camera-balanced sampler 下比较覆盖率；
 3. 统计有效 anchor 的正样本数量分布，而不仅是是否至少存在一个；
 4. 联合梯度大小或实际 C2 loss 值分析“有监督机会”与“产生有效优化”的差异。
+
+当前工作区后来新增的训练 seed 和确定性 sampler 修改没有参与这份历史离线统计，
+也不能用于回填既有训练运行的 seed。这里的 seed=42 始终只表示分析模拟 seed。
