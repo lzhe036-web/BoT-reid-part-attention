@@ -15,10 +15,51 @@ import sys
 
 import numpy as np
 import torch
+import yaml
 from torch.backends import cudnn
 
 
 UINT32_LIMIT = 2 ** 32
+DATA_LOADER_STREAM_OFFSETS = {
+    "train": 0,
+    "query": 1,
+    "gallery": 2,
+}
+DATA_LOADER_GENERATOR_SEED_RULE = (
+    "(base_seed + stream_offset[train=0,query=1,gallery=2]) modulo 2**32"
+)
+
+
+def read_explicit_config_seed(config_file):
+    """Read a top-level YAML seed without falling back to config defaults."""
+    if not config_file or not os.path.isfile(config_file):
+        raise ValueError("Source config file is required for explicit seed validation")
+    with open(config_file, "r", encoding="utf-8") as handle:
+        source = yaml.safe_load(handle)
+    if not isinstance(source, dict) or "SEED" not in source:
+        raise ValueError("Source config must explicitly define top-level SEED")
+    return validate_seed(source["SEED"])
+
+
+def validate_seed_evidence_chain(source_seed, resolved_seed, applied_seed,
+                                 metadata_seed=None, expected_seed=None):
+    """Require every available seed source to identify the same run."""
+    values = {
+        "source config": validate_seed(source_seed),
+        "resolved config": validate_seed(resolved_seed),
+        "applied training": validate_seed(applied_seed),
+    }
+    if metadata_seed is not None:
+        values["reproducibility metadata"] = validate_seed(metadata_seed)
+    if expected_seed is not None:
+        values["expected experiment"] = validate_seed(expected_seed)
+    if len(set(values.values())) != 1:
+        raise ValueError(
+            "Training seed evidence conflict: {}".format(
+                ", ".join("{}={}".format(key, value) for key, value in values.items())
+            )
+        )
+    return next(iter(values.values()))
 
 
 def validate_seed(seed):
@@ -29,6 +70,46 @@ def validate_seed(seed):
     if seed < 0 or seed >= UINT32_LIMIT:
         raise ValueError("SEED must be an integer in [0, 2**32), got {}".format(seed))
     return seed
+
+
+def derive_data_loader_seed(base_seed, stream):
+    """Derive a stable per-stream DataLoader seed without global RNG state."""
+    base_seed = validate_seed(base_seed)
+    if stream not in DATA_LOADER_STREAM_OFFSETS:
+        raise ValueError(
+            "Unknown DataLoader seed stream {!r}; expected one of {}".format(
+                stream, sorted(DATA_LOADER_STREAM_OFFSETS)
+            )
+        )
+    return (base_seed + DATA_LOADER_STREAM_OFFSETS[stream]) % UINT32_LIMIT
+
+
+def make_data_loader_generator(base_seed, stream):
+    """Return an independently seeded generator for one DataLoader stream."""
+    generator = torch.Generator()
+    generator.manual_seed(derive_data_loader_seed(base_seed, stream))
+    return generator
+
+
+def data_loader_generator_metadata(base_seed):
+    base_seed = validate_seed(base_seed)
+    return {
+        "seed_derivation_rule": DATA_LOADER_GENERATOR_SEED_RULE,
+        "stream_offsets": dict(DATA_LOADER_STREAM_OFFSETS),
+        "stream_seeds": {
+            stream: derive_data_loader_seed(base_seed, stream)
+            for stream in sorted(DATA_LOADER_STREAM_OFFSETS)
+        },
+        "loader_bindings": {
+            "train_loader": "train",
+            "validation_query_gallery_loader": "query",
+            "gallery_stream": (
+                "reserved deterministic stream; query and gallery are combined "
+                "by the legacy validation loader"
+            ),
+        },
+        "independent_from_global_torch_rng": True,
+    }
 
 
 def ensure_python_hash_seed(seed, argv=None):
@@ -69,13 +150,20 @@ def seed_everything(seed):
 
     return {
         "seed": seed,
+        "python_random_seed": seed,
         "python_random_seeded": True,
+        "numpy_seed": seed,
         "numpy_seeded": True,
+        "torch_cpu_seed": seed,
         "torch_cpu_seeded": True,
+        "torch_cuda_manual_seed_all_seed": seed if cuda_available else "not_recorded",
+        "torch_cuda_manual_seed_all_called": cuda_available,
         "torch_cuda_all_seeded": cuda_available,
         "cuda_available": cuda_available,
         "cudnn_benchmark": bool(cudnn.benchmark),
         "cudnn_deterministic": bool(cudnn.deterministic),
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
     }
 
 
@@ -144,6 +232,7 @@ def write_reproducibility_record(
         cfg,
         seed_state,
         config_file="",
+        source_config_seed=None,
         cli_overrides=None,
         command=None,
         repo_dir=None):
@@ -156,16 +245,20 @@ def write_reproducibility_record(
     if not output_dir:
         raise ValueError("OUTPUT_DIR must be set so the training seed can be recorded")
 
-    output_dir = os.path.abspath(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-
     config_seed = validate_seed(cfg.SEED)
     recorded_seed = validate_seed(seed_state["seed"])
-    if config_seed != recorded_seed:
+    if source_config_seed is None:
         raise ValueError(
-            "Resolved config seed {} does not match applied seed {}"
-            .format(config_seed, recorded_seed)
+            "source_config_seed is required and must come from an explicit YAML SEED"
         )
+    validated_seed = validate_seed_evidence_chain(
+        source_config_seed,
+        config_seed,
+        recorded_seed,
+    )
+
+    output_dir = os.path.abspath(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     resolved_config = str(cfg).rstrip() + "\n"
     resolved_config_path = os.path.join(output_dir, "config_resolved.yml")
@@ -187,6 +280,12 @@ def write_reproducibility_record(
         "seed": int(seed_state["seed"]),
         "seed_source": "resolved_config.SEED",
         "seed_applied_before_data_loading": True,
+        "seed_chain": {
+            "source_config_seed": validated_seed,
+            "resolved_config_seed": config_seed,
+            "applied_training_seed": recorded_seed,
+            "reproducibility_metadata_seed": recorded_seed,
+        },
         "random_state": dict(seed_state),
         "data_loader_worker_seeding": {
             "enabled": True,
@@ -194,6 +293,11 @@ def write_reproducibility_record(
             "num_workers": int(cfg.DATALOADER.NUM_WORKERS)
             if hasattr(cfg, "DATALOADER") else None,
         },
+        "random_identity_sampler": {
+            "base_seed": config_seed,
+            "epoch_seed_rule": "(base_seed + zero_based_epoch_index) modulo 2**32",
+        },
+        "data_loader_generators": data_loader_generator_metadata(config_seed),
         "configuration": {
             "source_file": config_path,
             "source_file_sha256": config_sha256,

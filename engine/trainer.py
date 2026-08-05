@@ -13,6 +13,7 @@ from ignite.handlers import ModelCheckpoint, Timer
 from ignite.metrics import RunningAverage
 
 from utils.reid_metric import R1_mAP
+from utils.experiment_recording import append_validation_record, utc_now
 
 global ITER
 ITER = 0
@@ -278,6 +279,18 @@ def do_train(
             logger.info("mAP: {:.1%}".format(mAP))
             for r in [1, 5, 10]:
                 logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+            append_validation_record(output_dir, {
+                'epoch': int(engine.state.epoch),
+                'global_iteration': int(engine.state.iteration),
+                'timestamp_utc': utc_now(),
+                'rank1_percent': float(cmc[0]) * 100.0,
+                'rank5_percent': float(cmc[4]) * 100.0,
+                'rank10_percent': float(cmc[9]) * 100.0,
+                'map_percent': float(mAP) * 100.0,
+                're_ranking': str(cfg.TEST.RE_RANKING),
+                'neck_feat': str(cfg.TEST.NECK_FEAT),
+                'feat_norm': str(cfg.TEST.FEAT_NORM),
+            })
 
     trainer.run(train_loader, max_epochs=epochs)
 
@@ -385,5 +398,17 @@ def do_train_with_center(
             logger.info("mAP: {:.1%}".format(mAP))
             for r in [1, 5, 10]:
                 logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+            append_validation_record(output_dir, {
+                'epoch': int(engine.state.epoch),
+                'global_iteration': int(engine.state.iteration),
+                'timestamp_utc': utc_now(),
+                'rank1_percent': float(cmc[0]) * 100.0,
+                'rank5_percent': float(cmc[4]) * 100.0,
+                'rank10_percent': float(cmc[9]) * 100.0,
+                'map_percent': float(mAP) * 100.0,
+                're_ranking': str(cfg.TEST.RE_RANKING),
+                'neck_feat': str(cfg.TEST.NECK_FEAT),
+                'feat_norm': str(cfg.TEST.FEAT_NORM),
+            })
 
     trainer.run(train_loader, max_epochs=epochs)

@@ -171,3 +171,9 @@ target/
 .python-version
 celerybeat-schedule
 *.sage.py
+
+# Keep the task-authored multi-granularity note visible even when a local
+# .git/info/exclude rule ignores generated paper_notes artifacts.
+!/paper_notes/
+/paper_notes/**
+!/paper_notes/multi_granularity_part.md

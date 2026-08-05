@@ -369,3 +369,33 @@ squared Euclidean distance. It does not use re-ranking or camera-mean debiasing.
 It also verifies the full resolved configs differ only in the C2 switch,
 auxiliary lambda, and output path; requires C2 lambda=0.3/mode=mean; and refuses
 to overwrite a non-empty output directory.
+
+## C2-L03 Multi-Granularity Part K={2,4,6}
+
+Run this experiment from branch `exp/c2-l03-multi-granularity-part` after
+checking the Market1501 dataset and ImageNet backbone weight paths listed above:
+
+```bash
+cd /root/autodl-tmp/BoT-reid
+bash scripts/train_c2_l03_multi_granularity_part_autodl.sh
+```
+
+The experiment uses the independent output directory:
+
+```text
+/root/autodl-tmp/experiments/BoT/c2_l03_multi_granularity_part_market1501
+```
+
+Only after the 120-epoch training command succeeds and the local evidence is
+complete, the unified runner records `C2-MGP-K246` in the independent
+`experiment_records/c2_l03_multi_granularity_part/` registry. It does not
+update `EXPERIMENTS.md`, commit, push, or perform external archival.
+
+Profile the original C2-L03 and the multi-granularity variant under the same
+batch/input/device conditions without starting formal training:
+
+```bash
+python tools/profile_multi_granularity_part.py \
+  --device auto --batch-size 64 \
+  --input-height 256 --input-width 128 --dtype float32
+```

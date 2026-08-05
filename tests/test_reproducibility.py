@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,15 +13,20 @@ from unittest import mock
 import numpy as np
 import torch
 from torch.backends import cudnn
+from torch.utils.data import DataLoader, TensorDataset
 
 from config.defaults import _C
-from scripts.append_experiment_result import PENDING, parse_metrics
 from utils.reproducibility import (
     UINT32_LIMIT,
+    data_loader_generator_metadata,
+    derive_data_loader_seed,
     ensure_python_hash_seed,
+    make_data_loader_generator,
+    read_explicit_config_seed,
     seed_everything,
     seed_worker,
     validate_seed,
+    validate_seed_evidence_chain,
     write_reproducibility_record,
 )
 
@@ -118,7 +124,7 @@ class ReproducibilityTest(unittest.TestCase):
         self.assertEqual(arguments[1:], ["tools/train.py"])
         self.assertEqual(environment["PYTHONHASHSEED"], "23")
 
-    def test_all_data_loaders_use_seed_worker_without_new_generator_api(self):
+    def test_all_data_loaders_use_seed_worker_and_independent_generator(self):
         build_path = Path(__file__).resolve().parents[1] / "data" / "build.py"
         tree = ast.parse(build_path.read_text(encoding="utf-8"))
         calls = [
@@ -133,7 +139,30 @@ class ReproducibilityTest(unittest.TestCase):
             self.assertIn("worker_init_fn", keywords)
             self.assertIsInstance(keywords["worker_init_fn"], ast.Name)
             self.assertEqual(keywords["worker_init_fn"].id, "seed_worker")
-            self.assertNotIn("generator", keywords)
+            self.assertIn("generator", keywords)
+
+    def test_data_loader_generator_replays_after_global_rng_consumption(self):
+        dataset = TensorDataset(torch.arange(24))
+
+        def replay(initialize_extra_model):
+            torch.manual_seed(42)
+            if initialize_extra_model:
+                torch.nn.Sequential(
+                    torch.nn.Linear(64, 128),
+                    torch.nn.ReLU(),
+                    torch.nn.Linear(128, 16),
+                )
+            generator = make_data_loader_generator(42, "train")
+            loader = DataLoader(
+                dataset, batch_size=4, shuffle=True, num_workers=0,
+                generator=generator,
+            )
+            return [int(value) for batch in loader for value in batch[0]]
+
+        self.assertEqual(replay(False), replay(True))
+        self.assertEqual(derive_data_loader_seed(42, "train"), 42)
+        self.assertEqual(derive_data_loader_seed(42, "query"), 43)
+        self.assertEqual(derive_data_loader_seed(42, "gallery"), 44)
 
     def test_random_identity_sampler_replays_each_epoch_from_its_own_seed(self):
         sampler_path = (
@@ -174,6 +203,7 @@ class ReproducibilityTest(unittest.TestCase):
                     cfg=DummyConfig(),
                     seed_state=seed_state,
                     config_file=str(config_path),
+                    source_config_seed=314,
                     cli_overrides=["SEED", "314"],
                     command=["python", "tools/train.py"],
                     repo_dir=directory,
@@ -192,6 +222,13 @@ class ReproducibilityTest(unittest.TestCase):
                 )
                 self.assertEqual(saved["configuration"]["cli_overrides"], ["SEED", "314"])
                 self.assertEqual(metadata["configuration"]["source_file_sha256"], saved["configuration"]["source_file_sha256"])
+                self.assertEqual(
+                    saved["seed_chain"]["reproducibility_metadata_seed"], 314
+                )
+                self.assertEqual(
+                    saved["data_loader_generators"],
+                    data_loader_generator_metadata(314),
+                )
         finally:
             random.setstate(python_state)
             np.random.set_state(numpy_state)
@@ -203,24 +240,95 @@ class ReproducibilityTest(unittest.TestCase):
         self.assertEqual(_C.SEED, 42)
         self.assertEqual(validate_seed(_C.SEED), 42)
 
-    def test_recorder_never_backfills_default_seed_into_historical_run(self):
+    def test_source_config_seed_must_be_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "log.txt").write_text(
-                "2026-07-14 06:17:58 Validation Results - Epoch: 120\n"
-                "2026-07-14 06:17:59 mAP: 86.8%\n"
-                "2026-07-14 06:18:00 CMC curve, Rank-1  :94.4%\n",
+            explicit = Path(directory) / "explicit.yml"
+            explicit.write_text("SEED: 42\nMODEL: {}\n", encoding="utf-8")
+            missing = Path(directory) / "missing.yml"
+            missing.write_text("MODEL: {}\n", encoding="utf-8")
+            self.assertEqual(read_explicit_config_seed(str(explicit)), 42)
+            with self.assertRaisesRegex(ValueError, "explicitly define"):
+                read_explicit_config_seed(str(missing))
+
+            output = Path(directory) / "must_not_exist"
+            with self.assertRaisesRegex(ValueError, "source_config_seed is required"):
+                write_reproducibility_record(
+                    output_dir=str(output),
+                    cfg=DummyConfig(),
+                    seed_state={"seed": 314},
+                    config_file=str(explicit),
+                    source_config_seed=None,
+                )
+            self.assertFalse(output.exists())
+
+    def test_direct_train_rejects_yaml_cli_seed_conflict_without_formal_env(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output_must_not_exist"
+            config_path = root / "seed_conflict.yml"
+            config_path.write_text(
+                "SEED: 42\nOUTPUT_DIR: {!r}\n".format(str(output)),
                 encoding="utf-8",
             )
-            metrics = parse_metrics(directory)
-        self.assertEqual(metrics["seed"], PENDING)
-
-    def test_recorder_reads_seed_from_run_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "reproducibility.json").write_text(
-                json.dumps({"seed": 777}), encoding="utf-8"
+            environment = os.environ.copy()
+            environment.pop("BOT_EXPECTED_TRAINING_SEED", None)
+            environment["PYTHONHASHSEED"] = "42"
+            completed = subprocess.run(
+                [
+                    sys.executable, "-B", "tools/train.py",
+                    "--config_file", str(config_path), "SEED", "7",
+                ],
+                cwd=str(repo_root), env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             )
-            metrics = parse_metrics(directory)
-        self.assertEqual(metrics["seed"], "777")
+            self.assertNotEqual(completed.returncode, 0)
+            combined = (completed.stdout + completed.stderr).decode(
+                "utf-8", errors="replace"
+            ).lower()
+            self.assertIn("seed evidence conflict", combined)
+            self.assertFalse(output.exists())
+
+    def test_direct_train_rejects_missing_source_seed_before_output(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output_must_not_exist"
+            config_path = root / "missing_seed.yml"
+            config_path.write_text(
+                "OUTPUT_DIR: {!r}\n".format(str(output)), encoding="utf-8"
+            )
+            environment = os.environ.copy()
+            environment.pop("BOT_EXPECTED_TRAINING_SEED", None)
+            environment["PYTHONHASHSEED"] = "42"
+            completed = subprocess.run(
+                [
+                    sys.executable, "-B", "tools/train.py",
+                    "--config_file", str(config_path),
+                ],
+                cwd=str(repo_root), env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            combined = (completed.stdout + completed.stderr).decode(
+                "utf-8", errors="replace"
+            ).lower()
+            self.assertIn("explicitly define", combined)
+            self.assertFalse(output.exists())
+
+    def test_seed_evidence_chain_rejects_conflicts(self):
+        self.assertEqual(
+            validate_seed_evidence_chain(42, 42, 42, 42, expected_seed=42),
+            42,
+        )
+        with self.assertRaisesRegex(ValueError, "seed evidence conflict"):
+            validate_seed_evidence_chain(
+                source_seed=42,
+                resolved_seed=42,
+                applied_seed=7,
+                metadata_seed=42,
+                expected_seed=42,
+            )
 
 
 if __name__ == "__main__":

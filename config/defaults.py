@@ -51,6 +51,13 @@ _C.MODEL.IF_LABELSMOOTH = 'on'
 _C.MODEL.PART_ATTENTION = False
 # Number of horizontal parts for part-aware attention
 _C.MODEL.PART_ATTENTION_PARTS = 6
+# Enable multi-granularity horizontal part representations. Disabled by
+# default so all existing configurations keep their original architecture.
+_C.MODEL.MULTI_GRANULARITY_PART = False
+_C.MODEL.MULTI_GRANULARITY_PART_SCALES = [2, 4, 6]
+_C.MODEL.MULTI_GRANULARITY_PART_DIM = 256
+_C.MODEL.MULTI_GRANULARITY_PART_AGGREGATION = "mean"
+_C.MODEL.MULTI_GRANULARITY_PART_FUSION = "concat"
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5

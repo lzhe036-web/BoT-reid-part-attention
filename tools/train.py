@@ -7,12 +7,14 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # Set before importing torch so supported CUDA runtimes can choose a
 # deterministic cuBLAS workspace configuration.
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import torch
+import yaml
 
 sys.path.append('.')
 from config import cfg
@@ -25,8 +27,10 @@ from solver import make_optimizer, make_optimizer_with_center, WarmupMultiStepLR
 from utils.logger import setup_logger
 from utils.reproducibility import (
     ensure_python_hash_seed,
+    read_explicit_config_seed,
     seed_everything,
     validate_seed,
+    validate_seed_evidence_chain,
     write_reproducibility_record,
 )
 
@@ -137,15 +141,57 @@ def main():
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
 
+    strict_expected_seed = os.environ.get("BOT_EXPECTED_TRAINING_SEED")
+    if strict_expected_seed is not None:
+        strict_expected_seed = validate_seed(int(strict_expected_seed))
+    if not args.config_file:
+        raise ValueError(
+            "--config_file with an explicit top-level SEED is required for training"
+        )
+    # Source validation is unconditional. BOT_EXPECTED_TRAINING_SEED adds a
+    # formal identity constraint; it never enables or disables this check.
+    source_config_seed = read_explicit_config_seed(args.config_file)
+    formal_source = None
+    if strict_expected_seed is not None:
+        from utils.experiment_recording import (
+            FORMAL_CONFIG_RELATIVE_PATH,
+            PreflightError,
+            validate_formal_protocol,
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        expected_config = (repo_root / FORMAL_CONFIG_RELATIVE_PATH).resolve()
+        if Path(args.config_file).resolve() != expected_config:
+            raise PreflightError(
+                "Formal training may only use {}".format(expected_config)
+            )
+        with open(args.config_file, "r", encoding="utf-8") as handle:
+            formal_source = yaml.safe_load(handle)
+        validate_formal_protocol(formal_source, "source")
+
     if args.config_file != "":
         cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
+    if strict_expected_seed is not None:
+        validate_formal_protocol(cfg, "resolved")
 
     # Fail before constructing a dataset or model if reproducibility cannot be
     # guaranteed and documented for this run.
     training_seed = validate_seed(cfg.SEED)
+    validate_seed_evidence_chain(
+        source_config_seed,
+        training_seed,
+        training_seed,
+        expected_seed=strict_expected_seed,
+    )
     ensure_python_hash_seed(training_seed)
+    seed_state = seed_everything(training_seed)
+    validate_seed_evidence_chain(
+        source_config_seed,
+        training_seed,
+        seed_state["seed"],
+        expected_seed=strict_expected_seed,
+    )
     output_dir = cfg.OUTPUT_DIR
     if not output_dir:
         raise ValueError("OUTPUT_DIR must be set so the training seed can be recorded")
@@ -154,8 +200,6 @@ def main():
 
     if cfg.MODEL.DEVICE == "cuda":
         os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
-    seed_state = seed_everything(training_seed)
-
     logger = setup_logger("reid_baseline", output_dir, 0)
     logger.info("Using {} GPUS".format(num_gpus))
     logger.info(args)
@@ -167,13 +211,21 @@ def main():
             logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))
 
-    metadata_path, _ = write_reproducibility_record(
+    metadata_path, metadata = write_reproducibility_record(
         output_dir=output_dir,
         cfg=cfg,
         seed_state=seed_state,
         config_file=args.config_file,
+        source_config_seed=source_config_seed,
         cli_overrides=args.opts,
         command=sys.argv,
+    )
+    validate_seed_evidence_chain(
+        source_config_seed,
+        training_seed,
+        seed_state["seed"],
+        metadata_seed=metadata["seed"],
+        expected_seed=strict_expected_seed,
     )
     logger.info(
         "Reproducibility fixed explicitly: training_seed={}, Python=True, NumPy=True, "

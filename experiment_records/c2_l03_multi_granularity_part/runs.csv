@@ -1,0 +1,1 @@
+experiment_family,run_id,evidence_id,dataset,method_variant,aux_lambda,mode,selected_epoch,rank1_percent,rank5_percent,rank10_percent,map_percent,re_ranking,independent_runs,training_seed,training_commit,branch,training_runtime_seconds,total_run_runtime_seconds,gpu,descriptor_dim,total_parameters,trainable_parameters,status,evidence_status,result_commit,archive_status,notes
