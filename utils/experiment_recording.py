@@ -34,7 +34,7 @@ from utils.reproducibility import (
 )
 
 
-EXPECTED_BRANCH = "exp/c2-l03-multi-granularity-part"
+EXPECTED_BRANCH = "exp/c2-l03-multi-granularity-local-feature"
 EXPECTED_EXPERIMENT_FAMILY = "C2-MGP-K246"
 EXPECTED_RUN_ID = "C2-MGP-K246-S42"
 EXPECTED_EVIDENCE_ID = "EV-TRAIN-MKT-C2-MGP-K246-S42"

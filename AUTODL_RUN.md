@@ -372,7 +372,7 @@ to overwrite a non-empty output directory.
 
 ## C2-L03 Multi-Granularity Part K={2,4,6}
 
-Run this experiment from branch `exp/c2-l03-multi-granularity-part` after
+Run this experiment from branch `exp/c2-l03-multi-granularity-local-feature` after
 checking the Market1501 dataset and ImageNet backbone weight paths listed above:
 
 ```bash

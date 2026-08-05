@@ -641,6 +641,10 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
 
 class MultiGranularityExperimentRecordingTest(unittest.TestCase):
     def test_formal_preflight_accepts_exact_clean_branch(self):
+        self.assertEqual(
+            EXPECTED_BRANCH,
+            "exp/c2-l03-multi-granularity-local-feature",
+        )
         with tempfile.TemporaryDirectory() as directory:
             repo, config_path, launch, output = make_preflight_repository(Path(directory))
             result = run_preflight(repo, config_path, launch, output)
