@@ -391,6 +391,21 @@ complete, the unified runner records `C2-MGP-K246` in the independent
 `experiment_records/c2_l03_multi_granularity_part/` registry. It does not
 update `EXPERIMENTS.md`, commit, push, or perform external archival.
 
+For the already-completed run affected by the pre-fix resolved-config
+serialization only, use the recovery entry point after checking out the
+reviewed recovery commit. This command does not invoke `tools/train.py`:
+
+```bash
+python tools/run_c2_l03_multi_granularity_part.py \
+  --recover-existing-run \
+  --output-dir /root/autodl-tmp/experiments/BoT/c2_l03_multi_granularity_part_market1501
+```
+
+Recovery preserves the original resolved file as
+`config_resolved.pre_type_fix.yml`, writes `config_repair_manifest.json`, and
+records separate `training_commit` and `finalization_commit` values before
+attempting evidence registration.
+
 Profile the original C2-L03 and the multi-granularity variant under the same
 batch/input/device conditions without starting formal training:
 

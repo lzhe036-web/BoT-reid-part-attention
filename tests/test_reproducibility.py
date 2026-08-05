@@ -14,8 +14,10 @@ import numpy as np
 import torch
 from torch.backends import cudnn
 from torch.utils.data import DataLoader, TensorDataset
+from yacs.config import CfgNode
 
 from config.defaults import _C
+from utils.config_serialization import deserialize_cfg_node_yaml
 from utils.reproducibility import (
     UINT32_LIMIT,
     data_loader_generator_metadata,
@@ -31,11 +33,12 @@ from utils.reproducibility import (
 )
 
 
-class DummyConfig(object):
-    SEED = 314
-
-    def __str__(self):
-        return "OUTPUT_DIR: /tmp/example\nSEED: 314"
+class DummyConfig(CfgNode):
+    def __init__(self):
+        super(DummyConfig, self).__init__({
+            "OUTPUT_DIR": "/tmp/example",
+            "SEED": 314,
+        })
 
 
 class ReproducibilityTest(unittest.TestCase):
@@ -212,6 +215,11 @@ class ReproducibilityTest(unittest.TestCase):
                 saved = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
                 resolved = Path(directory) / "config_resolved.yml"
                 self.assertTrue(resolved.is_file())
+                restored = deserialize_cfg_node_yaml(
+                    resolved.read_text(encoding="utf-8")
+                )
+                self.assertEqual(restored["SEED"], 314)
+                self.assertIs(type(restored["OUTPUT_DIR"]), str)
                 self.assertEqual(saved["seed"], 314)
                 self.assertEqual(saved["seed_source"], "resolved_config.SEED")
                 self.assertTrue(saved["seed_applied_before_data_loading"])

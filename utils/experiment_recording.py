@@ -3,7 +3,6 @@
 
 from __future__ import absolute_import
 
-import ast
 import csv
 import datetime as dt
 import hashlib
@@ -28,6 +27,11 @@ import torch
 import yaml
 from torch.backends import cudnn
 
+from utils.config_serialization import (
+    cfg_node_to_plain_mapping,
+    deserialize_cfg_node_yaml,
+    serialize_cfg_node_yaml,
+)
 from utils.reproducibility import (
     data_loader_generator_metadata,
     read_explicit_config_seed,
@@ -67,6 +71,9 @@ OPERATION_COUNT_CONVENTION = "Conv2d/Linear MACs; FLOPs=2×MACs"
 FINALIZATION_TIMING_BOUNDARY = (
     "after evidence validation, metrics/checkpoint generation, draft artifact "
     "hashing, and registry candidate staging; before final atomic evidence sealing"
+)
+CONFIG_TYPE_REPAIR_REASON = (
+    "replace non-type-safe resolved YAML with strict tagged CfgNode evidence"
 )
 
 FORMAL_PROTOCOL = {
@@ -154,7 +161,8 @@ RUN_FIELDS = (
     "experiment_family", "run_id", "evidence_id", "dataset", "method_variant",
     "aux_lambda", "mode", "selected_epoch", "rank1_percent", "rank5_percent",
     "rank10_percent", "map_percent", "re_ranking", "independent_runs",
-    "training_seed", "training_commit", "branch", "training_runtime_seconds",
+    "training_seed", "training_commit", "finalization_commit", "branch",
+    "training_runtime_seconds",
     "total_run_runtime_seconds", "gpu",
     "descriptor_dim", "total_parameters", "trainable_parameters", "status",
     "evidence_status", "result_commit", "archive_status", "notes",
@@ -536,74 +544,24 @@ def _normalized_text(value):
     return value
 
 
-def _protect_yacs_literal_strings(value):
-    """Protect mapping leaves that YACS would reinterpret during a merge."""
-    if isinstance(value, dict):
-        return {
-            key: _protect_yacs_literal_strings(item)
-            for key, item in value.items()
-        }
-    if type(value) is not str:
-        return value
-    try:
-        decoded = ast.literal_eval(value)
-    except (ValueError, SyntaxError):
-        return value
-    if type(decoded) is str and decoded == value:
-        return value
-    # CfgNode.merge_from_file applies literal_eval once more after YAML parsing.
-    # Store the Python string literal so that extra decode returns the original
-    # string instead of changing a numeric-/boolean-looking value's type.
-    return repr(value)
-
-
-def _restore_yacs_literal_strings(value):
-    """Restore mapping leaves protected for CfgNode.merge_from_file."""
-    if isinstance(value, dict):
-        return {
-            key: _restore_yacs_literal_strings(item)
-            for key, item in value.items()
-        }
-    if type(value) is not str:
-        return value
-    try:
-        decoded = ast.literal_eval(value)
-    except (ValueError, SyntaxError):
-        return value
-    return decoded if type(decoded) is str else value
-
-
-def serialize_cfg_node_yaml(cfg_node):
-    """Serialize a CfgNode for a value- and type-safe YACS file round trip."""
-    dump_method = getattr(cfg_node, "dump", None)
-    if not callable(dump_method):
-        raise TypeError("Resolved config must provide CfgNode.dump()")
-    dumped = dump_method()
-    payload = yaml.safe_load(dumped)
-    if not isinstance(payload, dict):
-        raise TypeError("CfgNode.dump() must produce a YAML mapping")
-    protected = _protect_yacs_literal_strings(payload)
-    return yaml.safe_dump(
-        protected,
-        default_flow_style=False,
-        sort_keys=False,
-    )
-
-
-def deserialize_cfg_node_yaml(value):
-    """Read the logical mapping emitted by serialize_cfg_node_yaml."""
-    payload = yaml.safe_load(value)
-    if not isinstance(payload, dict):
-        raise TypeError("Serialized CfgNode YAML must contain a mapping")
-    return _restore_yacs_literal_strings(payload)
-
-
 def atomic_write_text(path, value):
     target = assert_path_allowed(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     value = _normalized_text(value)
     temporary = target.with_name("{}.tmp.{}".format(target.name, os.getpid()))
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(value)
+    os.replace(str(temporary), str(target))
+    return target
+
+
+def atomic_write_bytes(path, value):
+    target = assert_path_allowed(path)
+    if not isinstance(value, bytes):
+        raise TypeError("atomic_write_bytes requires bytes")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name("{}.tmp.{}".format(target.name, os.getpid()))
+    with temporary.open("wb") as handle:
         handle.write(value)
     os.replace(str(temporary), str(target))
     return target
@@ -963,7 +921,8 @@ def _delta_source_values(baseline, experiment):
 def validate_efficiency_profile(profile, formal, source_sha256=None,
                                 resolved_sha256=None, source_config_path=None,
                                 resolved_config_path=None, environment=None,
-                                model_manifest=None):
+                                model_manifest=None,
+                                expected_profiler_script_sha256=None):
     _require_fields(profile, REQUIRED_EFFICIENCY_FIELDS, "efficiency_profile.json")
     expected_mode = "formal" if formal else "fixture"
     if profile.get("schema_version") != EFFICIENCY_SCHEMA_VERSION:
@@ -1004,7 +963,10 @@ def validate_efficiency_profile(profile, formal, source_sha256=None,
     ).resolve()
     if not profiler_path.is_file():
         raise EvidenceIncompleteError("Fixed profiler script is missing")
-    if formal and profile["profiler_script_sha256"] != sha256_file(profiler_path):
+    profiler_sha256 = (
+        expected_profiler_script_sha256 or sha256_file(profiler_path)
+    )
+    if formal and profile["profiler_script_sha256"] != profiler_sha256:
         raise EvidenceIncompleteError("Efficiency profiler script SHA256 mismatch")
     if source_sha256 is not None and profile["source_config_sha256"] != source_sha256:
         raise EvidenceIncompleteError("Efficiency source config SHA256 mismatch")
@@ -1455,6 +1417,8 @@ def initialize_run(output_dir, preflight, experiment_family, run_id, evidence_id
         "evidence_id": evidence_id,
         "branch": preflight["branch"],
         "training_commit": preflight["training_commit"],
+        "finalization_commit": NOT_RECORDED,
+        "finalization_mode": "standard",
         "dirty": preflight["dirty"],
         "source_config": {
             "path": preflight["source_config_path"],
@@ -1621,7 +1585,7 @@ def validate_selected_checkpoint(checkpoint_path, model_manifest):
     return True
 
 
-def build_checkpoint_manifest(output_dir, validation_records, selected):
+def _checkpoint_manifest_rows(output_dir, validation_records, selected):
     output = assert_path_allowed(output_dir)
     iteration_to_epoch = {
         int(record["global_iteration"]): int(record["epoch"])
@@ -1673,6 +1637,14 @@ def build_checkpoint_manifest(output_dir, validation_records, selected):
             "Selected epoch {} must bind to exactly one model checkpoint; found {}"
             .format(selected["epoch"], len(selected_models))
         )
+    return rows, selected_models[0]
+
+
+def build_checkpoint_manifest(output_dir, validation_records, selected):
+    output = assert_path_allowed(output_dir)
+    rows, selected_model = _checkpoint_manifest_rows(
+        output, validation_records, selected
+    )
     _write_delimited(
         output / "checkpoint_manifest.tsv",
         rows,
@@ -1680,7 +1652,7 @@ def build_checkpoint_manifest(output_dir, validation_records, selected):
          "file_size", "sha256", "selected"),
         "\t",
     )
-    return rows, selected_models[0]
+    return rows, selected_model
 
 
 def _write_delimited(path, rows, fields, delimiter):
@@ -1776,6 +1748,20 @@ def _write_artifact_hashes(output, manifest, checkpoints):
         if not path.is_file():
             raise EvidenceIncompleteError("Required artifact is missing: {}".format(relative))
         artifacts.append(_artifact_row(output, artifact_type, path))
+    repair_files = (
+        ("config_repair_manifest", "config_repair_manifest.json"),
+        ("pre_type_fix_resolved_config", "config_resolved.pre_type_fix.yml"),
+    )
+    repair_presence = [
+        (output / relative).is_file() for _artifact_type, relative in repair_files
+    ]
+    if any(repair_presence) and not all(repair_presence):
+        raise EvidenceIncompleteError(
+            "Config repair manifest and preserved pre-fix config must both exist"
+        )
+    if all(repair_presence):
+        for artifact_type, relative in repair_files:
+            artifacts.append(_artifact_row(output, artifact_type, output / relative))
     for row in checkpoints:
         artifacts.append(
             _artifact_row(output, row["artifact_type"], output / row["relative_path"])
@@ -2021,6 +2007,8 @@ def _build_metrics_summary(manifest, selected, selected_checkpoint):
         "training_runtime_seconds": float(manifest["training_runtime_seconds"]),
         "total_run_runtime_seconds": float(manifest["total_run_runtime_seconds"]),
         "training_seed": EXPECTED_TRAINING_SEED,
+        "training_commit": manifest["training_commit"],
+        "finalization_commit": manifest.get("finalization_commit", NOT_RECORDED),
         "independent_runs": INDEPENDENT_RUNS,
         "status": TRAINING_COMPLETE,
         "evidence_status": LOCAL_EVIDENCE_PENDING,
@@ -2050,6 +2038,7 @@ def _build_run_row(manifest, dataset, model, environment, selected):
         "independent_runs": INDEPENDENT_RUNS,
         "training_seed": EXPECTED_TRAINING_SEED,
         "training_commit": manifest["training_commit"],
+        "finalization_commit": manifest.get("finalization_commit", NOT_RECORDED),
         "branch": manifest["branch"],
         "training_runtime_seconds": float(manifest["training_runtime_seconds"]),
         "total_run_runtime_seconds": float(manifest["total_run_runtime_seconds"]),
@@ -2084,7 +2073,9 @@ def _apply_success_state(manifest, status, selected, selected_checkpoint):
 
 
 def finalize_run(output_dir, record_dir, expected=None,
-                 total_runtime_started=None, fixture_root=None):
+                 total_runtime_started=None, fixture_root=None,
+                 finalization_commit=None,
+                 expected_profiler_script_sha256=None):
     output = assert_path_allowed(output_dir)
     records = assert_path_allowed(record_dir)
     if fixture_root is not None:
@@ -2098,6 +2089,21 @@ def finalize_run(output_dir, record_dir, expected=None,
     try:
         manifest = read_json(output / "run_manifest.json")
         status = read_json(output / "run_status.json")
+        if finalization_commit is not None:
+            if not re.fullmatch(r"[0-9a-f]{40}", str(finalization_commit)):
+                raise EvidenceIncompleteError(
+                    "finalization_commit is not a full SHA"
+                )
+            recorded_finalization = manifest.get(
+                "finalization_commit", NOT_RECORDED
+            )
+            if recorded_finalization not in (
+                    NOT_RECORDED, finalization_commit):
+                raise EvidenceIncompleteError(
+                    "Recorded finalization_commit conflicts with current recovery"
+                )
+            manifest["finalization_commit"] = finalization_commit
+            status["finalization_commit"] = finalization_commit
         reproducibility = read_json(output / "reproducibility.json")
         environment = read_json(output / "environment.json")
         dataset = read_json(output / "dataset_manifest.json")
@@ -2364,6 +2370,7 @@ def finalize_run(output_dir, record_dir, expected=None,
             resolved_config_path=resolved_path,
             environment=environment,
             model_manifest=model,
+            expected_profiler_script_sha256=expected_profiler_script_sha256,
         )
         launch_path = assert_path_allowed(manifest["launch_script"]["path"])
         if sha256_file(launch_path) != manifest["launch_script"].get("sha256"):
@@ -2511,3 +2518,293 @@ def finalize_run(output_dir, record_dir, expected=None,
         if isinstance(error, EvidenceIncompleteError):
             raise
         raise EvidenceIncompleteError(str(error)) from error
+
+
+def _git_commit_object_exists(repo_root, commit):
+    completed = subprocess.run(
+        ["git", "-C", str(repo_root), "cat-file", "-e", "{}^{{commit}}".format(commit)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _git_blob_sha256(repo_root, commit, relative_path):
+    try:
+        content = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "show",
+                "{}:{}".format(commit, relative_path),
+            ],
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceIncompleteError(
+            "Training commit does not contain {}".format(relative_path)
+        ) from error
+    return hashlib.sha256(content).hexdigest()
+
+
+def _replace_profile_resolved_hash(profile, resolved_sha256):
+    argv = profile.get("argv")
+    if not isinstance(argv, list):
+        raise EvidenceIncompleteError("Efficiency argv is missing during recovery")
+    positions = [
+        index for index, value in enumerate(argv)
+        if value == "--resolved-config-sha256"
+    ]
+    if len(positions) != 1 or positions[0] + 1 >= len(argv):
+        raise EvidenceIncompleteError(
+            "Efficiency argv must contain one resolved config SHA option"
+        )
+    profile["resolved_config_sha256"] = resolved_sha256
+    argv[positions[0] + 1] = resolved_sha256
+    python_executable = profile.get("python_executable")
+    if not isinstance(python_executable, str) or not python_executable:
+        raise EvidenceIncompleteError(
+            "Efficiency python_executable is missing during recovery"
+        )
+    profile["display_command"] = shlex.join([python_executable] + argv)
+
+
+def _validate_repaired_config_state(output, manifest, reproducibility,
+                                    efficiency, repair, finalization_commit):
+    resolved_path = output / "config_resolved.yml"
+    backup_path = output / "config_resolved.pre_type_fix.yml"
+    if not backup_path.is_file() or not resolved_path.is_file():
+        raise EvidenceIncompleteError(
+            "Recovered resolved config or preserved pre-fix config is missing"
+        )
+    old_hash = sha256_file(backup_path)
+    new_hash = sha256_file(resolved_path)
+    if repair.get("repair_reason") != CONFIG_TYPE_REPAIR_REASON:
+        raise EvidenceIncompleteError("Config repair reason mismatch")
+    if repair.get("training_commit") != manifest.get("training_commit"):
+        raise EvidenceIncompleteError("Config repair training_commit mismatch")
+    if repair.get("finalization_commit") != finalization_commit:
+        raise EvidenceIncompleteError("Config repair finalization_commit mismatch")
+    if repair.get("repair_code_commit") != finalization_commit:
+        raise EvidenceIncompleteError("Config repair code commit mismatch")
+    if repair.get("old_resolved_config", {}).get("sha256") != old_hash:
+        raise EvidenceIncompleteError("Preserved pre-fix config SHA256 mismatch")
+    if repair.get("new_resolved_config", {}).get("sha256") != new_hash:
+        raise EvidenceIncompleteError("Repaired resolved config SHA256 mismatch")
+    if manifest.get("resolved_config", {}).get("sha256") != new_hash:
+        raise EvidenceIncompleteError("Manifest repaired config SHA256 mismatch")
+    if reproducibility.get("configuration", {}).get(
+            "resolved_file_sha256") != new_hash:
+        raise EvidenceIncompleteError(
+            "Reproducibility repaired config SHA256 mismatch"
+        )
+    if efficiency.get("resolved_config_sha256") != new_hash:
+        raise EvidenceIncompleteError("Efficiency repaired config SHA256 mismatch")
+    with resolved_path.open("r", encoding="utf-8") as handle:
+        restored = deserialize_cfg_node_yaml(handle.read())
+    validate_formal_protocol(restored, "repaired resolved")
+    return new_hash
+
+
+def recover_existing_run(output_dir, record_dir, repo_root,
+                         fixture_root=None):
+    """Repair resolved evidence and finalize one already-completed run only."""
+    output = assert_path_allowed(output_dir)
+    records = assert_path_allowed(record_dir)
+    repo = assert_path_allowed(repo_root)
+    if not output.is_dir():
+        raise EvidenceIncompleteError("Recovery OUTPUT_DIR does not exist")
+    if fixture_root is not None:
+        fixture = require_temporary_fixture(fixture_root)
+        require_contained_path(output, fixture, "recovery output")
+        require_contained_path(records, fixture, "recovery registry")
+
+    manifest = read_json(output / "run_manifest.json")
+    status = read_json(output / "run_status.json")
+    reproducibility = read_json(output / "reproducibility.json")
+    efficiency = read_json(output / "efficiency_profile.json")
+    model = read_json(output / "model_manifest.json")
+    for field, expected_value in (
+            ("run_id", EXPECTED_RUN_ID),
+            ("evidence_id", EXPECTED_EVIDENCE_ID),
+            ("branch", EXPECTED_BRANCH)):
+        if manifest.get(field) != expected_value:
+            raise EvidenceIncompleteError(
+                "Recovery manifest {} mismatch".format(field)
+            )
+    if Path(str(manifest.get("output_dir", ""))).resolve() != output.resolve():
+        raise EvidenceIncompleteError("Recovery OUTPUT_DIR manifest mismatch")
+
+    training_commit = manifest.get("training_commit", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(training_commit)):
+        raise EvidenceIncompleteError("Recovery training_commit is not a full SHA")
+    if not _git_commit_object_exists(repo, training_commit):
+        raise EvidenceIncompleteError("Recovery training_commit does not exist")
+    current_branch = _git_output(repo, ["branch", "--show-current"])
+    if current_branch != manifest["branch"]:
+        raise EvidenceIncompleteError("Recovery branch does not match training branch")
+    finalization_commit = _git_output(repo, ["rev-parse", "HEAD"])
+    if not re.fullmatch(r"[0-9a-f]{40}", finalization_commit):
+        raise EvidenceIncompleteError("Recovery finalization_commit is not a full SHA")
+    training_profiler_sha256 = _git_blob_sha256(
+        repo, training_commit, "tools/profile_multi_granularity_part.py"
+    )
+    if efficiency.get("profiler_script_sha256") != training_profiler_sha256:
+        raise EvidenceIncompleteError(
+            "Recorded profiler does not match the training commit"
+        )
+
+    source_path = assert_path_allowed(manifest.get("source_config", {}).get("path", ""))
+    if fixture_root is not None:
+        require_contained_path(source_path, fixture, "recovery source config")
+        require_contained_path(
+            manifest.get("launch_script", {}).get("path", ""),
+            fixture,
+            "recovery launch script",
+        )
+    if not source_path.is_file():
+        raise EvidenceIncompleteError("Recovery source config is missing")
+    source_hash = sha256_file(source_path)
+    if source_hash != manifest.get("source_config", {}).get("sha256"):
+        raise EvidenceIncompleteError("Recovery source config SHA256 mismatch")
+    training_source_sha256 = _git_blob_sha256(
+        repo, training_commit, FORMAL_CONFIG_RELATIVE_PATH
+    )
+    if training_source_sha256 != source_hash:
+        raise EvidenceIncompleteError(
+            "Recovery source config does not match the training commit"
+        )
+    with source_path.open("r", encoding="utf-8") as handle:
+        source = yaml.safe_load(handle)
+    validate_formal_protocol(source, "recovery source")
+
+    log_path = output / "log.txt"
+    if not log_path.is_file() or log_path.stat().st_size <= 0:
+        raise EvidenceIncompleteError("Recovery training log is missing or empty")
+    validation_records = read_validation_history(output / "validation_history.jsonl")
+    selected = select_best_validation(validation_records)
+    _checkpoint_rows, selected_checkpoint = _checkpoint_manifest_rows(
+        output, validation_records, selected
+    )
+    selected_path = output / selected_checkpoint["relative_path"]
+    validate_selected_checkpoint(selected_path, model)
+    selected_hash = sha256_file(selected_path)
+    if selected_hash != selected_checkpoint["sha256"]:
+        raise EvidenceIncompleteError("Recovery selected checkpoint SHA256 mismatch")
+
+    resolved_path = output / "config_resolved.yml"
+    backup_path = output / "config_resolved.pre_type_fix.yml"
+    repair_path = output / "config_repair_manifest.json"
+    if repair_path.is_file():
+        repair = read_json(repair_path)
+        _validate_repaired_config_state(
+            output, manifest, reproducibility, efficiency, repair,
+            finalization_commit,
+        )
+    else:
+        if backup_path.exists():
+            raise EvidenceIncompleteError(
+                "Pre-fix config exists without a repair manifest"
+            )
+        if not resolved_path.is_file() or resolved_path.stat().st_size <= 0:
+            raise EvidenceIncompleteError("Existing resolved config is missing or empty")
+        old_bytes = resolved_path.read_bytes()
+        old_hash = hashlib.sha256(old_bytes).hexdigest()
+
+        from config import cfg
+        local_cfg = cfg.clone()
+        local_cfg.merge_from_file(str(source_path))
+        local_cfg.freeze()
+        repaired_text = serialize_cfg_node_yaml(local_cfg)
+        repaired = deserialize_cfg_node_yaml(repaired_text)
+        validate_formal_protocol(repaired, "repaired resolved")
+        for dotted_path in FORMAL_INDEPENDENT_FIELDS:
+            if _protocol_value(_nested_value(source, dotted_path)) != _protocol_value(
+                    _nested_value(repaired, dotted_path)):
+                raise EvidenceIncompleteError(
+                    "Recovery source/resolved independent field mismatch: {}"
+                    .format(dotted_path)
+                )
+        if Path(str(repaired["OUTPUT_DIR"])).resolve() != output.resolve():
+            raise EvidenceIncompleteError("Repaired config OUTPUT_DIR mismatch")
+        new_hash = sha256_text(repaired_text)
+        if new_hash == old_hash:
+            raise EvidenceIncompleteError(
+                "Existing resolved config already matches the repaired content"
+            )
+
+        old_declared_hashes = {
+            "run_manifest": manifest.get("resolved_config", {}).get("sha256"),
+            "reproducibility": reproducibility.get("configuration", {}).get(
+                "resolved_file_sha256"
+            ),
+            "efficiency_profile": efficiency.get("resolved_config_sha256"),
+        }
+        atomic_write_bytes(backup_path, old_bytes)
+        atomic_write_text(resolved_path, repaired_text)
+
+        manifest["resolved_config"] = {
+            "path": "config_resolved.yml",
+            "sha256": new_hash,
+        }
+        manifest["finalization_commit"] = finalization_commit
+        manifest["finalization_mode"] = "recover_existing_run"
+        status["finalization_commit"] = finalization_commit
+        status["finalization_mode"] = "recover_existing_run"
+        reproducibility.setdefault("configuration", {})[
+            "resolved_file_sha256"
+        ] = new_hash
+        _replace_profile_resolved_hash(efficiency, new_hash)
+
+        repair = {
+            "schema_version": 1,
+            "mode": "finalization_only",
+            "repair_reason": CONFIG_TYPE_REPAIR_REASON,
+            "repaired_at_utc": utc_now(),
+            "run_id": manifest["run_id"],
+            "evidence_id": manifest["evidence_id"],
+            "branch": manifest["branch"],
+            "training_commit": training_commit,
+            "finalization_commit": finalization_commit,
+            "repair_code_commit": finalization_commit,
+            "source_config": {
+                "path": str(source_path),
+                "sha256": source_hash,
+            },
+            "old_resolved_config": {
+                "path": "config_resolved.pre_type_fix.yml",
+                "sha256": old_hash,
+                "file_size": len(old_bytes),
+                "declared_hashes_before_repair": old_declared_hashes,
+            },
+            "new_resolved_config": {
+                "path": "config_resolved.yml",
+                "sha256": new_hash,
+                "file_size": len(repaired_text.encode("utf-8")),
+            },
+            "validated_training_log": {
+                "path": "log.txt",
+                "sha256": sha256_file(log_path),
+            },
+            "validated_selected_checkpoint": {
+                "path": selected_checkpoint["relative_path"],
+                "sha256": selected_hash,
+            },
+            "training_artifacts_modified": False,
+        }
+        atomic_write_json(output / "run_manifest.json", manifest)
+        atomic_write_json(output / "run_status.json", status)
+        atomic_write_json(output / "reproducibility.json", reproducibility)
+        atomic_write_json(output / "efficiency_profile.json", efficiency)
+        atomic_write_json(repair_path, repair)
+        _validate_repaired_config_state(
+            output, manifest, reproducibility, efficiency, repair,
+            finalization_commit,
+        )
+
+    return finalize_run(
+        output,
+        records,
+        fixture_root=fixture_root,
+        finalization_commit=finalization_commit,
+        expected_profiler_script_sha256=training_profiler_sha256,
+    )

@@ -32,6 +32,8 @@ from utils.experiment_recording import (
     initialize_run,
     model_state_dict_schema,
     record_run_failure,
+    read_json,
+    recover_existing_run,
     require_temporary_fixture,
     serialize_cfg_node_yaml,
     sha256_file,
@@ -62,6 +64,8 @@ def parse_args(argv=None):
     parser.add_argument("--evidence-id", default=EXPECTED_EVIDENCE_ID)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--fixture-dir")
+    parser.add_argument("--recover-existing-run", action="store_true")
+    parser.add_argument("--output-dir")
     return parser.parse_args(argv)
 
 
@@ -285,6 +289,7 @@ def _run_formal(args):
             result = finalize_run(
                 output_dir, RECORD_DIR,
                 total_runtime_started=started_monotonic,
+                finalization_commit=preflight["training_commit"],
             )
             print(json.dumps(result["metrics"], indent=2, ensure_ascii=False))
             return 0
@@ -324,9 +329,51 @@ def _run_dry_fixture(args):
     return 0
 
 
+def _run_recovery(args):
+    if args.dry_run:
+        if not args.fixture_dir:
+            raise ValueError(
+                "Recovery --dry-run requires --fixture-dir"
+            )
+        output = require_temporary_fixture(args.fixture_dir)
+        records = (
+            output / "experiment_records" / "c2_l03_multi_granularity_part"
+        )
+        fixture_root = output
+    else:
+        if not args.output_dir:
+            raise ValueError(
+                "--recover-existing-run requires an explicit --output-dir"
+            )
+        if args.fixture_dir:
+            raise ValueError(
+                "--fixture-dir is only valid for recovery together with --dry-run"
+            )
+        output = Path(args.output_dir).resolve()
+        records = RECORD_DIR
+        fixture_root = None
+    manifest = read_json(output / "run_manifest.json")
+    run_id = manifest.get("run_id", "")
+    with formal_run_lock(REPO_ROOT, output, run_id):
+        result = recover_existing_run(
+            output,
+            records,
+            REPO_ROOT,
+            fixture_root=fixture_root,
+        )
+    print(json.dumps(result["metrics"], indent=2, ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.recover_existing_run:
+            return _run_recovery(args)
+        if args.output_dir:
+            raise ValueError(
+                "--output-dir is only valid with --recover-existing-run"
+            )
         if args.dry_run:
             return _run_dry_fixture(args)
         if args.fixture_dir:

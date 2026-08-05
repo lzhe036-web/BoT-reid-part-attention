@@ -13,6 +13,7 @@ from unittest import mock
 
 import yaml
 import torch
+from yacs.config import CfgNode
 
 from config import cfg
 from modeling import build_model
@@ -43,6 +44,7 @@ from utils.experiment_recording import (
     deserialize_cfg_node_yaml,
     finalize_run,
     formal_preflight,
+    recover_existing_run,
     select_best_validation,
     serialize_cfg_node_yaml,
     sha256_file,
@@ -52,6 +54,7 @@ from utils.experiment_recording import (
     validate_formal_protocol,
 )
 from utils.reproducibility import data_loader_generator_metadata
+from utils.config_serialization import BOT_CFG_TYPE_TAG
 import utils.experiment_recording as recording
 
 
@@ -424,7 +427,10 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
         source.pop("SEED", None)
     atomic_write_text(source_config, yaml.safe_dump(source, sort_keys=False))
     resolved_config = output / "config_resolved.yml"
-    atomic_write_text(resolved_config, yaml.safe_dump(source, sort_keys=False))
+    resolved_cfg = cfg.clone()
+    resolved_cfg.merge_from_file(str(source_config))
+    resolved_cfg.freeze()
+    atomic_write_text(resolved_config, serialize_cfg_node_yaml(resolved_cfg))
     launch_script = output / "launch.sh"
     atomic_write_text(launch_script, "#!/usr/bin/env bash\nexit 0\n")
     pretrained.write_bytes(b"synthetic pretrained weight")
@@ -652,6 +658,62 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
     return output
 
 
+def make_recovery_fixture(root):
+    output = make_success_fixture(
+        root,
+        execution_mode="formal",
+        finalization_complete=False,
+    )
+    run_git(output, "init", "-b", EXPECTED_BRANCH)
+    run_git(output, "config", "user.name", "Recovery Fixture")
+    run_git(output, "config", "user.email", "recovery@example.invalid")
+    committed_profiler = output / "tools" / PROFILE_TOOL.name
+    committed_profiler.parent.mkdir(parents=True)
+    committed_profiler.write_bytes(PROFILE_TOOL.read_bytes())
+    run_git(
+        output,
+        "add",
+        FORMAL_CONFIG_RELATIVE_PATH,
+        "tools/{}".format(PROFILE_TOOL.name),
+    )
+    run_git(output, "commit", "-m", "synthetic training commit")
+    training_commit = subprocess.check_output(
+        ["git", "-C", str(output), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    marker = output / "recovery_code_marker.txt"
+    marker.write_text("type-safe recovery code\n", encoding="utf-8")
+    run_git(output, "add", marker.name)
+    run_git(output, "commit", "-m", "synthetic recovery commit")
+    finalization_commit = subprocess.check_output(
+        ["git", "-C", str(output), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+
+    source_config = output / FORMAL_CONFIG_RELATIVE_PATH
+    local_cfg = cfg.clone()
+    local_cfg.merge_from_file(str(source_config))
+    broken_text = str(local_cfg).rstrip() + "\n"
+    resolved_path = output / "config_resolved.yml"
+    atomic_write_text(resolved_path, broken_text)
+    broken_hash = sha256_file(resolved_path)
+
+    manifest = recording.read_json(output / "run_manifest.json")
+    manifest["training_commit"] = training_commit
+    manifest["resolved_config"] = {
+        "path": "config_resolved.yml",
+        "sha256": broken_hash,
+    }
+    atomic_write_json(output / "run_manifest.json", manifest)
+    reproducibility = recording.read_json(output / "reproducibility.json")
+    reproducibility["configuration"]["resolved_file_sha256"] = broken_hash
+    atomic_write_json(output / "reproducibility.json", reproducibility)
+    efficiency = recording.read_json(output / "efficiency_profile.json")
+    recording._replace_profile_resolved_hash(efficiency, broken_hash)
+    atomic_write_json(output / "efficiency_profile.json", efficiency)
+    return output, training_commit, finalization_commit, broken_text.encode("utf-8")
+
+
 class MultiGranularityExperimentRecordingTest(unittest.TestCase):
     def test_resolved_config_yaml_round_trip_preserves_all_leaf_types(self):
         source_cfg = cfg.clone()
@@ -668,49 +730,160 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             resolved_text = serialize_cfg_node_yaml(source_cfg)
             atomic_write_text(resolved_path, resolved_text)
 
-            self.assertIn("  DEVICE_ID: '''0'''", resolved_text)
-            self.assertIn("  IF_LABELSMOOTH: 'on'", resolved_text)
-            self.assertIn("  IF_WITH_CENTER: 'no'", resolved_text)
-            logical_yaml = deserialize_cfg_node_yaml(resolved_text)
-            self.assertIs(type(logical_yaml["MODEL"]["DEVICE_ID"]), str)
-            self.assertEqual(logical_yaml["MODEL"]["DEVICE_ID"], "0")
-            self.assertIs(type(logical_yaml["MODEL"]["IF_LABELSMOOTH"]), str)
-            self.assertEqual(logical_yaml["MODEL"]["IF_LABELSMOOTH"], "on")
-            self.assertIs(type(logical_yaml["MODEL"]["IF_WITH_CENTER"]), str)
-            self.assertEqual(logical_yaml["MODEL"]["IF_WITH_CENTER"], "no")
-
-            reloaded_cfg = cfg.clone()
-            reloaded_cfg.merge_from_file(str(resolved_path))
-            reloaded_cfg.freeze()
-            from tools.profile_multi_granularity_part import declared_output_dir
+            self.assertIn(BOT_CFG_TYPE_TAG + ": str", resolved_text)
+            restored = deserialize_cfg_node_yaml(resolved_text)
+            from tools.profile_multi_granularity_part import (
+                declared_resolved_output_dir,
+            )
             self.assertEqual(
-                declared_output_dir(resolved_path),
+                declared_resolved_output_dir(resolved_path),
                 Path(str(source_cfg.OUTPUT_DIR)).resolve(),
             )
 
         source_leaves = flatten_typed_config_leaves(source_cfg)
-        reloaded_leaves = flatten_typed_config_leaves(reloaded_cfg)
-        self.assertEqual(set(source_leaves), set(reloaded_leaves))
+        restored_leaves = flatten_typed_config_leaves(restored)
+        self.assertEqual(set(source_leaves), set(restored_leaves))
         for dotted_path, source_value in source_leaves.items():
             with self.subTest(config_key=dotted_path):
-                reloaded_value = reloaded_leaves[dotted_path]
-                self.assertEqual(reloaded_value, source_value)
-                self.assertIs(type(reloaded_value), type(source_value))
+                restored_value = restored_leaves[dotted_path]
+                self.assertEqual(restored_value, source_value)
+                self.assertIs(type(restored_value), type(source_value))
 
-        self.assertIs(type(reloaded_cfg.MODEL.DEVICE_ID), str)
-        self.assertEqual(reloaded_cfg.MODEL.DEVICE_ID, "0")
-        self.assertIs(type(reloaded_cfg.MODEL.IF_LABELSMOOTH), str)
-        self.assertEqual(reloaded_cfg.MODEL.IF_LABELSMOOTH, "on")
-        self.assertIs(type(reloaded_cfg.MODEL.IF_WITH_CENTER), str)
-        self.assertEqual(reloaded_cfg.MODEL.IF_WITH_CENTER, "no")
-
-        # CfgNode.dump() represents tuples as YAML sequences. YACS officially
-        # coerces the list back to the tuple type declared by the destination.
-        transported = yaml.safe_load(resolved_text)
+        self.assertIs(type(restored["MODEL"]["DEVICE_ID"]), str)
+        self.assertEqual(restored["MODEL"]["DEVICE_ID"], "0")
+        self.assertIs(type(restored["MODEL"]["IF_LABELSMOOTH"]), str)
+        self.assertEqual(restored["MODEL"]["IF_LABELSMOOTH"], "on")
+        self.assertIs(type(restored["MODEL"]["IF_WITH_CENTER"]), str)
+        self.assertEqual(restored["MODEL"]["IF_WITH_CENTER"], "no")
+        self.assertIs(restored["MODEL"]["CROSS_CAMERA_POSITIVE_ONLY"], True)
+        self.assertIs(restored["MODEL"]["MULTI_GRANULARITY_PART"], True)
+        self.assertIs(type(restored["SEED"]), int)
+        self.assertEqual(restored["SEED"], 42)
+        self.assertIs(type(restored["MODEL"]["MULTI_GRANULARITY_PART_SCALES"]), list)
         self.assertIs(type(source_cfg.SOLVER.STEPS), tuple)
-        self.assertIs(type(transported["SOLVER"]["STEPS"]), list)
-        self.assertIs(type(reloaded_cfg.SOLVER.STEPS), tuple)
-        self.assertEqual(reloaded_cfg.SOLVER.STEPS, source_cfg.SOLVER.STEPS)
+        self.assertIs(type(restored["SOLVER"]["STEPS"]), tuple)
+        self.assertEqual(restored["SOLVER"]["STEPS"], source_cfg.SOLVER.STEPS)
+        self.assertTrue(validate_formal_protocol(restored, "resolved"))
+
+    def test_typed_config_serialization_preserves_ambiguous_strings_and_scalars(self):
+        ambiguous = [
+            "0", "1", "on", "off", "yes", "no", "true", "false",
+            "none", "null", "[]", "()",
+        ]
+        source = CfgNode({
+            "STRINGS": ambiguous,
+            "BOOL": True,
+            "INT": 42,
+            "FLOAT": 0.5,
+            "NONE": None,
+            "LIST": [1, "on", False],
+            "TUPLE": ("0", 2, True),
+        })
+        restored = deserialize_cfg_node_yaml(serialize_cfg_node_yaml(source))
+        self.assertEqual(restored, dict(source))
+        for expected, actual in zip(ambiguous, restored["STRINGS"]):
+            self.assertIs(type(actual), str)
+            self.assertEqual(actual, expected)
+        for key, expected_type in (
+                ("BOOL", bool), ("INT", int), ("FLOAT", float),
+                ("NONE", type(None)), ("LIST", list), ("TUPLE", tuple)):
+            self.assertIs(type(restored[key]), expected_type)
+        self.assertIs(type(restored["LIST"][1]), str)
+        self.assertIs(type(restored["TUPLE"][0]), str)
+
+    def test_typed_config_serialization_rejects_malformed_or_reserved_tags(self):
+        malformed = (
+            {BOT_CFG_TYPE_TAG: "str"},
+            {BOT_CFG_TYPE_TAG: "str", "value": True},
+            {BOT_CFG_TYPE_TAG: "tuple"},
+            {BOT_CFG_TYPE_TAG: "tuple", "items": "not-a-list"},
+            {BOT_CFG_TYPE_TAG: "unknown", "value": "x"},
+            {"PLAIN": "unprotected"},
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    deserialize_cfg_node_yaml(yaml.safe_dump(payload))
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            serialize_cfg_node_yaml(CfgNode({BOT_CFG_TYPE_TAG: "user"}))
+
+    def test_finalization_only_recovery_dry_run_is_safe_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, training_commit, finalization_commit, broken_bytes = (
+                make_recovery_fixture(root)
+            )
+            records = output / "experiment_records" / "c2_l03_multi_granularity_part"
+            log_path = output / "log.txt"
+            checkpoint_path = output / "resnet50_model_1200.pth"
+            log_before = log_path.read_bytes()
+            checkpoint_before = checkpoint_path.read_bytes()
+
+            first = recover_existing_run(
+                output, records, output, fixture_root=output
+            )
+            repair_path = output / "config_repair_manifest.json"
+            backup_path = output / "config_resolved.pre_type_fix.yml"
+            repair_before = repair_path.read_bytes()
+            backup_before = backup_path.read_bytes()
+            runs_before = (records / "runs.csv").read_text(encoding="utf-8")
+
+            self.assertEqual(backup_before, broken_bytes)
+            self.assertEqual(log_path.read_bytes(), log_before)
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(first["metrics"]["selected_epoch"], 120)
+            self.assertEqual(first["metrics"]["rank1_percent"], 85.0)
+            self.assertEqual(first["metrics"]["map_percent"], 75.0)
+            manifest = recording.read_json(output / "run_manifest.json")
+            self.assertEqual(manifest["training_commit"], training_commit)
+            self.assertEqual(manifest["finalization_commit"], finalization_commit)
+            self.assertNotEqual(training_commit, finalization_commit)
+            self.assertEqual(manifest["finalization_mode"], "recover_existing_run")
+            restored = deserialize_cfg_node_yaml(
+                (output / "config_resolved.yml").read_text(encoding="utf-8")
+            )
+            self.assertTrue(validate_formal_protocol(restored, "recovered"))
+
+            second = recover_existing_run(
+                output, records, output, fixture_root=output
+            )
+            self.assertEqual(second["metrics"], first["metrics"])
+            self.assertEqual(repair_path.read_bytes(), repair_before)
+            self.assertEqual(backup_path.read_bytes(), backup_before)
+            self.assertEqual(log_path.read_bytes(), log_before)
+            self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (records / "runs.csv").read_text(encoding="utf-8"),
+                runs_before,
+            )
+            rows = list(csv.DictReader(runs_before.splitlines()))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["training_commit"], training_commit)
+            self.assertEqual(rows[0]["finalization_commit"], finalization_commit)
+
+    def test_finalization_only_recovery_failure_never_registers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, _training, _finalization, _broken = make_recovery_fixture(root)
+            records = output / "experiment_records" / "c2_l03_multi_granularity_part"
+            (output / "resnet50_model_1200.pth").unlink()
+            with self.assertRaises(EvidenceIncompleteError):
+                recover_existing_run(
+                    output, records, output, fixture_root=output
+                )
+            self.assertFalse((records / "runs.csv").exists())
+            self.assertFalse((records / "evidence_manifest.tsv").exists())
+
+    def test_recovery_cli_never_routes_to_formal_training(self):
+        with mock.patch.object(runner, "_run_recovery", return_value=0) as recovery, \
+                mock.patch.object(runner, "_run_formal") as formal:
+            result = runner_main([
+                "--recover-existing-run",
+                "--output-dir", "synthetic-completed-output",
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual(recovery.call_count, 1)
+        formal.assert_not_called()
 
     def test_formal_preflight_accepts_exact_clean_branch(self):
         self.assertEqual(

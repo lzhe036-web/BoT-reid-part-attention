@@ -18,6 +18,8 @@ import torch
 import yaml
 from torch.backends import cudnn
 
+from utils.config_serialization import serialize_cfg_node_yaml
+
 
 UINT32_LIMIT = 2 ** 32
 DATA_LOADER_STREAM_OFFSETS = {
@@ -260,7 +262,7 @@ def write_reproducibility_record(
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    resolved_config = str(cfg).rstrip() + "\n"
+    resolved_config = serialize_cfg_node_yaml(cfg)
     resolved_config_path = os.path.join(output_dir, "config_resolved.yml")
     _atomic_write(resolved_config_path, resolved_config)
 

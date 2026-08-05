@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from config import cfg
 from modeling import build_model
+from utils.config_serialization import deserialize_cfg_node_yaml
 from utils.reproducibility import seed_everything, validate_seed
 
 
@@ -91,7 +92,7 @@ def atomic_json(path, payload):
     os.replace(str(temporary), str(target))
 
 
-def resolved_config(path, legacy_baseline=False):
+def profiling_config_from_source(path, legacy_baseline=False):
     local_cfg = cfg.clone()
     local_cfg.merge_from_file(str(path))
     local_cfg.defrost()
@@ -111,6 +112,14 @@ def declared_output_dir(path):
     local_cfg = cfg.clone()
     local_cfg.merge_from_file(str(path))
     return Path(str(local_cfg.OUTPUT_DIR)).resolve()
+
+
+def declared_resolved_output_dir(path):
+    with Path(path).open("r", encoding="utf-8") as handle:
+        resolved = deserialize_cfg_node_yaml(handle.read())
+    if "OUTPUT_DIR" not in resolved:
+        raise ValueError("Resolved configuration is missing OUTPUT_DIR")
+    return Path(str(resolved["OUTPUT_DIR"])).resolve()
 
 
 def count_parameters(model):
@@ -261,7 +270,9 @@ def profile_variant(args):
     dtype = getattr(torch, args.dtype)
     if device.type == "cpu" and dtype != torch.float32:
         raise ValueError("CPU profiling supports float32 only")
-    local_cfg = resolved_config(args.config, legacy_baseline=legacy)
+    local_cfg = profiling_config_from_source(
+        args.config, legacy_baseline=legacy
+    )
     model = build_model(local_cfg, num_classes=args.num_classes).to(
         device=device, dtype=dtype
     )
@@ -441,7 +452,7 @@ def validate_arguments(args):
             resolved_path = Path(args.resolved_config).resolve()
             output_path = Path(args.output_file).resolve()
             source_output = declared_output_dir(args.config)
-            resolved_output = declared_output_dir(resolved_path)
+            resolved_output = declared_resolved_output_dir(resolved_path)
             if (resolved_path != source_output / "config_resolved.yml"
                     or resolved_output != source_output
                     or output_path != source_output / "efficiency_profile.json"):
