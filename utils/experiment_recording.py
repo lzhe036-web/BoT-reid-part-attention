@@ -1504,9 +1504,182 @@ def finish_run_timing(output_dir, runtimes, exit_code):
     atomic_write_json(output / "run_status.json", status)
 
 
-def _checkpoint_iteration(path):
-    matches = re.findall(r"(\d+)", path.stem)
-    return int(matches[-1]) if matches else None
+CHECKPOINT_FILENAME_RE = re.compile(
+    r"^resnet50_checkpoint_(?P<global_iteration>\d+)\.pt$"
+)
+LOG_ITERATION_RE = re.compile(
+    r"Epoch\[(?P<epoch>\d+)\]\s+Iteration\["
+    r"(?P<iteration>\d+)/(?P<iterations_per_epoch>\d+)\]"
+)
+
+
+def _positive_evidence_integer(value, label):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise EvidenceIncompleteError(
+            "{} must be a positive integer".format(label)
+        )
+    return value
+
+
+def _validation_iteration_evidence(validation_records):
+    epoch_to_iteration = {}
+    iteration_to_epoch = {}
+    for index, record in enumerate(validation_records, 1):
+        epoch = _positive_evidence_integer(
+            record.get("epoch"),
+            "Validation record {} epoch".format(index),
+        )
+        iteration = _positive_evidence_integer(
+            record.get("global_iteration"),
+            "Validation record {} global_iteration".format(index),
+        )
+        existing_iteration = epoch_to_iteration.get(epoch)
+        if existing_iteration is not None and existing_iteration != iteration:
+            raise EvidenceIncompleteError(
+                "Validation history maps epoch {} to conflicting global iterations: "
+                "{} and {}".format(epoch, existing_iteration, iteration)
+            )
+        existing_epoch = iteration_to_epoch.get(iteration)
+        if existing_epoch is not None and existing_epoch != epoch:
+            raise EvidenceIncompleteError(
+                "Validation history maps global iteration {} to conflicting epochs: "
+                "{} and {}".format(iteration, existing_epoch, epoch)
+            )
+        epoch_to_iteration[epoch] = iteration
+        iteration_to_epoch[iteration] = epoch
+
+    ratios = set()
+    for epoch, iteration in epoch_to_iteration.items():
+        iterations_per_epoch, remainder = divmod(iteration, epoch)
+        if remainder or iterations_per_epoch <= 0:
+            raise EvidenceIncompleteError(
+                "Validation epoch/iteration mapping is not an exact positive ratio: "
+                "epoch {} -> global iteration {}".format(epoch, iteration)
+            )
+        ratios.add(iterations_per_epoch)
+    if len(ratios) != 1:
+        raise EvidenceIncompleteError(
+            "Validation epoch/iteration ratios are inconsistent: {}".format(
+                sorted(ratios)
+            )
+        )
+    return epoch_to_iteration, iteration_to_epoch, ratios.pop()
+
+
+def _log_iteration_evidence(output):
+    log_path = require_contained_path(output / "log.txt", output, "training log")
+    if not log_path.is_file():
+        return None, 0
+    epoch_totals = {}
+    with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_number, line in enumerate(handle, 1):
+            match = LOG_ITERATION_RE.search(line)
+            if match is None:
+                continue
+            epoch = int(match.group("epoch"))
+            iteration = int(match.group("iteration"))
+            total = int(match.group("iterations_per_epoch"))
+            if epoch <= 0 or iteration <= 0 or total <= 0 or iteration > total:
+                raise EvidenceIncompleteError(
+                    "Invalid Iteration evidence in log.txt line {}".format(
+                        line_number
+                    )
+                )
+            existing = epoch_totals.get(epoch)
+            if existing is not None and existing != total:
+                raise EvidenceIncompleteError(
+                    "log.txt reports conflicting iterations per epoch for epoch {}: "
+                    "{} and {}".format(epoch, existing, total)
+                )
+            epoch_totals[epoch] = total
+    totals = set(epoch_totals.values())
+    if len(totals) > 1:
+        raise EvidenceIncompleteError(
+            "log.txt reports inconsistent iterations per epoch: {}".format(
+                sorted(totals)
+            )
+        )
+    return (totals.pop() if totals else None), len(epoch_totals)
+
+
+def _structured_iteration_evidence(output):
+    manifest_path = require_contained_path(
+        output / "dataset_manifest.json", output, "dataset manifest"
+    )
+    if not manifest_path.is_file():
+        return None
+    dataset = read_json(manifest_path)
+    if "train_loader_batches" not in dataset:
+        raise EvidenceIncompleteError(
+            "dataset_manifest.json is missing train_loader_batches"
+        )
+    return _positive_evidence_integer(
+        dataset["train_loader_batches"],
+        "dataset_manifest.json train_loader_batches",
+    )
+
+
+def _iterations_per_epoch(output, validation_records):
+    epoch_to_iteration, iteration_to_epoch, validation_value = (
+        _validation_iteration_evidence(validation_records)
+    )
+    log_value, log_points = _log_iteration_evidence(output)
+    structured_value = _structured_iteration_evidence(output)
+
+    sources = [("validation_history.jsonl", validation_value)]
+    if log_value is not None:
+        sources.append(("log.txt", log_value))
+    if structured_value is not None:
+        sources.append(("dataset_manifest.json", structured_value))
+    distinct_values = {value for _source, value in sources}
+    if len(distinct_values) != 1:
+        raise EvidenceIncompleteError(
+            "Conflicting iterations_per_epoch evidence: {}".format(
+                ", ".join(
+                    "{}={}".format(source, value) for source, value in sources
+                )
+            )
+        )
+
+    evidence_points = len(epoch_to_iteration) + log_points
+    if structured_value is not None:
+        evidence_points += 1
+    if evidence_points < 2:
+        raise EvidenceIncompleteError(
+            "iterations_per_epoch requires at least two consistent evidence points"
+        )
+    return (
+        validation_value,
+        epoch_to_iteration,
+        iteration_to_epoch,
+    )
+
+
+def _model_checkpoint_candidates(output):
+    candidates = []
+    for path in sorted(output.iterdir(), key=lambda item: item.name):
+        if not path.name.lower().startswith("resnet50_checkpoint_"):
+            continue
+        if path.is_symlink():
+            raise EvidenceIncompleteError(
+                "Checkpoint must not be a symbolic link: {}".format(path.name)
+            )
+        if not path.is_file():
+            continue
+        match = CHECKPOINT_FILENAME_RE.fullmatch(path.name)
+        if match is None:
+            raise EvidenceIncompleteError(
+                "Checkpoint filename does not match "
+                "resnet50_checkpoint_<global_iteration>.pt: {}".format(path.name)
+            )
+        require_contained_path(path, output, "checkpoint {}".format(path.name))
+        iteration = int(match.group("global_iteration"))
+        if iteration <= 0:
+            raise EvidenceIncompleteError(
+                "Checkpoint global iteration must be positive: {}".format(path.name)
+            )
+        candidates.append((path, iteration))
+    return sorted(candidates, key=lambda item: (item[1], item[0].name))
 
 
 def model_state_dict_schema(state_dict):
@@ -1587,57 +1760,91 @@ def validate_selected_checkpoint(checkpoint_path, model_manifest):
 
 def _checkpoint_manifest_rows(output_dir, validation_records, selected):
     output = assert_path_allowed(output_dir)
-    iteration_to_epoch = {
-        int(record["global_iteration"]): int(record["epoch"])
-        for record in validation_records
-    }
-    epoch_to_iteration = {
-        int(record["epoch"]): int(record["global_iteration"])
-        for record in validation_records
-    }
+    iterations_per_epoch, epoch_to_iteration, iteration_to_epoch = (
+        _iterations_per_epoch(output, validation_records)
+    )
+    selected_epoch = _positive_evidence_integer(
+        selected.get("epoch"), "Selected epoch"
+    )
+    selected_record_iteration = _positive_evidence_integer(
+        selected.get("global_iteration"), "Selected global iteration"
+    )
+    expected_global_iteration = selected_epoch * iterations_per_epoch
+    if epoch_to_iteration.get(selected_epoch) != selected_record_iteration:
+        raise EvidenceIncompleteError(
+            "Selected validation record conflicts with validation history at epoch {}"
+            .format(selected_epoch)
+        )
+    if selected_record_iteration != expected_global_iteration:
+        raise EvidenceIncompleteError(
+            "Selected epoch {} must map to global iteration {}; validation records {}"
+            .format(
+                selected_epoch,
+                expected_global_iteration,
+                selected_record_iteration,
+            )
+        )
+
+    candidates = _model_checkpoint_candidates(output)
+    selected_candidates = [
+        path for path, iteration in candidates
+        if iteration == expected_global_iteration
+    ]
+    if len(selected_candidates) != 1:
+        raise EvidenceIncompleteError(
+            "Selected epoch {} maps to global iteration {} and must bind to exactly "
+            "one model checkpoint; found {}".format(
+                selected_epoch,
+                expected_global_iteration,
+                len(selected_candidates),
+            )
+        )
+
     rows = []
-    selected_models = []
-    for path in sorted(output.iterdir(), key=lambda item: item.name):
-        if not path.is_file() or path.suffix.lower() not in (".pt", ".pth", ".ckpt"):
-            continue
-        lower_name = path.name.lower()
-        artifact_type = (
-            "optimizer_checkpoint" if "optimizer" in lower_name
-            else "model_checkpoint" if "model" in lower_name
-            else "checkpoint"
-        )
-        suffix_number = _checkpoint_iteration(path)
-        if suffix_number in iteration_to_epoch:
-            iteration = suffix_number
-            epoch = iteration_to_epoch[suffix_number]
-        elif suffix_number in epoch_to_iteration:
-            epoch = suffix_number
-            iteration = epoch_to_iteration[suffix_number]
-        else:
-            iteration = suffix_number
-            epoch = NOT_RECORDED
-        is_selected = bool(
-            artifact_type == "model_checkpoint"
-            and iteration == int(selected["global_iteration"])
-        )
+    candidates_by_iteration = {}
+    for path, iteration in candidates:
+        candidates_by_iteration.setdefault(iteration, []).append(path)
+        epoch, remainder = divmod(iteration, iterations_per_epoch)
+        if remainder or epoch <= 0:
+            raise EvidenceIncompleteError(
+                "Checkpoint iteration is not aligned to the verified "
+                "iterations_per_epoch={}: {}".format(
+                    iterations_per_epoch, path.name
+                )
+            )
+        if iteration_to_epoch.get(iteration) != epoch:
+            raise EvidenceIncompleteError(
+                "Checkpoint epoch/iteration mapping is absent or inconsistent: "
+                "epoch {} -> global iteration {} ({})".format(
+                    epoch, iteration, path.name
+                )
+            )
+        is_selected = iteration == expected_global_iteration
         row = {
             "epoch": epoch,
-            "global_iteration": iteration if iteration is not None else NOT_RECORDED,
-            "artifact_type": artifact_type,
+            "global_iteration": iteration,
+            "filename": path.name,
+            "path": str(path.resolve()),
+            "size_bytes": path.stat().st_size,
+            "artifact_type": "model_checkpoint",
             "relative_path": path.name,
             "file_size": path.stat().st_size,
             "sha256": sha256_file(path),
             "selected": "true" if is_selected else "false",
         }
         rows.append(row)
-        if is_selected:
-            selected_models.append(row)
-    if len(selected_models) != 1:
-        raise EvidenceIncompleteError(
-            "Selected epoch {} must bind to exactly one model checkpoint; found {}"
-            .format(selected["epoch"], len(selected_models))
-        )
-    return rows, selected_models[0]
+
+    for epoch, iteration in sorted(epoch_to_iteration.items()):
+        matching = candidates_by_iteration.get(iteration, [])
+        if len(matching) != 1:
+            raise EvidenceIncompleteError(
+                "Validation epoch {} maps to global iteration {} and must bind to "
+                "exactly one model checkpoint; found {}".format(
+                    epoch, iteration, len(matching)
+                )
+            )
+    selected_rows = [row for row in rows if row["selected"] == "true"]
+    return rows, selected_rows[0]
 
 
 def build_checkpoint_manifest(output_dir, validation_records, selected):
@@ -1648,8 +1855,8 @@ def build_checkpoint_manifest(output_dir, validation_records, selected):
     _write_delimited(
         output / "checkpoint_manifest.tsv",
         rows,
-        ("epoch", "global_iteration", "artifact_type", "relative_path",
-         "file_size", "sha256", "selected"),
+        ("epoch", "global_iteration", "filename", "path", "size_bytes",
+         "sha256", "selected", "artifact_type", "relative_path", "file_size"),
         "\t",
     )
     return rows, selected_model
@@ -1999,7 +2206,7 @@ def _build_metrics_summary(manifest, selected, selected_checkpoint):
         "schema_version": SCHEMA_VERSION,
         "selection_rule": CHECKPOINT_SELECTION_RULE,
         "selected_epoch": selected["epoch"],
-        "selected_global_iteration": selected["global_iteration"],
+        "selected_global_iteration": selected_checkpoint["global_iteration"],
         "rank1_percent": selected["rank1_percent"],
         "rank5_percent": selected["rank5_percent"],
         "rank10_percent": selected["rank10_percent"],
@@ -2402,7 +2609,10 @@ def finalize_run(output_dir, record_dir, expected=None,
             raise EvidenceIncompleteError("Pretrained weight SHA256 mismatch")
         if efficiency["measurement"].get("num_classes") != model.get("num_classes"):
             raise EvidenceIncompleteError("Efficiency/model num_classes mismatch")
-        validation_records = read_validation_history(output / "validation_history.jsonl")
+        validation_path = require_contained_path(
+            output / "validation_history.jsonl", output, "validation history"
+        )
+        validation_records = read_validation_history(validation_path)
         selected = select_best_validation(validation_records)
         checkpoint_rows, selected_checkpoint = build_checkpoint_manifest(
             output, validation_records, selected
@@ -2680,7 +2890,10 @@ def recover_existing_run(output_dir, record_dir, repo_root,
     log_path = output / "log.txt"
     if not log_path.is_file() or log_path.stat().st_size <= 0:
         raise EvidenceIncompleteError("Recovery training log is missing or empty")
-    validation_records = read_validation_history(output / "validation_history.jsonl")
+    validation_path = require_contained_path(
+        output / "validation_history.jsonl", output, "validation history"
+    )
+    validation_records = read_validation_history(validation_path)
     selected = select_best_validation(validation_records)
     _checkpoint_rows, selected_checkpoint = _checkpoint_manifest_rows(
         output, validation_records, selected

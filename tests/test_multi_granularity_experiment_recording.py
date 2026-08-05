@@ -201,7 +201,7 @@ def validation_records():
     return [
         {
             "epoch": 40,
-            "global_iteration": 400,
+            "global_iteration": 7440,
             "timestamp_utc": "2026-01-01T00:00:40Z",
             "rank1_percent": 80.0,
             "rank5_percent": 90.0,
@@ -213,7 +213,7 @@ def validation_records():
         },
         {
             "epoch": 80,
-            "global_iteration": 800,
+            "global_iteration": 14880,
             "timestamp_utc": "2026-01-01T00:01:20Z",
             "rank1_percent": 85.0,
             "rank5_percent": 94.0,
@@ -225,7 +225,7 @@ def validation_records():
         },
         {
             "epoch": 120,
-            "global_iteration": 1200,
+            "global_iteration": 22320,
             "timestamp_utc": "2026-01-01T00:02:00Z",
             "rank1_percent": 85.0,
             "rank5_percent": 95.0,
@@ -610,7 +610,7 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
         "gallery": [(data_root / "gallery.jpg", 1, 1)],
     }
     dataset_manifest = build_dataset_manifest(
-        splits, data_root, "market1501", "softmax_triplet", 64, 4, 8, 2, 42,
+        splits, data_root, "market1501", "softmax_triplet", 64, 4, 8, 186, 42,
         data_loader_generators=data_loader_generator_metadata(42),
     )
     atomic_write_json(output / "dataset_manifest.json", dataset_manifest)
@@ -648,13 +648,19 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
             continue
         torch.save(
             synthetic_model_state_dict(),
-            output / "resnet50_model_{}.pth".format(record["global_iteration"]),
+            output / "resnet50_checkpoint_{}.pt".format(
+                record["global_iteration"]
+            ),
         )
-        torch.save(
-            {"state": {}, "param_groups": []},
-            output / "resnet50_optimizer_{}.pth".format(record["global_iteration"]),
-        )
-    atomic_write_text(output / "log.txt", "synthetic training log\n")
+    atomic_write_text(
+        output / "log.txt",
+        "".join(
+            "Epoch[{}] Iteration[186/186] synthetic training log\n".format(
+                record["epoch"]
+            )
+            for record in validation_records()
+        ),
+    )
     return output
 
 
@@ -712,6 +718,43 @@ def make_recovery_fixture(root):
     recording._replace_profile_resolved_hash(efficiency, broken_hash)
     atomic_write_json(output / "efficiency_profile.json", efficiency)
     return output, training_commit, finalization_commit, broken_text.encode("utf-8")
+
+
+def make_checkpoint_binding_fixture(root, records=None, checkpoint_iterations=None,
+                                    log_iterations_per_epoch=186,
+                                    structured_iterations_per_epoch=186):
+    output = root / "checkpoint_binding"
+    output.mkdir()
+    records = list(records if records is not None else validation_records())
+    for record in records:
+        append_validation_record(output, record)
+    if log_iterations_per_epoch is not None:
+        atomic_write_text(
+            output / "log.txt",
+            "".join(
+                "Epoch[{}] Iteration[{}/{}] fixture\n".format(
+                    record["epoch"],
+                    log_iterations_per_epoch,
+                    log_iterations_per_epoch,
+                )
+                for record in records
+            ),
+        )
+    if structured_iterations_per_epoch is not None:
+        atomic_write_json(
+            output / "dataset_manifest.json",
+            {"train_loader_batches": structured_iterations_per_epoch},
+        )
+    iterations = (
+        checkpoint_iterations
+        if checkpoint_iterations is not None
+        else [record["global_iteration"] for record in records]
+    )
+    for iteration in iterations:
+        (output / "resnet50_checkpoint_{}.pt".format(iteration)).write_bytes(
+            "checkpoint {}\n".format(iteration).encode("ascii")
+        )
+    return output, records, select_best_validation(records)
 
 
 class MultiGranularityExperimentRecordingTest(unittest.TestCase):
@@ -815,9 +858,11 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             )
             records = output / "experiment_records" / "c2_l03_multi_granularity_part"
             log_path = output / "log.txt"
-            checkpoint_path = output / "resnet50_model_1200.pth"
+            checkpoint_path = output / "resnet50_checkpoint_22320.pt"
             log_before = log_path.read_bytes()
             checkpoint_before = checkpoint_path.read_bytes()
+            log_sha256_before = sha256_file(log_path)
+            checkpoint_sha256_before = sha256_file(checkpoint_path)
 
             first = recover_existing_run(
                 output, records, output, fixture_root=output
@@ -831,7 +876,18 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(backup_before, broken_bytes)
             self.assertEqual(log_path.read_bytes(), log_before)
             self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(sha256_file(log_path), log_sha256_before)
+            self.assertEqual(
+                sha256_file(checkpoint_path), checkpoint_sha256_before
+            )
             self.assertEqual(first["metrics"]["selected_epoch"], 120)
+            self.assertEqual(
+                first["metrics"]["selected_global_iteration"], 22320
+            )
+            self.assertEqual(
+                first["metrics"]["selected_checkpoint"],
+                "resnet50_checkpoint_22320.pt",
+            )
             self.assertEqual(first["metrics"]["rank1_percent"], 85.0)
             self.assertEqual(first["metrics"]["map_percent"], 75.0)
             manifest = recording.read_json(output / "run_manifest.json")
@@ -852,6 +908,10 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(backup_path.read_bytes(), backup_before)
             self.assertEqual(log_path.read_bytes(), log_before)
             self.assertEqual(checkpoint_path.read_bytes(), checkpoint_before)
+            self.assertEqual(sha256_file(log_path), log_sha256_before)
+            self.assertEqual(
+                sha256_file(checkpoint_path), checkpoint_sha256_before
+            )
             self.assertEqual(
                 (records / "runs.csv").read_text(encoding="utf-8"),
                 runs_before,
@@ -866,7 +926,7 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             root = Path(directory)
             output, _training, _finalization, _broken = make_recovery_fixture(root)
             records = output / "experiment_records" / "c2_l03_multi_granularity_part"
-            (output / "resnet50_model_1200.pth").unlink()
+            (output / "resnet50_checkpoint_22320.pt").unlink()
             with self.assertRaises(EvidenceIncompleteError):
                 recover_existing_run(
                     output, records, output, fixture_root=output
@@ -1112,9 +1172,112 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
     def test_validation_selection_keeps_metrics_from_one_block(self):
         selected = select_best_validation(validation_records())
         self.assertEqual(selected["epoch"], 120)
-        self.assertEqual(selected["global_iteration"], 1200)
+        self.assertEqual(selected["global_iteration"], 22320)
         self.assertEqual(selected["rank5_percent"], 95.0)
         self.assertEqual(selected["map_percent"], 75.0)
+
+    def test_checkpoint_binding_uses_verified_global_iterations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory)
+            )
+            rows, selected_row = recording.build_checkpoint_manifest(
+                output, records, selected
+            )
+            self.assertEqual(
+                [(row["epoch"], row["global_iteration"]) for row in rows],
+                [(40, 7440), (80, 14880), (120, 22320)],
+            )
+            self.assertEqual(
+                [row["global_iteration"] // row["epoch"] for row in rows],
+                [186, 186, 186],
+            )
+            self.assertEqual(selected_row["epoch"], 120)
+            self.assertEqual(selected_row["global_iteration"], 22320)
+            self.assertEqual(
+                selected_row["filename"], "resnet50_checkpoint_22320.pt"
+            )
+            self.assertEqual(selected_row["selected"], "true")
+            manifest_rows = list(csv.DictReader(
+                (output / "checkpoint_manifest.tsv").read_text(
+                    encoding="utf-8"
+                ).splitlines(),
+                delimiter="\t",
+            ))
+            self.assertEqual(
+                set((
+                    "epoch", "global_iteration", "filename", "path",
+                    "size_bytes", "sha256", "selected",
+                )).difference(manifest_rows[0]),
+                set(),
+            )
+            self.assertEqual(
+                [row["selected"] for row in manifest_rows],
+                ["false", "false", "true"],
+            )
+
+    def test_checkpoint_binding_rejects_missing_selected_global_iteration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory), checkpoint_iterations=[7440, 14880]
+            )
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError,
+                    "epoch 120 maps to global iteration 22320.*found 0"):
+                recording._checkpoint_manifest_rows(output, records, selected)
+
+    def test_checkpoint_binding_rejects_duplicate_iteration_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory)
+            )
+            (output / "resnet50_checkpoint_022320.pt").write_bytes(b"duplicate\n")
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError,
+                    "epoch 120 maps to global iteration 22320.*found 2"):
+                recording._checkpoint_manifest_rows(output, records, selected)
+
+    def test_checkpoint_binding_rejects_inconsistent_epoch_iteration_ratios(self):
+        records = validation_records()
+        records[-1] = dict(records[-1], global_iteration=22319)
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory), records=records
+            )
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError, "exact positive ratio|inconsistent"):
+                recording._checkpoint_manifest_rows(output, records, selected)
+
+    def test_checkpoint_binding_rejects_validation_log_conflict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory), log_iterations_per_epoch=185
+            )
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError,
+                    "Conflicting iterations_per_epoch evidence.*"
+                    "validation_history.jsonl=186.*log.txt=185"):
+                recording._checkpoint_manifest_rows(output, records, selected)
+
+    def test_checkpoint_binding_rejects_malformed_checkpoint_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory)
+            )
+            (output / "resnet50_checkpoint_epoch120.pt").write_bytes(b"bad\n")
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError, "Checkpoint filename does not match"):
+                recording._checkpoint_manifest_rows(output, records, selected)
+
+    def test_checkpoint_binding_never_treats_epoch_suffix_as_iteration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory), checkpoint_iterations=[7440, 14880, 120]
+            )
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError,
+                    "epoch 120 maps to global iteration 22320.*found 0"):
+                recording._checkpoint_manifest_rows(output, records, selected)
 
     def test_success_finalization_binds_checkpoint_hash_and_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1145,6 +1308,18 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             selected_rows = [row for row in rows if row["selected"] == "true"]
             self.assertEqual(len(selected_rows), 1)
             self.assertEqual(selected_rows[0]["epoch"], "120")
+            self.assertEqual(selected_rows[0]["global_iteration"], "22320")
+            self.assertEqual(
+                selected_rows[0]["filename"],
+                "resnet50_checkpoint_22320.pt",
+            )
+            self.assertEqual(
+                result["metrics"]["selected_global_iteration"], 22320
+            )
+            self.assertEqual(
+                result["metrics"]["selected_checkpoint"],
+                "resnet50_checkpoint_22320.pt",
+            )
             run_row = result["run_row"]
             self.assertEqual(run_row["training_runtime_seconds"], 12.5)
             self.assertEqual(run_row["total_run_runtime_seconds"], 20.0)
@@ -1797,7 +1972,7 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     output = make_success_fixture(root)
-                    selected = output / "resnet50_model_1200.pth"
+                    selected = output / "resnet50_checkpoint_22320.pt"
                     mutation(selected)
                     record_dir = root / "records"
                     with self.assertRaises(EvidenceIncompleteError):
@@ -1808,7 +1983,7 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = make_success_fixture(root)
-            selected = output / "resnet50_model_1200.pth"
+            selected = output / "resnet50_checkpoint_22320.pt"
             loaded = torch.load(selected, map_location="cpu", weights_only=True)
             self.assertEqual(
                 recording.model_state_dict_schema(loaded),
@@ -2092,7 +2267,7 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
                         manifest[manifest_key]["sha256"] = sha256_file(outside)
                         atomic_write_json(manifest_path, manifest)
                     elif case == "checkpoint_symlink":
-                        inside = output / "resnet50_model_1200.pth"
+                        inside = output / "resnet50_checkpoint_22320.pt"
                         inside.unlink()
                         outside = root / "outside_checkpoint_dir"
                         outside.mkdir()
