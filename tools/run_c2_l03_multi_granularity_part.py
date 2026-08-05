@@ -33,6 +33,7 @@ from utils.experiment_recording import (
     model_state_dict_schema,
     record_run_failure,
     require_temporary_fixture,
+    serialize_cfg_node_yaml,
     sha256_file,
     utc_now,
 )
@@ -190,7 +191,7 @@ def _run_formal(args):
                 started_at_utc=started_at_utc,
             )
             initialized = True
-            resolved_text = str(local_cfg).rstrip() + "\n"
+            resolved_text = serialize_cfg_node_yaml(local_cfg)
             resolved_path = output_dir / "config_resolved.yml"
             atomic_write_text(resolved_path, resolved_text)
             resolved_hash = sha256_file(resolved_path)

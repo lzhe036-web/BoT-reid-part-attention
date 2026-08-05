@@ -40,9 +40,11 @@ from utils.experiment_recording import (
     atomic_write_text,
     build_dataset_manifest,
     collect_environment,
+    deserialize_cfg_node_yaml,
     finalize_run,
     formal_preflight,
     select_best_validation,
+    serialize_cfg_node_yaml,
     sha256_file,
     utc_now,
     validate_efficiency_profile,
@@ -134,6 +136,17 @@ def set_dotted(mapping, dotted_path, value):
     for part in parts[:-1]:
         current = current[part]
     current[parts[-1]] = value
+
+
+def flatten_typed_config_leaves(node, prefix=""):
+    leaves = {}
+    for key, value in node.items():
+        dotted_path = "{}.{}".format(prefix, key) if prefix else str(key)
+        if isinstance(value, dict):
+            leaves.update(flatten_typed_config_leaves(value, dotted_path))
+        else:
+            leaves[dotted_path] = value
+    return leaves
 
 
 def make_preflight_repository(root, branch=EXPECTED_BRANCH, seed=42,
@@ -640,6 +653,65 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
 
 
 class MultiGranularityExperimentRecordingTest(unittest.TestCase):
+    def test_resolved_config_yaml_round_trip_preserves_all_leaf_types(self):
+        source_cfg = cfg.clone()
+        source_cfg.merge_from_file(str(EXPERIMENT_CONFIG))
+        source_cfg.freeze()
+
+        self.assertIs(type(source_cfg.MODEL.DEVICE_ID), str)
+        self.assertEqual(source_cfg.MODEL.DEVICE_ID, "0")
+        self.assertIs(type(source_cfg.MODEL.IF_LABELSMOOTH), str)
+        self.assertIs(type(source_cfg.MODEL.IF_WITH_CENTER), str)
+
+        with tempfile.TemporaryDirectory() as directory:
+            resolved_path = Path(directory) / "resolved.yml"
+            resolved_text = serialize_cfg_node_yaml(source_cfg)
+            atomic_write_text(resolved_path, resolved_text)
+
+            self.assertIn("  DEVICE_ID: '''0'''", resolved_text)
+            self.assertIn("  IF_LABELSMOOTH: 'on'", resolved_text)
+            self.assertIn("  IF_WITH_CENTER: 'no'", resolved_text)
+            logical_yaml = deserialize_cfg_node_yaml(resolved_text)
+            self.assertIs(type(logical_yaml["MODEL"]["DEVICE_ID"]), str)
+            self.assertEqual(logical_yaml["MODEL"]["DEVICE_ID"], "0")
+            self.assertIs(type(logical_yaml["MODEL"]["IF_LABELSMOOTH"]), str)
+            self.assertEqual(logical_yaml["MODEL"]["IF_LABELSMOOTH"], "on")
+            self.assertIs(type(logical_yaml["MODEL"]["IF_WITH_CENTER"]), str)
+            self.assertEqual(logical_yaml["MODEL"]["IF_WITH_CENTER"], "no")
+
+            reloaded_cfg = cfg.clone()
+            reloaded_cfg.merge_from_file(str(resolved_path))
+            reloaded_cfg.freeze()
+            from tools.profile_multi_granularity_part import declared_output_dir
+            self.assertEqual(
+                declared_output_dir(resolved_path),
+                Path(str(source_cfg.OUTPUT_DIR)).resolve(),
+            )
+
+        source_leaves = flatten_typed_config_leaves(source_cfg)
+        reloaded_leaves = flatten_typed_config_leaves(reloaded_cfg)
+        self.assertEqual(set(source_leaves), set(reloaded_leaves))
+        for dotted_path, source_value in source_leaves.items():
+            with self.subTest(config_key=dotted_path):
+                reloaded_value = reloaded_leaves[dotted_path]
+                self.assertEqual(reloaded_value, source_value)
+                self.assertIs(type(reloaded_value), type(source_value))
+
+        self.assertIs(type(reloaded_cfg.MODEL.DEVICE_ID), str)
+        self.assertEqual(reloaded_cfg.MODEL.DEVICE_ID, "0")
+        self.assertIs(type(reloaded_cfg.MODEL.IF_LABELSMOOTH), str)
+        self.assertEqual(reloaded_cfg.MODEL.IF_LABELSMOOTH, "on")
+        self.assertIs(type(reloaded_cfg.MODEL.IF_WITH_CENTER), str)
+        self.assertEqual(reloaded_cfg.MODEL.IF_WITH_CENTER, "no")
+
+        # CfgNode.dump() represents tuples as YAML sequences. YACS officially
+        # coerces the list back to the tuple type declared by the destination.
+        transported = yaml.safe_load(resolved_text)
+        self.assertIs(type(source_cfg.SOLVER.STEPS), tuple)
+        self.assertIs(type(transported["SOLVER"]["STEPS"]), list)
+        self.assertIs(type(reloaded_cfg.SOLVER.STEPS), tuple)
+        self.assertEqual(reloaded_cfg.SOLVER.STEPS, source_cfg.SOLVER.STEPS)
+
     def test_formal_preflight_accepts_exact_clean_branch(self):
         self.assertEqual(
             EXPECTED_BRANCH,

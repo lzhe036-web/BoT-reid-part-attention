@@ -3,6 +3,7 @@
 
 from __future__ import absolute_import
 
+import ast
 import csv
 import datetime as dt
 import hashlib
@@ -438,7 +439,7 @@ def validate_fixture_path_containment(output_dir, record_dir):
     with source_path.open("r", encoding="utf-8") as handle:
         source = yaml.safe_load(handle)
     with resolved_path.open("r", encoding="utf-8") as handle:
-        resolved = yaml.safe_load(handle)
+        resolved = deserialize_cfg_node_yaml(handle.read())
     _validate_config_contained_paths(source, root, "source")
     _validate_config_contained_paths(resolved, root, "resolved")
     return root
@@ -533,6 +534,68 @@ def formal_run_lock(repo_root, output_dir, run_id, lock_root=None):
 def _normalized_text(value):
     value = str(value).replace("\r\n", "\n").replace("\r", "\n")
     return value
+
+
+def _protect_yacs_literal_strings(value):
+    """Protect mapping leaves that YACS would reinterpret during a merge."""
+    if isinstance(value, dict):
+        return {
+            key: _protect_yacs_literal_strings(item)
+            for key, item in value.items()
+        }
+    if type(value) is not str:
+        return value
+    try:
+        decoded = ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return value
+    if type(decoded) is str and decoded == value:
+        return value
+    # CfgNode.merge_from_file applies literal_eval once more after YAML parsing.
+    # Store the Python string literal so that extra decode returns the original
+    # string instead of changing a numeric-/boolean-looking value's type.
+    return repr(value)
+
+
+def _restore_yacs_literal_strings(value):
+    """Restore mapping leaves protected for CfgNode.merge_from_file."""
+    if isinstance(value, dict):
+        return {
+            key: _restore_yacs_literal_strings(item)
+            for key, item in value.items()
+        }
+    if type(value) is not str:
+        return value
+    try:
+        decoded = ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return value
+    return decoded if type(decoded) is str else value
+
+
+def serialize_cfg_node_yaml(cfg_node):
+    """Serialize a CfgNode for a value- and type-safe YACS file round trip."""
+    dump_method = getattr(cfg_node, "dump", None)
+    if not callable(dump_method):
+        raise TypeError("Resolved config must provide CfgNode.dump()")
+    dumped = dump_method()
+    payload = yaml.safe_load(dumped)
+    if not isinstance(payload, dict):
+        raise TypeError("CfgNode.dump() must produce a YAML mapping")
+    protected = _protect_yacs_literal_strings(payload)
+    return yaml.safe_dump(
+        protected,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+
+
+def deserialize_cfg_node_yaml(value):
+    """Read the logical mapping emitted by serialize_cfg_node_yaml."""
+    payload = yaml.safe_load(value)
+    if not isinstance(payload, dict):
+        raise TypeError("Serialized CfgNode YAML must contain a mapping")
+    return _restore_yacs_literal_strings(payload)
 
 
 def atomic_write_text(path, value):
@@ -2090,7 +2153,7 @@ def finalize_run(output_dir, record_dir, expected=None,
         with source_path.open("r", encoding="utf-8") as handle:
             source = yaml.safe_load(handle)
         with resolved_path.open("r", encoding="utf-8") as handle:
-            resolved = yaml.safe_load(handle)
+            resolved = deserialize_cfg_node_yaml(handle.read())
         if not isinstance(source, dict) or not isinstance(resolved, dict):
             raise EvidenceIncompleteError("Source/resolved config is not a mapping")
         validate_formal_protocol(source, "source")
