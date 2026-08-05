@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -187,7 +188,7 @@ REQUIRED_MODEL_FIELDS = (
     "backbone", "feature_map_shape", "branches", "scales", "projection_dim",
     "aggregation", "fusion", "descriptor_dim", "num_classes",
     "total_parameters", "trainable_parameters", "pretrained_weight_path",
-    "pretrained_weight_sha256",
+    "pretrained_weight_sha256", "state_dict_schema",
 )
 
 REQUIRED_EFFICIENCY_FIELDS = (
@@ -231,6 +232,10 @@ class PreflightError(RuntimeError):
 
 
 class EvidenceIncompleteError(RuntimeError):
+    pass
+
+
+class FormalRunLockError(RuntimeError):
     pass
 
 
@@ -334,6 +339,195 @@ def require_temporary_fixture(path):
     if common != temporary_root:
         raise ValueError("Fixture directory must be inside the system temporary directory")
     return candidate
+
+
+def require_contained_path(path, root, label):
+    """Resolve ``path`` and require it to stay beneath the resolved root."""
+    fixture_root = Path(root).resolve()
+    candidate = Path(path).resolve()
+    try:
+        common = Path(os.path.commonpath([str(candidate), str(fixture_root)]))
+    except ValueError:
+        common = None
+    if common != fixture_root:
+        raise ValueError(
+            "Fixture {} escapes fixture root: {}".format(label, candidate)
+        )
+    return candidate
+
+
+def _read_contained_json(path, root, label):
+    target = require_contained_path(path, root, label)
+    with target.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _validate_config_contained_paths(configuration, root, label):
+    if not isinstance(configuration, dict):
+        raise ValueError("Fixture {} config must be a mapping".format(label))
+    for dotted_path in (
+            "OUTPUT_DIR", "DATASETS.ROOT_DIR", "MODEL.PRETRAIN_PATH"):
+        value = _nested_value(configuration, dotted_path)
+        require_contained_path(
+            value, root, "{} {}".format(label, dotted_path)
+        )
+
+
+def validate_fixture_path_containment(output_dir, record_dir):
+    """Validate every dry-run evidence path before finalization reads or writes."""
+    root = require_temporary_fixture(output_dir)
+    if not root.is_dir():
+        raise ValueError("Fixture directory does not exist: {}".format(root))
+    require_contained_path(record_dir, root, "registry")
+
+    fixed_paths = (
+        "run_manifest.json",
+        "run_status.json",
+        "reproducibility.json",
+        "environment.json",
+        "environment_packages.txt",
+        "dataset_manifest.json",
+        "model_manifest.json",
+        "efficiency_profile.json",
+        "config_resolved.yml",
+        "validation_history.jsonl",
+        "log.txt",
+    )
+    for relative_path in fixed_paths:
+        require_contained_path(root / relative_path, root, relative_path)
+    for child in root.iterdir():
+        require_contained_path(child, root, "output entry {}".format(child.name))
+
+    manifest = _read_contained_json(
+        root / "run_manifest.json", root, "run manifest"
+    )
+    dataset = _read_contained_json(
+        root / "dataset_manifest.json", root, "dataset manifest"
+    )
+    model = _read_contained_json(
+        root / "model_manifest.json", root, "model manifest"
+    )
+    environment = _read_contained_json(
+        root / "environment.json", root, "environment manifest"
+    )
+    source_path = require_contained_path(
+        manifest.get("source_config", {}).get("path", ""),
+        root,
+        "source config",
+    )
+    resolved_path = require_contained_path(
+        root / "config_resolved.yml", root, "resolved config"
+    )
+    require_contained_path(
+        manifest.get("launch_script", {}).get("path", ""),
+        root,
+        "launch script",
+    )
+    for label, value in (
+            ("manifest output", manifest.get("output_dir", "")),
+            ("manifest cwd", manifest.get("cwd", "")),
+            ("manifest data root", manifest.get("data_root", "")),
+            ("dataset data root", dataset.get("data_root", "")),
+            ("pretrained weight", model.get("pretrained_weight_path", ""))):
+        require_contained_path(value, root, label)
+    packages_path = environment.get("pip_freeze_path", "")
+    if not Path(str(packages_path)).is_absolute():
+        packages_path = root / str(packages_path)
+    require_contained_path(packages_path, root, "environment package list")
+
+    with source_path.open("r", encoding="utf-8") as handle:
+        source = yaml.safe_load(handle)
+    with resolved_path.open("r", encoding="utf-8") as handle:
+        resolved = yaml.safe_load(handle)
+    _validate_config_contained_paths(source, root, "source")
+    _validate_config_contained_paths(resolved, root, "resolved")
+    return root
+
+
+class FormalRunLock(object):
+    """Cross-process fail-closed lock for one formal repo/output/run identity."""
+
+    def __init__(self, repo_root, output_dir, run_id, lock_root=None):
+        default_root = Path(tempfile.gettempdir()) / "bot-reid-formal-run-locks"
+        self.lock_root = require_temporary_fixture(lock_root or default_root)
+        self.lock_root.mkdir(parents=True, exist_ok=True)
+        identity = {
+            "repo_root": str(Path(repo_root).resolve()),
+            "output_dir": str(Path(output_dir).resolve()),
+            "run_id": str(run_id),
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        self.path = self.lock_root / "{}.lock".format(digest)
+        self.owner = dict(identity)
+        self.owner.update({
+            "token": uuid.uuid4().hex,
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "acquired_at_utc": utc_now(),
+        })
+        self.acquired = False
+
+    def _existing_owner_text(self):
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception as error:
+            return "unreadable lock owner ({})".format(error)
+
+    def acquire(self):
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            descriptor = os.open(str(self.path), flags, 0o600)
+        except FileExistsError as error:
+            raise FormalRunLockError(
+                "Formal run lock already exists at {}; owner={}".format(
+                    self.path, self._existing_owner_text()
+                )
+            ) from error
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(
+                    json.dumps(self.owner, ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            self.acquired = True
+        except BaseException:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+            raise
+        return self
+
+    def release(self):
+        if not self.acquired:
+            return False
+        try:
+            current = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            self.acquired = False
+            return False
+        if current.get("token") != self.owner["token"]:
+            self.acquired = False
+            return False
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        self.acquired = False
+        return True
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, _error_type, _error, _traceback):
+        self.release()
+        return False
+
+
+def formal_run_lock(repo_root, output_dir, run_id, lock_root=None):
+    return FormalRunLock(repo_root, output_dir, run_id, lock_root=lock_root)
 
 
 def _normalized_text(value):
@@ -597,6 +791,13 @@ def _finite_number(value, label, positive=False):
     if positive and float(value) <= 0:
         raise EvidenceIncompleteError("{} must be greater than zero".format(label))
     return float(value)
+
+
+def _require_exact_integer(value, expected, label):
+    if type(value) is not int or value != expected:
+        raise EvidenceIncompleteError(
+            "{} must be integer {}, got {!r}".format(label, expected, value)
+        )
 
 
 def _require_close(actual, expected, label, rel_tol=1e-12, abs_tol=1e-9):
@@ -1281,6 +1482,82 @@ def _checkpoint_iteration(path):
     return int(matches[-1]) if matches else None
 
 
+def model_state_dict_schema(state_dict):
+    """Return the exact key/shape/dtype schema for a model state dictionary."""
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise EvidenceIncompleteError("Model state_dict must be a non-empty mapping")
+    schema = {}
+    for key, value in state_dict.items():
+        if not isinstance(key, str) or not key:
+            raise EvidenceIncompleteError("Model state_dict keys must be non-empty strings")
+        if not torch.is_tensor(value):
+            raise EvidenceIncompleteError(
+                "Model state_dict value is not a tensor: {}".format(key)
+            )
+        schema[key] = {
+            "shape": [int(dimension) for dimension in value.shape],
+            "dtype": str(value.dtype),
+        }
+    return schema
+
+
+def _extract_checkpoint_model_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        raise EvidenceIncompleteError("Checkpoint root must be a mapping")
+    for key in ("state_dict", "model_state_dict", "model"):
+        candidate = checkpoint.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return checkpoint
+
+
+def validate_selected_checkpoint(checkpoint_path, model_manifest):
+    """Safely load and structurally bind the selected model checkpoint."""
+    path = assert_path_allowed(checkpoint_path)
+    if not path.is_file():
+        raise EvidenceIncompleteError("Selected checkpoint is missing")
+    if path.stat().st_size <= 0:
+        raise EvidenceIncompleteError("Selected checkpoint is empty")
+    try:
+        checkpoint = torch.load(
+            str(path), map_location="cpu", weights_only=True
+        )
+    except TypeError as error:
+        raise EvidenceIncompleteError(
+            "Safe checkpoint loading requires torch.load(weights_only=True)"
+        ) from error
+    except Exception as error:
+        raise EvidenceIncompleteError(
+            "Selected checkpoint cannot be safely loaded: {}".format(error)
+        ) from error
+    state_dict = _extract_checkpoint_model_state_dict(checkpoint)
+    actual_schema = model_state_dict_schema(state_dict)
+    expected_schema = model_manifest.get("state_dict_schema")
+    if not isinstance(expected_schema, dict) or not expected_schema:
+        raise EvidenceIncompleteError("Model manifest state_dict_schema is missing")
+    for key, entry in expected_schema.items():
+        if (not isinstance(key, str) or not isinstance(entry, dict)
+                or set(entry) != {"shape", "dtype"}
+                or not isinstance(entry["shape"], list)
+                or not all(type(value) is int for value in entry["shape"])
+                or not isinstance(entry["dtype"], str)):
+            raise EvidenceIncompleteError(
+                "Model manifest state_dict_schema is malformed at {}".format(key)
+            )
+    if actual_schema != expected_schema:
+        missing = sorted(set(expected_schema).difference(actual_schema))
+        extra = sorted(set(actual_schema).difference(expected_schema))
+        mismatched = sorted(
+            key for key in set(actual_schema).intersection(expected_schema)
+            if actual_schema[key] != expected_schema[key]
+        )
+        raise EvidenceIncompleteError(
+            "Selected checkpoint state_dict schema mismatch: missing={}, extra={}, "
+            "shape_or_dtype={}".format(missing, extra, mismatched)
+        )
+    return True
+
+
 def build_checkpoint_manifest(output_dir, validation_records, selected):
     output = assert_path_allowed(output_dir)
     iteration_to_epoch = {
@@ -1391,6 +1668,12 @@ def _update_failure_status(output, error, failed=False):
         manifest["status"] = status["status"]
         manifest["evidence_status"] = "incomplete"
         atomic_write_json(manifest_path, manifest)
+
+
+def record_run_failure(output_dir, error, failed=True):
+    """Persist a terminal non-success state without changing exception semantics."""
+    output = assert_path_allowed(output_dir)
+    _update_failure_status(output, error, failed=failed)
 
 
 def _artifact_row(output, artifact_type, path):
@@ -1738,9 +2021,15 @@ def _apply_success_state(manifest, status, selected, selected_checkpoint):
 
 
 def finalize_run(output_dir, record_dir, expected=None,
-                 total_runtime_started=None):
+                 total_runtime_started=None, fixture_root=None):
     output = assert_path_allowed(output_dir)
     records = assert_path_allowed(record_dir)
+    if fixture_root is not None:
+        fixture = validate_fixture_path_containment(output, records)
+        if fixture != Path(fixture_root).resolve():
+            raise EvidenceIncompleteError(
+                "Dry-run fixture root does not match finalization output"
+            )
     expected = dict(expected or {})
     finalization_started = time.monotonic()
     try:
@@ -1838,6 +2127,8 @@ def finalize_run(output_dir, record_dir, expected=None,
             expected_seed=EXPECTED_TRAINING_SEED,
         )
         seed_chain = reproducibility.get("seed_chain", {})
+        if not isinstance(seed_chain, dict):
+            raise EvidenceIncompleteError("Reproducibility seed_chain must be an object")
         for key in (
                 "source_config_seed", "resolved_config_seed", "applied_training_seed",
                 "reproducibility_metadata_seed"):
@@ -1860,6 +2151,8 @@ def finalize_run(output_dir, record_dir, expected=None,
                 "DataLoader worker seeding evidence mismatch"
             )
         random_state = reproducibility.get("random_state", {})
+        if not isinstance(random_state, dict):
+            raise EvidenceIncompleteError("Reproducibility random_state must be an object")
         for key in ("python_random_seeded", "numpy_seeded", "torch_cpu_seeded"):
             if random_state.get(key) is not True:
                 raise EvidenceIncompleteError("Random state evidence missing: {}".format(key))
@@ -1870,6 +2163,75 @@ def finalize_run(output_dir, record_dir, expected=None,
             raise EvidenceIncompleteError("cudnn.deterministic was not recorded as true")
         if random_state.get("cudnn_benchmark") is not False:
             raise EvidenceIncompleteError("cudnn.benchmark was not recorded as false")
+        if execution_mode == "formal":
+            _require_exact_integer(
+                reproducibility.get("seed"), EXPECTED_TRAINING_SEED,
+                "reproducibility.seed",
+            )
+            _require_exact_integer(
+                manifest.get("training_seed"), EXPECTED_TRAINING_SEED,
+                "run_manifest.training_seed",
+            )
+            for key in (
+                    "source_config_seed", "resolved_config_seed",
+                    "applied_training_seed", "reproducibility_metadata_seed"):
+                _require_exact_integer(
+                    seed_chain.get(key), EXPECTED_TRAINING_SEED,
+                    "seed_chain.{}".format(key),
+                )
+            for key in (
+                    "seed", "python_random_seed", "numpy_seed",
+                    "torch_cpu_seed", "torch_cuda_manual_seed_all_seed"):
+                _require_exact_integer(
+                    random_state.get(key), EXPECTED_TRAINING_SEED,
+                    "random_state.{}".format(key),
+                )
+            for key in (
+                    "python_random_seeded", "numpy_seeded", "torch_cpu_seeded",
+                    "cuda_available", "torch_cuda_manual_seed_all_called",
+                    "torch_cuda_all_seeded", "cudnn_deterministic"):
+                if random_state.get(key) is not True:
+                    raise EvidenceIncompleteError(
+                        "Formal random_state.{} must be true".format(key)
+                    )
+            if random_state.get("cudnn_benchmark") is not False:
+                raise EvidenceIncompleteError(
+                    "Formal random_state.cudnn_benchmark must be false"
+                )
+            gpu_count = environment.get("gpu_count")
+            if type(gpu_count) is not int or gpu_count <= 0:
+                raise EvidenceIncompleteError(
+                    "Formal environment.gpu_count must be a positive integer"
+                )
+            if random_state["cuda_available"] is not (gpu_count > 0):
+                raise EvidenceIncompleteError(
+                    "CUDA seed evidence conflicts with environment.gpu_count"
+                )
+            if efficiency.get("mode") != "formal" or efficiency.get(
+                    "measurement", {}).get("device") != "cuda":
+                raise EvidenceIncompleteError(
+                    "CUDA seed evidence requires formal CUDA profiling"
+                )
+            _require_exact_integer(
+                efficiency.get("measurement_seed"), EXPECTED_TRAINING_SEED,
+                "efficiency_profile.measurement_seed",
+            )
+            if environment.get("pythonhashseed") != str(EXPECTED_TRAINING_SEED):
+                raise EvidenceIncompleteError(
+                    "Formal environment PYTHONHASHSEED must be string '42'"
+                )
+            if random_state.get("pythonhashseed") != str(EXPECTED_TRAINING_SEED):
+                raise EvidenceIncompleteError(
+                    "Formal random_state PYTHONHASHSEED must be string '42'"
+                )
+            if environment.get("cublas_workspace_config") != ":4096:8":
+                raise EvidenceIncompleteError(
+                    "Formal environment CUBLAS_WORKSPACE_CONFIG must be :4096:8"
+                )
+            if random_state.get("cublas_workspace_config") != ":4096:8":
+                raise EvidenceIncompleteError(
+                    "Formal random_state CUBLAS_WORKSPACE_CONFIG must be :4096:8"
+                )
         if environment.get("gpu_count", 0) and random_state.get(
                 "torch_cuda_all_seeded") is not True:
             raise EvidenceIncompleteError("torch.cuda.manual_seed_all evidence is missing")
@@ -1974,6 +2336,9 @@ def finalize_run(output_dir, record_dir, expected=None,
         selected = select_best_validation(validation_records)
         checkpoint_rows, selected_checkpoint = build_checkpoint_manifest(
             output, validation_records, selected
+        )
+        validate_selected_checkpoint(
+            output / selected_checkpoint["relative_path"], model
         )
         if selected_checkpoint["sha256"] != sha256_file(
                 output / selected_checkpoint["relative_path"]):

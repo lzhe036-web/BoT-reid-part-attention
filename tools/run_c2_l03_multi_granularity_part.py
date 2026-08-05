@@ -27,8 +27,11 @@ from utils.experiment_recording import (
     collect_environment,
     finalize_run,
     finish_run_timing,
+    formal_run_lock,
     formal_preflight,
     initialize_run,
+    model_state_dict_schema,
+    record_run_failure,
     require_temporary_fixture,
     sha256_file,
     utc_now,
@@ -103,6 +106,7 @@ def _model_manifest(local_cfg, num_classes, preflight):
         "num_classes": int(num_classes),
         "total_parameters": int(total),
         "trainable_parameters": int(trainable),
+        "state_dict_schema": model_state_dict_schema(dict(model.state_dict())),
         "pretrained_weight_path": preflight["pretrained_weight_path"],
         "pretrained_weight_sha256": preflight["pretrained_weight_sha256"],
     }
@@ -115,6 +119,16 @@ def _append_run_log(output_dir, message):
     path = Path(output_dir) / "log.txt"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     atomic_write_text(path, existing + message.rstrip() + "\n")
+
+
+def _failure_exit_code(error, training_exit_code=None):
+    if training_exit_code not in (None, 0):
+        return int(training_exit_code)
+    if isinstance(error, KeyboardInterrupt):
+        return 130
+    if isinstance(error, SystemExit):
+        return error.code if type(error.code) is int else 1
+    return 1
 
 
 def _run_formal(args):
@@ -146,7 +160,6 @@ def _run_formal(args):
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     os.environ["BOT_EXPECTED_TRAINING_SEED"] = str(EXPECTED_TRAINING_SEED)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(local_cfg.MODEL.DEVICE_ID)
-
     train_command = [
         sys.executable,
         "tools/train.py",
@@ -154,125 +167,147 @@ def _run_formal(args):
         str(config_path),
     ]
     shell_command = "bash scripts/train_c2_l03_multi_granularity_part_autodl.sh"
-    initialize_run(
-        output_dir,
-        preflight,
-        args.experiment_family,
-        args.run_id,
-        args.evidence_id,
-        sys.argv,
-        shell_command,
-        REPO_ROOT,
-        str(local_cfg.DATASETS.NAMES),
-        execution_mode="formal",
-        started_at_utc=started_at_utc,
-    )
-    resolved_text = str(local_cfg).rstrip() + "\n"
-    resolved_path = output_dir / "config_resolved.yml"
-    atomic_write_text(resolved_path, resolved_text)
-    resolved_hash = sha256_file(resolved_path)
-    environment = None
-    environment_runtime = 0.0
-    profiling_runtime = 0.0
-    training_runtime = 0.0
-    exit_code = 1
-    try:
-        environment_started = time.monotonic()
-        environment = collect_environment(output_dir)
-        environment_runtime = time.monotonic() - environment_started
-        atomic_write_json(output_dir / "environment.json", environment)
-        from data.build import collect_dataset_protocol
-        dataset_manifest, num_classes = collect_dataset_protocol(local_cfg)
-        atomic_write_json(output_dir / "dataset_manifest.json", dataset_manifest)
-        atomic_write_json(
-            output_dir / "model_manifest.json",
-            _model_manifest(local_cfg, num_classes, preflight),
-        )
-        profile_command = [
-            sys.executable,
-            "tools/profile_multi_granularity_part.py",
-            "--config", str(config_path),
-            "--resolved-config", str(resolved_path),
-            "--source-config-sha256", preflight["source_config_sha256"],
-            "--resolved-config-sha256", resolved_hash,
-            "--mode", "formal",
-            "--measurement-seed", str(EXPECTED_TRAINING_SEED),
-            "--device", "cuda",
-            "--batch-size", str(local_cfg.SOLVER.IMS_PER_BATCH),
-            "--input-height", str(local_cfg.INPUT.SIZE_TRAIN[0]),
-            "--input-width", str(local_cfg.INPUT.SIZE_TRAIN[1]),
-            "--dtype", "float32",
-            "--warmup", "5",
-            "--measurement-repeats", "20",
-            "--num-classes", str(num_classes),
-            "--output-file", str(output_dir / "efficiency_profile.json"),
-        ]
-        profiling_started = time.monotonic()
-        profile_result = subprocess.run(
-            profile_command, cwd=str(REPO_ROOT), check=False
-        )
-        profiling_runtime = time.monotonic() - profiling_started
-        if profile_result.returncode != 0:
-            raise RuntimeError("Mandatory formal efficiency profiler failed")
-        _append_run_log(
-            output_dir,
-            "[experiment recorder] environment: host={}, gpu_count={}, seed={}, "
-            "PYTHONHASHSEED={}, CUBLAS_WORKSPACE_CONFIG={}".format(
-                environment["hostname"], environment["gpu_count"],
-                EXPECTED_TRAINING_SEED, environment["pythonhashseed"],
-                environment["cublas_workspace_config"],
-            ),
-        )
-        training_started = time.monotonic()
-        completed = subprocess.run(
-            train_command,
-            cwd=str(REPO_ROOT),
-            env=os.environ.copy(),
-            check=False,
-        )
-        training_runtime = time.monotonic() - training_started
-        exit_code = int(completed.returncode)
-    except Exception:
-        exit_code = 1
-        raise
-    finally:
-        total_runtime = time.monotonic() - started_monotonic
-        finish_run_timing(output_dir, {
-            "total_run_runtime_seconds": total_runtime,
-            "environment_collection_runtime_seconds": environment_runtime,
-            "profiling_runtime_seconds": profiling_runtime,
-            "training_runtime_seconds": training_runtime,
-            "finalization_runtime_seconds": 0.0,
-        }, exit_code)
-        environment_summary = ""
-        if environment is not None:
-            environment_summary = (
-                "host={}, gpu_count={}, seed={}, PYTHONHASHSEED={}, "
-                "CUBLAS_WORKSPACE_CONFIG={}; "
-            ).format(
-                environment["hostname"], environment["gpu_count"],
-                EXPECTED_TRAINING_SEED, environment["pythonhashseed"],
-                environment["cublas_workspace_config"],
+
+    with formal_run_lock(REPO_ROOT, output_dir, args.run_id):
+        initialized = False
+        environment = None
+        environment_runtime = 0.0
+        profiling_runtime = 0.0
+        training_runtime = 0.0
+        training_exit_code = None
+        try:
+            initialize_run(
+                output_dir,
+                preflight,
+                args.experiment_family,
+                args.run_id,
+                args.evidence_id,
+                sys.argv,
+                shell_command,
+                REPO_ROOT,
+                str(local_cfg.DATASETS.NAMES),
+                execution_mode="formal",
+                started_at_utc=started_at_utc,
             )
-        _append_run_log(
-            output_dir,
-            "[experiment recorder] {}ended_at_utc={}, exit_code={}, "
-            "pre_finalization_elapsed_seconds={:.6f}, "
-            "environment_collection_runtime_seconds={:.6f}, "
-            "profiling_runtime_seconds={:.6f}, training_runtime_seconds={:.6f}, "
-            "runtime_source=time.monotonic".format(
-                environment_summary, utc_now(), exit_code, total_runtime,
-                environment_runtime, profiling_runtime, training_runtime,
-            ),
-        )
-    if exit_code != 0:
-        raise RuntimeError("Training exited with code {}".format(exit_code))
-    result = finalize_run(
-        output_dir, RECORD_DIR,
-        total_runtime_started=started_monotonic,
-    )
-    print(json.dumps(result["metrics"], indent=2, ensure_ascii=False))
-    return 0
+            initialized = True
+            resolved_text = str(local_cfg).rstrip() + "\n"
+            resolved_path = output_dir / "config_resolved.yml"
+            atomic_write_text(resolved_path, resolved_text)
+            resolved_hash = sha256_file(resolved_path)
+
+            environment_started = time.monotonic()
+            try:
+                environment = collect_environment(output_dir)
+            finally:
+                environment_runtime = time.monotonic() - environment_started
+            atomic_write_json(output_dir / "environment.json", environment)
+            from data.build import collect_dataset_protocol
+            dataset_manifest, num_classes = collect_dataset_protocol(local_cfg)
+            atomic_write_json(output_dir / "dataset_manifest.json", dataset_manifest)
+            atomic_write_json(
+                output_dir / "model_manifest.json",
+                _model_manifest(local_cfg, num_classes, preflight),
+            )
+            profile_command = [
+                sys.executable,
+                "tools/profile_multi_granularity_part.py",
+                "--config", str(config_path),
+                "--resolved-config", str(resolved_path),
+                "--source-config-sha256", preflight["source_config_sha256"],
+                "--resolved-config-sha256", resolved_hash,
+                "--mode", "formal",
+                "--measurement-seed", str(EXPECTED_TRAINING_SEED),
+                "--device", "cuda",
+                "--batch-size", str(local_cfg.SOLVER.IMS_PER_BATCH),
+                "--input-height", str(local_cfg.INPUT.SIZE_TRAIN[0]),
+                "--input-width", str(local_cfg.INPUT.SIZE_TRAIN[1]),
+                "--dtype", "float32",
+                "--warmup", "5",
+                "--measurement-repeats", "20",
+                "--num-classes", str(num_classes),
+                "--output-file", str(output_dir / "efficiency_profile.json"),
+            ]
+            profiling_started = time.monotonic()
+            try:
+                profile_result = subprocess.run(
+                    profile_command, cwd=str(REPO_ROOT), check=False
+                )
+            finally:
+                profiling_runtime = time.monotonic() - profiling_started
+            if profile_result.returncode != 0:
+                raise RuntimeError("Mandatory formal efficiency profiler failed")
+            _append_run_log(
+                output_dir,
+                "[experiment recorder] environment: host={}, gpu_count={}, seed={}, "
+                "PYTHONHASHSEED={}, CUBLAS_WORKSPACE_CONFIG={}".format(
+                    environment["hostname"], environment["gpu_count"],
+                    EXPECTED_TRAINING_SEED, environment["pythonhashseed"],
+                    environment["cublas_workspace_config"],
+                ),
+            )
+            training_started = time.monotonic()
+            try:
+                completed = subprocess.run(
+                    train_command,
+                    cwd=str(REPO_ROOT),
+                    env=os.environ.copy(),
+                    check=False,
+                )
+                training_exit_code = int(completed.returncode)
+            finally:
+                training_runtime = time.monotonic() - training_started
+            if training_exit_code != 0:
+                raise RuntimeError(
+                    "Training exited with code {}".format(training_exit_code)
+                )
+
+            total_runtime = time.monotonic() - started_monotonic
+            runtimes = {
+                "total_run_runtime_seconds": total_runtime,
+                "environment_collection_runtime_seconds": environment_runtime,
+                "profiling_runtime_seconds": profiling_runtime,
+                "training_runtime_seconds": training_runtime,
+                "finalization_runtime_seconds": 0.0,
+            }
+            finish_run_timing(output_dir, runtimes, 0)
+            _append_run_log(
+                output_dir,
+                "[experiment recorder] ended_at_utc={}, exit_code=0, "
+                "pre_finalization_elapsed_seconds={:.6f}, "
+                "environment_collection_runtime_seconds={:.6f}, "
+                "profiling_runtime_seconds={:.6f}, training_runtime_seconds={:.6f}, "
+                "runtime_source=time.monotonic".format(
+                    utc_now(), total_runtime, environment_runtime,
+                    profiling_runtime, training_runtime,
+                ),
+            )
+            result = finalize_run(
+                output_dir, RECORD_DIR,
+                total_runtime_started=started_monotonic,
+            )
+            print(json.dumps(result["metrics"], indent=2, ensure_ascii=False))
+            return 0
+        except BaseException as error:
+            if initialized:
+                exit_code = _failure_exit_code(error, training_exit_code)
+                runtimes = {
+                    "total_run_runtime_seconds": (
+                        time.monotonic() - started_monotonic
+                    ),
+                    "environment_collection_runtime_seconds": environment_runtime,
+                    "profiling_runtime_seconds": profiling_runtime,
+                    "training_runtime_seconds": training_runtime,
+                    "finalization_runtime_seconds": 0.0,
+                }
+                try:
+                    finish_run_timing(output_dir, runtimes, exit_code)
+                except BaseException:
+                    pass
+                try:
+                    record_run_failure(output_dir, error, failed=True)
+                except BaseException:
+                    pass
+            raise
 
 
 def _run_dry_fixture(args):
@@ -282,6 +317,7 @@ def _run_dry_fixture(args):
     result = finalize_run(
         fixture,
         fixture / "experiment_records" / "c2_l03_multi_granularity_part",
+        fixture_root=fixture,
     )
     print(json.dumps(result["metrics"], indent=2, ensure_ascii=False))
     return 0

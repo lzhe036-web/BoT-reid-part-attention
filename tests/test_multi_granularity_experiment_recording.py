@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import yaml
+import torch
 
 from config import cfg
 from modeling import build_model
@@ -86,6 +87,45 @@ def formal_source(output, data_root, pretrained):
     source["DATASETS"]["ROOT_DIR"] = str(data_root)
     source["MODEL"]["PRETRAIN_PATH"] = str(pretrained)
     return source
+
+
+def formal_runner_fixture(root):
+    output = root / "formal_output"
+    local_cfg = cfg.clone()
+    local_cfg.merge_from_file(str(EXPERIMENT_CONFIG))
+    local_cfg.defrost()
+    local_cfg.OUTPUT_DIR = str(output)
+    local_cfg.freeze()
+    args = SimpleNamespace(
+        config=str(runner.DEFAULT_CONFIG),
+        experiment_family=EXPECTED_EXPERIMENT_FAMILY,
+        run_id=EXPECTED_RUN_ID,
+        evidence_id=EXPECTED_EVIDENCE_ID,
+    )
+    preflight = {
+        "branch": EXPECTED_BRANCH,
+        "training_commit": "a" * 40,
+        "dirty": False,
+        "source_config_path": str(EXPERIMENT_CONFIG),
+        "source_config_sha256": sha256_file(EXPERIMENT_CONFIG),
+        "launch_script_path": str(
+            REPO_ROOT / "scripts" /
+            "train_c2_l03_multi_granularity_part_autodl.sh"
+        ),
+        "launch_script_sha256": "b" * 64,
+        "pretrained_weight_path": str(root / "unused.pth"),
+        "pretrained_weight_sha256": "c" * 64,
+        "data_root": str(root / "synthetic_data"),
+        "output_dir": str(output),
+        "training_seed": 42,
+    }
+    environment = {
+        "hostname": "synthetic-host",
+        "gpu_count": 1,
+        "pythonhashseed": "42",
+        "cublas_workspace_config": ":4096:8",
+    }
+    return output, local_cfg, args, preflight, environment
 
 
 def set_dotted(mapping, dotted_path, value):
@@ -180,6 +220,14 @@ def validation_records():
             "feat_norm": "yes",
         },
     ]
+
+
+def synthetic_model_state_dict():
+    return {
+        "base.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "bn.running_mean": torch.zeros(2, dtype=torch.float32),
+        "bn.num_batches_tracked": torch.tensor(0, dtype=torch.int64),
+    }
 
 
 def fixture_efficiency(source_hash, resolved_hash):
@@ -457,6 +505,8 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
             "numpy_seeded": True,
             "torch_cpu_seed": metadata_seed,
             "torch_cpu_seeded": True,
+            "torch_cuda_manual_seed_all_seed": "not_recorded",
+            "torch_cuda_manual_seed_all_called": False,
             "torch_cuda_all_seeded": False,
             "cuda_available": False,
             "cudnn_benchmark": False,
@@ -480,6 +530,8 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
         },
     }
     if execution_mode == "formal":
+        reproducibility["random_state"]["torch_cuda_manual_seed_all_seed"] = 42
+        reproducibility["random_state"]["torch_cuda_manual_seed_all_called"] = True
         reproducibility["random_state"]["torch_cuda_all_seeded"] = True
         reproducibility["random_state"]["cuda_available"] = True
     atomic_write_json(output / "reproducibility.json", reproducibility)
@@ -556,6 +608,9 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
         "num_classes": 751,
         "total_parameters": 27202880,
         "trainable_parameters": 27200064,
+        "state_dict_schema": recording.model_state_dict_schema(
+            synthetic_model_state_dict()
+        ),
         "pretrained_weight_path": str(pretrained),
         "pretrained_weight_sha256": sha256_file(pretrained),
     })
@@ -572,11 +627,13 @@ def make_success_fixture(root, source_seed=True, metadata_seed=42,
     for record in validation_records():
         if record["epoch"] == 120 and not selected_checkpoint:
             continue
-        (output / "resnet50_model_{}.pth".format(record["global_iteration"])).write_bytes(
-            "model epoch {}".format(record["epoch"]).encode("utf-8")
+        torch.save(
+            synthetic_model_state_dict(),
+            output / "resnet50_model_{}.pth".format(record["global_iteration"]),
         )
-        (output / "resnet50_optimizer_{}.pth".format(record["global_iteration"])).write_bytes(
-            "optimizer epoch {}".format(record["epoch"]).encode("utf-8")
+        torch.save(
+            {"state": {}, "param_groups": []},
+            output / "resnet50_optimizer_{}.pth".format(record["global_iteration"]),
         )
     atomic_write_text(output / "log.txt", "synthetic training log\n")
     return output
@@ -995,6 +1052,7 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(
                 finalize_mock.call_args.kwargs["total_runtime_started"], 100.0
             )
+            self.assertEqual(finalize_mock.call_count, 1)
 
     def test_run_formal_profiler_failure_prevents_training_and_finalization(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1059,6 +1117,211 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
                     runner._run_formal(args)
             self.assertEqual(subprocess_mock.call_count, 1)
             finalize_mock.assert_not_called()
+
+    def test_formal_runner_closes_every_post_initialize_failure(self):
+        cases = (
+            "resolved_config_write",
+            "environment_exception",
+            "profiler_failure",
+            "training_nonzero",
+            "finalization_exception",
+            "keyboard_interrupt",
+            "system_exit",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    output, local_cfg, args, preflight, environment = (
+                        formal_runner_fixture(root)
+                    )
+                    subprocess_results = [SimpleNamespace(returncode=0)]
+                    if case == "training_nonzero":
+                        subprocess_results.append(SimpleNamespace(returncode=7))
+                    else:
+                        subprocess_results.append(SimpleNamespace(returncode=0))
+                    collect_side_effect = None
+                    collect_return = environment
+                    if case == "environment_exception":
+                        collect_side_effect = RuntimeError("environment failed")
+                    elif case == "keyboard_interrupt":
+                        collect_side_effect = KeyboardInterrupt()
+                    elif case == "system_exit":
+                        collect_side_effect = SystemExit(17)
+
+                    lock_factory = lambda repo, run_output, run_id: (
+                        recording.formal_run_lock(
+                            repo, run_output, run_id, lock_root=root / "locks"
+                        )
+                    )
+                    patches = [
+                        mock.patch.object(
+                            runner, "_load_config", return_value=local_cfg
+                        ),
+                        mock.patch.object(
+                            runner, "formal_preflight", return_value=preflight
+                        ),
+                        mock.patch.object(
+                            runner, "formal_run_lock", side_effect=lock_factory
+                        ),
+                        mock.patch.object(
+                            runner, "collect_environment",
+                            return_value=collect_return,
+                            side_effect=collect_side_effect,
+                        ),
+                        mock.patch(
+                            "data.build.collect_dataset_protocol",
+                            return_value=({}, 2),
+                        ),
+                        mock.patch.object(
+                            runner, "_model_manifest", return_value={}
+                        ),
+                        mock.patch.object(
+                            runner.subprocess, "run",
+                            side_effect=subprocess_results,
+                        ),
+                        mock.patch.object(
+                            runner, "RECORD_DIR", root / "formal_records"
+                        ),
+                        mock.patch.dict(os.environ, {}, clear=False),
+                    ]
+                    if case == "resolved_config_write":
+                        patches.append(mock.patch.object(
+                            runner, "atomic_write_text",
+                            side_effect=OSError("resolved config write failed"),
+                        ))
+                    if case == "profiler_failure":
+                        patches[-3] = mock.patch.object(
+                            runner.subprocess, "run",
+                            return_value=SimpleNamespace(returncode=9),
+                        )
+                    if case == "finalization_exception":
+                        patches.append(mock.patch.object(
+                            runner, "finalize_run",
+                            side_effect=RuntimeError("finalization failed"),
+                        ))
+                    else:
+                        patches.append(mock.patch.object(runner, "finalize_run"))
+
+                    entered = []
+                    try:
+                        for patcher in patches:
+                            entered.append(patcher.start())
+                        if case == "keyboard_interrupt":
+                            with self.assertRaises(KeyboardInterrupt):
+                                runner._run_formal(args)
+                        elif case == "system_exit":
+                            with self.assertRaises(SystemExit) as caught:
+                                runner._run_formal(args)
+                            self.assertEqual(caught.exception.code, 17)
+                        else:
+                            with self.assertRaises((RuntimeError, OSError)):
+                                runner._run_formal(args)
+                    finally:
+                        for patcher in reversed(patches):
+                            patcher.stop()
+
+                    status = json.loads(
+                        (output / "run_status.json").read_text(encoding="utf-8")
+                    )
+                    manifest = json.loads(
+                        (output / "run_manifest.json").read_text(encoding="utf-8")
+                    )
+                    self.assertIn(status["status"], ("failed", "incomplete"))
+                    self.assertNotEqual(status["status"], "running")
+                    self.assertNotEqual(manifest["status"], "running")
+                    for field in (
+                            "total_run_runtime_seconds",
+                            "environment_collection_runtime_seconds",
+                            "profiling_runtime_seconds",
+                            "training_runtime_seconds",
+                            "finalization_runtime_seconds"):
+                        self.assertNotEqual(status[field], recording.NOT_RECORDED)
+                        self.assertNotEqual(manifest[field], recording.NOT_RECORDED)
+                    finalize_mock = entered[-1]
+                    if case in (
+                            "resolved_config_write", "environment_exception",
+                            "profiler_failure", "training_nonzero",
+                            "keyboard_interrupt", "system_exit"):
+                        finalize_mock.assert_not_called()
+                    self.assertFalse(any((root / "locks").glob("*.lock")))
+
+    def test_formal_run_lock_is_cross_process_exclusive_and_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_root = root / "locks"
+            output = root / "output"
+            lock = recording.formal_run_lock(
+                root, output, EXPECTED_RUN_ID, lock_root=lock_root
+            )
+            child_code = (
+                "import sys; "
+                "from utils.experiment_recording import formal_run_lock, "
+                "FormalRunLockError; "
+                "repo,out,run_id,lock_root=sys.argv[1:5]; "
+                "lock=formal_run_lock(repo,out,run_id,lock_root=lock_root); "
+                "\ntry:\n lock.acquire(); print('acquired'); lock.release()"
+                "\nexcept FormalRunLockError as error:\n print(error); sys.exit(3)"
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(REPO_ROOT)
+            command = [
+                sys.executable, "-B", "-c", child_code,
+                str(root), str(output), EXPECTED_RUN_ID, str(lock_root),
+            ]
+            lock.acquire()
+            try:
+                blocked = subprocess.run(
+                    command, cwd=str(REPO_ROOT), env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                )
+                self.assertEqual(blocked.returncode, 3)
+                diagnostics = blocked.stdout.decode("utf-8", errors="replace")
+                for field in ("pid", "hostname", "acquired_at_utc", "owner="):
+                    self.assertIn(field, diagnostics)
+            finally:
+                self.assertTrue(lock.release())
+            acquired = subprocess.run(
+                command, cwd=str(REPO_ROOT), env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(
+                acquired.returncode, 0,
+                acquired.stderr.decode("utf-8", errors="replace"),
+            )
+            self.assertIn("acquired", acquired.stdout.decode("utf-8"))
+            self.assertFalse(any(lock_root.glob("*.lock")))
+
+    def test_formal_run_lock_stale_and_foreign_owner_are_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = recording.formal_run_lock(
+                root, root / "output", EXPECTED_RUN_ID,
+                lock_root=root / "locks",
+            )
+            stale = {
+                "token": "stale-owner",
+                "pid": 999999,
+                "hostname": "stale-host",
+                "acquired_at_utc": "2020-01-01T00:00:00Z",
+            }
+            lock.path.write_text(json.dumps(stale), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    recording.FormalRunLockError, "stale-owner"):
+                lock.acquire()
+            self.assertTrue(lock.path.is_file())
+            lock.path.unlink()
+
+            owner = recording.formal_run_lock(
+                root, root / "output", EXPECTED_RUN_ID,
+                lock_root=root / "locks",
+            ).acquire()
+            foreign = dict(owner.owner)
+            foreign["token"] = "replacement-owner"
+            owner.path.write_text(json.dumps(foreign), encoding="utf-8")
+            self.assertFalse(owner.release())
+            self.assertTrue(owner.path.is_file())
+            owner.path.unlink()
 
     def test_same_run_id_finalization_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1150,6 +1413,162 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
                     with self.assertRaises(EvidenceIncompleteError):
                         finalize_run(output, record_dir)
                     self.assertFalse((record_dir / "runs.csv").exists())
+
+    def test_formal_seed_evidence_rejects_missing_drift_and_wrong_types(self):
+        fields = {
+            "seed": (43, "42"),
+            "python_random_seed": (43, "42"),
+            "python_random_seeded": (False, 1),
+            "numpy_seed": (43, "42"),
+            "numpy_seeded": (False, 1),
+            "torch_cpu_seed": (43, "42"),
+            "torch_cpu_seeded": (False, 1),
+            "cuda_available": (False, 1),
+            "torch_cuda_manual_seed_all_called": (False, 1),
+            "torch_cuda_manual_seed_all_seed": (43, "42"),
+            "torch_cuda_all_seeded": (False, 1),
+            "cudnn_deterministic": (False, 1),
+            "cudnn_benchmark": (True, 0),
+            "pythonhashseed": ("43", 42),
+            "cublas_workspace_config": (":16:8", 4096),
+        }
+        for field, (drift, wrong_type) in fields.items():
+            for action, value in (
+                    ("missing", None), ("drift", drift),
+                    ("wrong_type", wrong_type)):
+                with self.subTest(field=field, action=action):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        output = make_success_fixture(
+                            root, execution_mode="formal"
+                        )
+                        path = output / "reproducibility.json"
+                        evidence = json.loads(path.read_text(encoding="utf-8"))
+                        if action == "missing":
+                            evidence["random_state"].pop(field)
+                        else:
+                            evidence["random_state"][field] = value
+                        atomic_write_json(path, evidence)
+                        record_dir = root / "records"
+                        with self.assertRaises(EvidenceIncompleteError):
+                            finalize_run(output, record_dir)
+                        self.assertFalse((record_dir / "runs.csv").exists())
+
+    def test_formal_seed_cross_evidence_rejects_mutations(self):
+        mutations = {
+            "top_seed": lambda reproducibility, _manifest, _environment: (
+                reproducibility.update(seed=43)
+            ),
+            "seed_chain": lambda reproducibility, _manifest, _environment: (
+                reproducibility["seed_chain"].update(applied_training_seed=43)
+            ),
+            "manifest_seed": lambda _reproducibility, manifest, _environment: (
+                manifest.update(training_seed=43)
+            ),
+            "environment_gpu_count": lambda _reproducibility, _manifest, environment: (
+                environment.update(gpu_count=0)
+            ),
+            "environment_pythonhashseed_type": lambda _reproducibility, _manifest, environment: (
+                environment.update(pythonhashseed=42)
+            ),
+            "environment_cublas": lambda _reproducibility, _manifest, environment: (
+                environment.update(cublas_workspace_config=":16:8")
+            ),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    output = make_success_fixture(root, execution_mode="formal")
+                    paths = {
+                        "reproducibility": output / "reproducibility.json",
+                        "manifest": output / "run_manifest.json",
+                        "environment": output / "environment.json",
+                    }
+                    payloads = {
+                        name: json.loads(path.read_text(encoding="utf-8"))
+                        for name, path in paths.items()
+                    }
+                    mutation(
+                        payloads["reproducibility"], payloads["manifest"],
+                        payloads["environment"],
+                    )
+                    for payload_name, path in paths.items():
+                        atomic_write_json(path, payloads[payload_name])
+                    record_dir = root / "records"
+                    with self.assertRaises(EvidenceIncompleteError):
+                        finalize_run(output, record_dir)
+                    self.assertFalse((record_dir / "runs.csv").exists())
+
+    def test_checkpoint_integrity_rejects_all_structural_mutations(self):
+        def write_text(path):
+            path.write_text("not a checkpoint\n", encoding="utf-8")
+
+        def write_empty_file(path):
+            path.write_bytes(b"")
+
+        def write_empty_state(path):
+            torch.save({}, path)
+
+        def write_optimizer_only(path):
+            torch.save({"state": {}, "param_groups": []}, path)
+
+        def write_missing_key(path):
+            state = synthetic_model_state_dict()
+            state.pop("base.weight")
+            torch.save(state, path)
+
+        def write_extra_key(path):
+            state = synthetic_model_state_dict()
+            state["unexpected.weight"] = torch.zeros(1)
+            torch.save(state, path)
+
+        def write_wrong_shape(path):
+            state = synthetic_model_state_dict()
+            state["base.weight"] = torch.zeros(3, 3)
+            torch.save(state, path)
+
+        def write_wrong_dtype(path):
+            state = synthetic_model_state_dict()
+            state["base.weight"] = state["base.weight"].to(torch.float64)
+            torch.save(state, path)
+
+        mutations = {
+            "text": write_text,
+            "empty_file": write_empty_file,
+            "empty_state_dict": write_empty_state,
+            "optimizer_only": write_optimizer_only,
+            "missing_key": write_missing_key,
+            "extra_key": write_extra_key,
+            "wrong_shape": write_wrong_shape,
+            "wrong_dtype": write_wrong_dtype,
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    output = make_success_fixture(root)
+                    selected = output / "resnet50_model_1200.pth"
+                    mutation(selected)
+                    record_dir = root / "records"
+                    with self.assertRaises(EvidenceIncompleteError):
+                        finalize_run(output, record_dir)
+                    self.assertFalse((record_dir / "runs.csv").exists())
+
+    def test_valid_synthetic_state_dict_checkpoint_finalizes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = make_success_fixture(root)
+            selected = output / "resnet50_model_1200.pth"
+            loaded = torch.load(selected, map_location="cpu", weights_only=True)
+            self.assertEqual(
+                recording.model_state_dict_schema(loaded),
+                json.loads(
+                    (output / "model_manifest.json").read_text(encoding="utf-8")
+                )["state_dict_schema"],
+            )
+            result = finalize_run(output, root / "records")
+            self.assertEqual(result["run_row"]["status"], TRAINING_COMPLETE)
 
     def test_missing_or_invalid_efficiency_profile_never_finalizes(self):
         mutations = {
@@ -1361,6 +1780,89 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             runs = output / "experiment_records" / "c2_l03_multi_granularity_part" / "runs.csv"
             rows = list(csv.DictReader(runs.read_text(encoding="utf-8").splitlines()))
             self.assertEqual(len(rows), 1)
+
+    def test_dry_run_rejects_parent_and_symlink_path_escapes(self):
+        def create_junction(link, target):
+            completed = subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(
+                completed.returncode, 0,
+                (completed.stdout + completed.stderr).decode(
+                    "utf-8", errors="replace"
+                ),
+            )
+
+        cases = (
+            "source_parent",
+            "launch_parent",
+            "source_symlink",
+            "launch_symlink",
+            "checkpoint_symlink",
+            "registry_symlink",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    output = make_success_fixture(root)
+                    manifest_path = output / "run_manifest.json"
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    source = Path(manifest["source_config"]["path"])
+                    launch = Path(manifest["launch_script"]["path"])
+                    if case == "source_parent":
+                        outside = root / "outside_source.yml"
+                        outside.write_bytes(source.read_bytes())
+                        manifest["source_config"]["path"] = str(outside)
+                        manifest["source_config"]["sha256"] = sha256_file(outside)
+                        atomic_write_json(manifest_path, manifest)
+                    elif case == "launch_parent":
+                        outside = root / "outside_launch.sh"
+                        outside.write_bytes(launch.read_bytes())
+                        manifest["launch_script"]["path"] = str(outside)
+                        manifest["launch_script"]["sha256"] = sha256_file(outside)
+                        atomic_write_json(manifest_path, manifest)
+                    elif case in ("source_symlink", "launch_symlink"):
+                        inside = source if case == "source_symlink" else launch
+                        outside_dir = root / "outside_{}_dir".format(case)
+                        outside_dir.mkdir()
+                        outside = outside_dir / inside.name
+                        outside.write_bytes(inside.read_bytes())
+                        junction = output / "{}_junction".format(case)
+                        create_junction(junction, outside_dir)
+                        manifest_key = (
+                            "source_config" if case == "source_symlink"
+                            else "launch_script"
+                        )
+                        manifest[manifest_key]["path"] = str(
+                            junction / inside.name
+                        )
+                        manifest[manifest_key]["sha256"] = sha256_file(outside)
+                        atomic_write_json(manifest_path, manifest)
+                    elif case == "checkpoint_symlink":
+                        inside = output / "resnet50_model_1200.pth"
+                        inside.unlink()
+                        outside = root / "outside_checkpoint_dir"
+                        outside.mkdir()
+                        torch.save(
+                            synthetic_model_state_dict(), outside / "model.pth"
+                        )
+                        create_junction(inside, outside)
+                    elif case == "registry_symlink":
+                        outside = root / "outside_registry"
+                        outside.mkdir()
+                        create_junction(output / "experiment_records", outside)
+                    self.assertEqual(
+                        runner_main(["--dry-run", "--fixture-dir", str(output)]),
+                        1,
+                    )
+                    self.assertFalse(
+                        (output / "experiment_records" /
+                         "c2_l03_multi_granularity_part" / "runs.csv").is_file()
+                    )
 
     def test_forbidden_path_guard_and_utf8_lf_writes(self):
         with tempfile.TemporaryDirectory() as directory:
