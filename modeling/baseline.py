@@ -13,6 +13,7 @@ from layers.part_correspondence_consistency import build_local_part_descriptors
 from .backbones.resnet import ResNet, BasicBlock, Bottleneck
 from .backbones.senet import SENet, SEResNetBottleneck, SEBottleneck, SEResNeXtBottleneck
 from .backbones.resnet_ibn_a import resnet50_ibn_a
+from .multi_granularity_local import MultiGranularityLocalFeature
 
 
 def weights_init_kaiming(m):
@@ -66,9 +67,13 @@ class PartAttentionHead(nn.Module):
 class Baseline(nn.Module):
     in_planes = 2048
 
-    def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice,
-                 part_attention=None, part_attention_parts=None,
-                 part_correspondence_consistency=None, pcc_parts=None):
+    def __init__(self, num_classes, last_stride, model_path, neck, neck_feat,
+                 model_name, pretrain_choice, part_attention=None,
+                 part_attention_parts=None,
+                 part_correspondence_consistency=None, pcc_parts=None,
+                 multi_granularity_local=None,
+                 multi_granularity_scales=None, multi_granularity_dim=None,
+                 multi_granularity_aggregation=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -190,31 +195,88 @@ class Baseline(nn.Module):
         if self.part_attention:
             self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
 
+        if multi_granularity_local is None:
+            multi_granularity_local = cfg.MODEL.MULTI_GRANULARITY_LOCAL
+        if multi_granularity_scales is None:
+            multi_granularity_scales = cfg.MODEL.MULTI_GRANULARITY_SCALES
+        if multi_granularity_dim is None:
+            multi_granularity_dim = cfg.MODEL.MULTI_GRANULARITY_DIM
+        if multi_granularity_aggregation is None:
+            multi_granularity_aggregation = (
+                cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
+            )
+        self.multi_granularity_local = bool(multi_granularity_local)
+        self.descriptor_dim = self.in_planes
+        if self.multi_granularity_local:
+            self.multi_granularity_head = MultiGranularityLocalFeature(
+                self.in_planes,
+                scales=multi_granularity_scales,
+                projection_dim=multi_granularity_dim,
+                aggregation=multi_granularity_aggregation,
+            )
+            self.descriptor_dim += self.multi_granularity_head.output_dim
+
         if self.neck == 'no':
-            self.classifier = nn.Linear(self.in_planes, self.num_classes)
+            self.classifier = nn.Linear(self.descriptor_dim, self.num_classes)
             # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
             # self.classifier.apply(weights_init_classifier)  # new add by luo
         elif self.neck == 'bnneck':
-            self.bottleneck = nn.BatchNorm1d(self.in_planes)
+            self.bottleneck = nn.BatchNorm1d(self.descriptor_dim)
             self.bottleneck.bias.requires_grad_(False)  # no shift
-            self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
+            self.classifier = nn.Linear(self.descriptor_dim, self.num_classes, bias=False)
 
             self.bottleneck.apply(weights_init_kaiming)
             self.classifier.apply(weights_init_classifier)
 
-    def forward(self, x):
-
+    def _forward_impl(self, x, return_shape_trace=False):
         feature_map = self.base(x)
         global_feat = self.gap(feature_map)  # (b, 2048, 1, 1)
         global_feat = global_feat.view(global_feat.shape[0], -1)  # flatten to (bs, 2048)
+        shape_trace = None
+        if return_shape_trace:
+            shape_trace = {
+                'backbone_feature_map': tuple(feature_map.shape),
+                'global_feature': tuple(global_feat.shape),
+                'baseline_existing_attention': bool(self.part_attention),
+                'new_module_attention': False,
+            }
         if self.part_attention:
             part_feat = self.part_attention_head(feature_map)
             global_feat = global_feat + part_feat
+        if return_shape_trace:
+            shape_trace['global_feature_after_part_attention'] = tuple(
+                global_feat.shape
+            )
+
+        if self.multi_granularity_local:
+            local_features, local_details = self.multi_granularity_head(
+                feature_map, return_details=True
+            )
+            if return_shape_trace:
+                for scale, details in local_details.items():
+                    shape_trace['k{}_part_features'.format(scale)] = [
+                        tuple(part.shape) for part in details['part_features']
+                    ]
+                    shape_trace['k{}_part_bounds'.format(scale)] = list(
+                        details['bounds']
+                    )
+                    shape_trace['k{}_aggregated'.format(scale)] = tuple(
+                        details['aggregated'].shape
+                    )
+            global_feat = torch.cat((global_feat,) + local_features, dim=1)
+        if return_shape_trace:
+            shape_trace['concat_feature'] = tuple(global_feat.shape)
 
         if self.neck == 'no':
             feat = global_feat
         elif self.neck == 'bnneck':
             feat = self.bottleneck(global_feat)  # normalize for angular softmax
+        if return_shape_trace:
+            shape_trace['bnneck_feature'] = tuple(feat.shape)
+            shape_trace['classifier_input'] = tuple(feat.shape)
+            shape_trace['inference_feature'] = tuple(
+                feat.shape if self.neck_feat == 'after' else global_feat.shape
+            )
 
         if self.training:
             cls_score = self.classifier(feat)
@@ -222,15 +284,26 @@ class Baseline(nn.Module):
                 pcc_local_features = build_local_part_descriptors(
                     feature_map, self.pcc_parts
                 )
-                return cls_score, global_feat, pcc_local_features
-            return cls_score, global_feat  # global feature for triplet loss
+                result = (cls_score, global_feat, pcc_local_features)
+            else:
+                result = (cls_score, global_feat)  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':
                 # print("Test with feature after BN")
-                return feat
+                result = feat
             else:
                 # print("Test with feature before BN")
-                return global_feat
+                result = global_feat
+        if return_shape_trace:
+            return result, shape_trace
+        return result
+
+    def forward(self, x):
+        return self._forward_impl(x, return_shape_trace=False)
+
+    def forward_with_shape_trace(self, x):
+        """Synthetic-validation helper; the formal training path never calls it."""
+        return self._forward_impl(x, return_shape_trace=True)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

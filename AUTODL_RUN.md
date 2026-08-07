@@ -281,3 +281,33 @@ conflicting strong evidence leaves it `failed` or `incomplete` and prevents a
 success row. In particular, this legacy branch does not emit an applied seed;
 the recorder reports `missing_evidence` rather than injecting a seed or copying
 a historical value. Historical lambda-sensitivity rows are never overwritten.
+
+## C2-L03 + Multi-Granularity Local Feature
+
+Direct baseline: `C2-L03` at commit
+`dca6dc1dd890d47dbbbaf192de14c9ab5402afb0`.
+
+Formal single-run entry on branch
+`exp/c2l03-multi-granularity-local-feature`:
+
+```bash
+bash scripts/train_c2l03_multi_granularity_local_feature_autodl.sh
+```
+
+This entry uses
+`configs/softmax_triplet_c2l03_multi_granularity_local_feature_autodl.yml`
+and writes only to
+`/root/autodl-tmp/experiments/BoT/c2l03_multi_granularity_local_market1501`.
+It preserves the C2-L03 Part Attention, loss, lambda=0.3, sampler, optimizer,
+scheduler, augmentation, epochs, and Market1501 protocol. The only method
+addition is an attention-free K={2,4,6} local feature module using arithmetic
+mean within each scale and the single shared backbone feature map.
+
+Optional non-formal one-epoch smoke entry:
+
+```bash
+bash scripts/test_c2l03_multi_granularity_local_feature_1epoch.sh
+```
+
+The smoke output directory is separate and must not be registered as a paper
+result.

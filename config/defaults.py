@@ -46,6 +46,12 @@ _C.MODEL.IF_LABELSMOOTH = 'on'
 _C.MODEL.PART_ATTENTION = False
 # Number of horizontal parts for part-aware attention
 _C.MODEL.PART_ATTENTION_PARTS = 6
+# Add attention-free multi-granularity local descriptors from the shared
+# backbone feature map. Disabled by default to preserve existing experiments.
+_C.MODEL.MULTI_GRANULARITY_LOCAL = False
+_C.MODEL.MULTI_GRANULARITY_SCALES = [2, 4, 6]
+_C.MODEL.MULTI_GRANULARITY_DIM = 256
+_C.MODEL.MULTI_GRANULARITY_AGGREGATION = "mean"
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5

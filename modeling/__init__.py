@@ -22,5 +22,11 @@ def build_model(cfg, num_classes):
         part_attention_parts=cfg.MODEL.PART_ATTENTION_PARTS,
         part_correspondence_consistency=cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY,
         pcc_parts=cfg.MODEL.PCC_PARTS,
+        multi_granularity_local=cfg.MODEL.MULTI_GRANULARITY_LOCAL,
+        multi_granularity_scales=cfg.MODEL.MULTI_GRANULARITY_SCALES,
+        multi_granularity_dim=cfg.MODEL.MULTI_GRANULARITY_DIM,
+        multi_granularity_aggregation=(
+            cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
+        ),
     )
     return model

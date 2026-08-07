@@ -216,6 +216,7 @@ def config_modules(configuration):
             "MODEL.HARD_NEGATIVE_WEIGHTING",
         )),
         "multi_granularity": enabled((
+            "MODEL.MULTI_GRANULARITY_LOCAL",
             "MODEL.MULTI_GRANULARITY_PART",
             "MODEL.MULTI_GRANULARITY",
         )),
@@ -263,6 +264,12 @@ def experiment_identity(configuration):
         method = "C2-L03 + Fixed-Index Part Correspondence Consistency"
         variant = "fixed_index_pcc"
         relation = "same_pid_different_camera_same_index"
+    elif modules["multi_granularity"] and modules["cross_camera_positive"]:
+        method = (
+            "C2-L03 + Multi-Granularity Local Feature "
+            "(Global + K2 + K4 + K6, mean aggregation)"
+        )
+        variant = "multi_granularity_local"
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
@@ -275,7 +282,9 @@ def experiment_identity(configuration):
         "margin": nested_value(configuration, "SOLVER.MARGIN"),
         "mode": mode,
         "modules": modules,
-        "baseline": "C2-L03" if pcc_enabled else NOT_RECORDED,
+        "baseline": "C2-L03" if (
+            pcc_enabled or modules["multi_granularity"]
+        ) else NOT_RECORDED,
         "cross_camera_positive_lambda": nested_value(
             configuration, "MODEL.CROSS_CAMERA_POSITIVE_LAMBDA"
         ) if modules["cross_camera_positive"] else NOT_RECORDED,
