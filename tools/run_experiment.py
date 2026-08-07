@@ -80,12 +80,34 @@ def _require_new_output_dir(path):
 
 def _model_manifest(configuration):
     identity = experiment_identity(configuration)
+    model = configuration.get("MODEL", {})
+    scales = model.get("MULTI_GRANULARITY_SCALES", [])
+    projection_dim = model.get("MULTI_GRANULARITY_DIM", NOT_RECORDED)
+    multi_granularity_enabled = identity["modules"]["multi_granularity"]
+    descriptor_dim = NOT_RECORDED
+    if (multi_granularity_enabled
+            and model.get("NAME") == "resnet50"
+            and projection_dim != NOT_RECORDED):
+        descriptor_dim = 2048 + len(scales) * int(projection_dim)
     return {
         "schema_version": 1,
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
         "neck": configuration.get("MODEL", {}).get("NECK", NOT_RECORDED),
         "method": identity["method"],
         "modules": identity["modules"],
+        "baseline_experiment": (
+            "C2-L03" if multi_granularity_enabled else NOT_RECORDED
+        ),
+        "baseline_existing_attention": bool(model.get("PART_ATTENTION", False)),
+        "new_module_attention": (
+            False if multi_granularity_enabled else NOT_RECORDED
+        ),
+        "multi_granularity_scales": scales,
+        "multi_granularity_projection_dim": projection_dim,
+        "multi_granularity_aggregation": model.get(
+            "MULTI_GRANULARITY_AGGREGATION", NOT_RECORDED
+        ),
+        "descriptor_dim": descriptor_dim,
         "total_params": NOT_RECORDED,
         "trainable_params": NOT_RECORDED,
         "FLOPs": NOT_RECORDED,

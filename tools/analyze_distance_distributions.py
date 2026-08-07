@@ -115,6 +115,14 @@ def build_checkpoint_model(local_cfg, checkpoint, device):
         "none",
         part_attention=bool(local_cfg.MODEL.PART_ATTENTION),
         part_attention_parts=int(local_cfg.MODEL.PART_ATTENTION_PARTS),
+        multi_granularity_local=bool(
+            local_cfg.MODEL.MULTI_GRANULARITY_LOCAL
+        ),
+        multi_granularity_scales=local_cfg.MODEL.MULTI_GRANULARITY_SCALES,
+        multi_granularity_dim=int(local_cfg.MODEL.MULTI_GRANULARITY_DIM),
+        multi_granularity_aggregation=(
+            local_cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
+        ),
     )
     incompatibility = model.load_state_dict(state, strict=True)
     if incompatibility.missing_keys or incompatibility.unexpected_keys:

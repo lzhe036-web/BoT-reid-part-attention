@@ -44,6 +44,7 @@
 | `exp/hierarchical-camera-aware-loss` | Hierarchical camera-aware loss 实验版本，包含 easy / boundary / hard anchor、hard negative weighting 等增强逻辑。 |
 | `exp/cross-camera-positive-only` | 只使用 cross-camera positive 的消融实验版本，不额外使用 hard negative mining / hard negative weighting。 |
 | `C2L03` | 从 `exp/cross-camera-positive-lambda-sensitivity` 创建的 C2-L03 独立正式实验，只运行 lambda=0.3。 |
+| `exp/c2l03-multi-granularity-local-feature` | 直接以 C2-L03 为基线，完整保留原 Part Attention 和 lambda=0.3，仅增加共享 backbone feature map 上的 K={2,4,6} mean 多粒度局部表示。 |
 
 ### 四、实验记录规则
 

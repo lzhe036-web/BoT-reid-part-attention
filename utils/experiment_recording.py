@@ -203,6 +203,7 @@ def config_modules(configuration):
             "MODEL.HARD_NEGATIVE_WEIGHTING",
         )),
         "multi_granularity": enabled((
+            "MODEL.MULTI_GRANULARITY_LOCAL",
             "MODEL.MULTI_GRANULARITY_PART",
             "MODEL.MULTI_GRANULARITY",
         )),
@@ -241,6 +242,11 @@ def experiment_identity(configuration):
         relation = "none"
         loss_lambda = NOT_RECORDED
         mode = NOT_RECORDED
+    if modules["multi_granularity"] and modules["cross_camera_positive"]:
+        method = (
+            "C2-L03 + Multi-Granularity Local Feature "
+            "(Global + K2 + K4 + K6, mean aggregation)"
+        )
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
