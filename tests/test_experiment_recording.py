@@ -30,6 +30,7 @@ from utils.experiment_recording import (
     normalized_path,
     sha256_file,
     validate_git_preflight,
+    validate_git_runtime_state,
 )
 
 
@@ -182,6 +183,7 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "sampler_seed_strategy": "synthetic sampler fixture",
         "cudnn_deterministic": True,
         "cudnn_benchmark": False,
+        "status": "complete",
     })
     if include_log:
         atomic_write_text(output / "log.txt", _training_log(config_text))
@@ -365,6 +367,51 @@ class ExperimentRecordingTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(EvidenceError, "clean Git"):
                 validate_git_preflight("unused", "C2L03")
+
+    def test_current_run_evidence_is_allowed_after_clean_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            run_dir = repo / "experiment_records" / "runs" / "run-001"
+            with mock.patch(
+                "utils.experiment_recording._git_status_entries",
+                return_value=[
+                    ("??", "experiment_records/runs/run-001/run_manifest.json"),
+                    ("??", "experiment_records/runs/run-001/environment.json"),
+                ],
+            ), mock.patch(
+                "utils.experiment_recording.git_metadata",
+                return_value={
+                    "commit": FULL_COMMIT,
+                    "branch": "C2L03",
+                    "dirty": True,
+                },
+            ):
+                metadata = validate_git_runtime_state(
+                    repo, run_dir, "C2L03", FULL_COMMIT
+                )
+            self.assertTrue(metadata["controlled_evidence_only"])
+
+    def test_unexpected_runtime_dirty_path_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            run_dir = repo / "experiment_records" / "runs" / "run-001"
+            with mock.patch(
+                "utils.experiment_recording._git_status_entries",
+                return_value=[("??", "unexpected.txt")],
+            ):
+                with self.assertRaisesRegex(EvidenceError, "outside controlled"):
+                    validate_git_runtime_state(repo, run_dir)
+
+    def test_tracked_runtime_modification_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            run_dir = repo / "experiment_records" / "runs" / "run-001"
+            with mock.patch(
+                "utils.experiment_recording._git_status_entries",
+                return_value=[(" M", "tools/train.py")],
+            ):
+                with self.assertRaisesRegex(EvidenceError, "outside controlled"):
+                    validate_git_runtime_state(repo, run_dir)
 
     def test_checkpoint_sha256_is_correct(self):
         with tempfile.TemporaryDirectory() as directory:
