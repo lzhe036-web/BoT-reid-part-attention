@@ -8,8 +8,7 @@ import argparse
 import os
 import sys
 import torch
-
-from torch.backends import cudnn
+import yaml
 
 sys.path.append('.')
 from config import cfg
@@ -20,6 +19,20 @@ from layers import make_loss, make_loss_with_center
 from solver import make_optimizer, make_optimizer_with_center, WarmupMultiStepLR
 
 from utils.logger import setup_logger
+from utils.reproducibility import (
+    apply_reproducibility,
+    collect_reproducibility_evidence,
+    validate_seed,
+    write_reproducibility_evidence,
+)
+
+
+def _source_seed(config_file, resolved_seed):
+    if not config_file:
+        return resolved_seed
+    with open(config_file, "r", encoding="utf-8") as handle:
+        source_config = yaml.safe_load(handle) or {}
+    return validate_seed(source_config.get("SEED", resolved_seed))
 
 
 def train(cfg):
@@ -133,9 +146,24 @@ def main():
     cfg.merge_from_list(args.opts)
     cfg.freeze()
 
+    resolved_seed = validate_seed(cfg.SEED)
+    source_seed = _source_seed(args.config_file, resolved_seed)
+    if source_seed != resolved_seed:
+        raise RuntimeError(
+            "Source/resolved seed conflict: source={} resolved={}"
+            .format(source_seed, resolved_seed)
+        )
+    if cfg.MODEL.DEVICE == "cuda":
+        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
+    applied_reproducibility = apply_reproducibility(resolved_seed)
+    reproducibility_evidence = collect_reproducibility_evidence(
+        source_seed, resolved_seed, applied_reproducibility
+    )
+
     output_dir = cfg.OUTPUT_DIR
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    write_reproducibility_evidence(output_dir, reproducibility_evidence)
 
     logger = setup_logger("reid_baseline", output_dir, 0)
     logger.info("Using {} GPUS".format(num_gpus))
@@ -148,9 +176,6 @@ def main():
             logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))
 
-    if cfg.MODEL.DEVICE == "cuda":
-        os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID    # new add by gu
-    cudnn.benchmark = True
     train(cfg)
 
 

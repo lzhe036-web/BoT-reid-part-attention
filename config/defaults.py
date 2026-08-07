@@ -16,6 +16,10 @@ from yacs.config import CfgNode as CN
 
 _C = CN()
 
+# Unified training reproducibility seed. Formal experiment configs must still
+# declare SEED explicitly so the source -> resolved -> applied chain is auditable.
+_C.SEED = 42
+
 _C.MODEL = CN()
 # Using cuda or cpu for training
 _C.MODEL.DEVICE = "cuda"
