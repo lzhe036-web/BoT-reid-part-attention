@@ -45,6 +45,8 @@ logs/
 output/
 outputs/
 runs/
+!experiment_records/runs/
+!experiment_records/runs/**
 results/
 checkpoints/
 saved-models/

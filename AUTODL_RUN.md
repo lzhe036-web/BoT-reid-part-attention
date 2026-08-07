@@ -239,24 +239,45 @@ git push
 
 Each successful training script updates `EXPERIMENTS.md` with `--mode update`; use `--dry-run` to preview records without writing.
 
-## C2 Lambda Sensitivity
+## C2-L03 Independent Formal Experiment
 
-Run the C2 lambda sensitivity sequence only from branch
-`exp/cross-camera-positive-lambda-sensitivity`. Before running, either switch an
-existing clone to that branch:
-
-```bash
-git switch exp/cross-camera-positive-lambda-sensitivity
-bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh
-```
-
-Or clone the lambda branch directly:
+Run the single C2-L03 formal experiment only from branch `C2L03`. Before
+running, either switch an existing clone to that branch:
 
 ```bash
-git clone --branch exp/cross-camera-positive-lambda-sensitivity --single-branch https://github.com/lzhe036-web/BoT-reid-part-attention.git BoT-reid-c2-lambda
-cd BoT-reid-c2-lambda
-bash scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh
+git switch C2L03
+bash scripts/train_cross_camera_positive_lambda03_autodl.sh
 ```
 
-The sequence runs lambda values 0.1, 0.3, 0.5, and 1.0 in order. Each successful
-training script updates `EXPERIMENTS.md` with `--mode update`.
+Or clone the formal branch directly:
+
+```bash
+git clone --branch C2L03 --single-branch https://github.com/lzhe036-web/BoT-reid-part-attention.git BoT-reid-c2-l03
+cd BoT-reid-c2-l03
+bash scripts/train_cross_camera_positive_lambda03_autodl.sh
+```
+
+Each invocation starts exactly one training task with
+`configs/softmax_triplet_cross_camera_positive_lambda03_autodl.yml`,
+`MODEL.CROSS_CAMERA_POSITIVE_LAMBDA=0.3`, and the independent output directory
+`/root/autodl-tmp/experiments/BoT/C2L03_market1501`.
+
+The shell script calls `tools/run_experiment.py`, which performs a clean Git /
+branch preflight and then starts the unchanged `tools/train.py` exactly once.
+After the training subprocess exits with code 0, the bypass finalizer:
+
+1. parses `log.txt` and derives `validation_history.jsonl`;
+2. selects the best validation epoch using Rank-1, then mAP;
+3. maps `resnet50_checkpoint_<global_iteration>.pt` through the logged
+   `iterations_per_epoch` instead of treating the suffix as an epoch;
+4. hashes the log, selected checkpoint, configs, and generated artifacts;
+5. runs independent distance, controlled anchor-coverage, and efficiency
+   analyses without changing the training process;
+6. updates CSV sources, regenerates Markdown tables, and updates only the
+   generated section of `EXPERIMENTS.md` by `run_id`.
+
+The run is written to `experiment_records/runs/<run_id>/`. Missing or
+conflicting strong evidence leaves it `failed` or `incomplete` and prevents a
+success row. In particular, this legacy branch does not emit an applied seed;
+the recorder reports `missing_evidence` rather than injecting a seed or copying
+a historical value. Historical lambda-sensitivity rows are never overwritten.

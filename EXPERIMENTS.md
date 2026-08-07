@@ -44,3 +44,12 @@
 | C2-L05 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda05_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda05_market1501 | 待填写 | 待填写 | 待填写 | 0.5 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
 | C2-L10 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda10_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501 | 待填写 | 待填写 | 待填写 | 1.0 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
 
+<!-- AUTO-EXPERIMENT-RESULTS:START -->
+## Automated Formal Experiment Runs
+
+This section is generated from `experiment_records/tables/main_results.csv`.
+Historical experiment rows outside this section are never rewritten.
+
+| experiment_id | run_id | date | commit | branch | method | dataset | config | output_dir | log_path | log_sha256 | GPU | seed | lambda | runtime_seconds | best_epoch | Rank-1 | Rank-5 | Rank-10 | mAP | checkpoint | checkpoint_sha256 | status | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+<!-- AUTO-EXPERIMENT-RESULTS:END -->

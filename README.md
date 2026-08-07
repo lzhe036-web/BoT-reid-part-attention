@@ -27,7 +27,8 @@
 | `layers/triplet_loss.py` | 保存 `TripletLoss`、`CameraAwareTripletLoss`、`CrossCameraPositiveLoss` 等 loss 实现。修改新 loss 时不要破坏原 `TripletLoss`。 |
 | `layers/__init__.py` | loss 构建入口，负责根据 config 组合 id loss、triplet loss 和实验 loss。 |
 | `modeling/baseline.py` | BoT baseline 主干模型定义。实验中通常不要随意改 backbone。 |
-| `scripts/` | 保存 AutoDL 启动脚本和实验记录脚本，例如训练脚本、`record_experiment_info.sh`、`append_experiment_result.py`。 |
+| `scripts/` | 保存 AutoDL 外层启动脚本和旧版兼容记录脚本。正式实验由 `tools/run_experiment.py` 统一包装。 |
+| `experiment_records/` | 保存按 run_id 隔离的证据、CSV 单一事实源及自动生成的 Markdown 表格。 |
 | `EXPERIMENTS.md` | 保存实验记录，至少记录 commit id、config、seed、GPU、运行时间、best epoch、Rank-1、mAP、备注。 |
 | `AUTODL_RUN.md` | 保存 AutoDL 运行说明、路径、tmux 命令、训练入口和结果整理方式。 |
 
@@ -42,7 +43,7 @@
 | `exp/camera-aware-triplet-loss` | Camera-aware hard triplet loss 实验版本，使用 same pid + different camid 的 cross-camera positive，并包含 hard negative mining。 |
 | `exp/hierarchical-camera-aware-loss` | Hierarchical camera-aware loss 实验版本，包含 easy / boundary / hard anchor、hard negative weighting 等增强逻辑。 |
 | `exp/cross-camera-positive-only` | 只使用 cross-camera positive 的消融实验版本，不额外使用 hard negative mining / hard negative weighting。 |
-| `exp/cross-camera-positive-lambda-sensitivity` | C2 的 lambda=0.1/0.3/0.5/1.0 敏感性实验。 |
+| `C2L03` | 从 `exp/cross-camera-positive-lambda-sensitivity` 创建的 C2-L03 独立正式实验，只运行 lambda=0.3。 |
 
 ### 四、实验记录规则
 
@@ -62,11 +63,12 @@
 
 说明：
 
-1. 训练前可以用 `scripts/record_experiment_info.sh` 查看基础信息。
-2. 训练结束后应由 `scripts/append_experiment_result.py` 自动解析 `log.txt` 并更新 `EXPERIMENTS.md`。
-3. 如果 Rank-1、mAP、best epoch 无法解析，填写“待填写”，不能编造。
-4. 训练脚本应在训练成功结束后自动调用 `append_experiment_result.py`。
-5. 自动更新 `EXPERIMENTS.md` 后，如需保存到 GitHub，需要手动执行 `git add`、`git commit`、`git push`。
+1. 正式训练由 `tools/run_experiment.py` 启动；它以子进程调用原有 `tools/train.py`，不修改训练计算或随机状态。
+2. 训练退出码为 0 后，由 `tools/finalize_experiment.py` 使用同一套只读解析逻辑完成归档。
+3. CSV 是结果单一事实源，Markdown 和 `EXPERIMENTS.md` 自动区段由 CSV 生成，不手工维护两套数据。
+4. 缺失或冲突的 log、指标、seed、checkpoint、Git、GPU 或 config 证据会令 run 保持 `failed`/`incomplete`，不会写入成功主表。
+5. 无法旁路可靠取得的字段写 `not_recorded` 或 `missing_evidence`，禁止用历史结果补齐。
+6. 自动更新后如需保存到 GitHub，仍由用户手动执行 `git add`、`git commit`、`git push`。
 
 ### 五、AutoDL 基本路径说明
 
@@ -163,7 +165,7 @@ tmux attach -t <name>
 - `scripts/train_cross_camera_positive_only_autodl.sh`
 - `scripts/train_c2_baseline_control_autodl.sh`
 - `scripts/train_cross_camera_positive_only_repeat_autodl.sh`
-- `scripts/train_cross_camera_positive_lambda_sensitivity_autodl.sh`
+- `scripts/train_cross_camera_positive_lambda03_autodl.sh`
 
 ### 八、维护注意事项
 

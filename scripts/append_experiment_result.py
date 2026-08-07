@@ -22,8 +22,11 @@ CROSS_CAMERA_POSITIVE_SECTION_TITLE = "## Cross-Camera Positive Only Experiments
 SAME_CAMERA_POSITIVE_SECTION_TITLE = "## Same-Camera Positive Only Ablation"
 LAMBDA_SECTION_TITLE = "## C2 Lambda Sensitivity Experiments"
 BASELINE_SECTION_TITLE = "## C2 Baseline-Control Experiments"
+C2_L03_FORMAL_SECTION_TITLE = "## C2-L03 Independent Formal Experiment"
 HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | Rank-1 | mAP | 备注 |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+C2_L03_FORMAL_HEADER = "| 实验编号 | 日期 | commit id | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 运行时间 | best epoch | checkpoint | Rank-1 | mAP | 备注 |"
+C2_L03_FORMAL_SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
 def get_cfg_value(node, key, default=PENDING):
@@ -81,6 +84,7 @@ def parse_metrics(output_dir):
     result = {
         "runtime": PENDING,
         "best_epoch": PENDING,
+        "checkpoint": PENDING,
         "rank1": PENDING,
         "map": PENDING,
         "log_path": PENDING,
@@ -141,6 +145,15 @@ def parse_metrics(output_dir):
         result["best_epoch"] = best[2]
         result["rank1"] = best[3]
         result["map"] = best[4]
+        checkpoint_candidates = []
+        for path in glob.glob(os.path.join(output_dir, "*model*.pth")):
+            filename = os.path.basename(path).lower()
+            if "optimizer" in filename or "center" in filename:
+                continue
+            if re.search(r"(?:_|-){}(?:\D|$)".format(re.escape(best[2])), filename):
+                checkpoint_candidates.append(path)
+        if checkpoint_candidates:
+            result["checkpoint"] = max(checkpoint_candidates, key=os.path.getmtime)
     if first_timestamp is not None and last_timestamp is not None:
         result["runtime"] = str(last_timestamp - first_timestamp)
     return result
@@ -173,14 +186,16 @@ def build_row(args):
         loss_lambda,
         metrics["runtime"],
         metrics["best_epoch"],
-        metrics["rank1"],
-        metrics["map"],
-        args.note,
     ]
+    if args.record_section == "c2-l03-formal":
+        values.append(metrics["checkpoint"])
+    values.extend([metrics["rank1"], metrics["map"], args.note])
     return "| " + " | ".join(values) + " |"
 
 
 def select_section_title(args):
+    if args.record_section == "c2-l03-formal":
+        return C2_L03_FORMAL_SECTION_TITLE
     config_name = os.path.basename(args.config)
     if args.experiment_id.startswith("S2-") or "same_camera_positive" in config_name:
         return SAME_CAMERA_POSITIVE_SECTION_TITLE
@@ -193,21 +208,27 @@ def select_section_title(args):
     return SECTION_TITLE
 
 
-def ensure_section(content, section_title):
+def ensure_section(content, section_title, header=HEADER, separator=SEPARATOR):
     if section_title in content:
         return content
-    section = "\n\n{}\n\n{}\n{}\n".format(section_title, HEADER, SEPARATOR)
+    section = "\n\n{}\n\n{}\n{}\n".format(section_title, header, separator)
     return content.rstrip() + section
 
 
-def update_experiments(row, experiment_id, section_title, path="EXPERIMENTS.md"):
+def update_experiments(
+        row,
+        experiment_id,
+        section_title,
+        path="EXPERIMENTS.md",
+        header=HEADER,
+        separator=SEPARATOR):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8", errors="ignore") as handle:
             content = handle.read()
     else:
         content = "# Experiments\n"
 
-    content = ensure_section(content, section_title)
+    content = ensure_section(content, section_title, header, separator)
     lines = content.splitlines()
     replaced = False
     section_seen = False
@@ -238,6 +259,12 @@ def main():
     parser = argparse.ArgumentParser(description="Append or update experiment results in EXPERIMENTS.md")
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment-id", required=True)
+    parser.add_argument(
+        "--record-section",
+        choices=["auto", "c2-l03-formal"],
+        default="auto",
+        help="Select the destination experiment table without changing the experiment id.",
+    )
     parser.add_argument("--note", default="")
     parser.add_argument("--mode", choices=["dry-run", "update"], default="dry-run")
     parser.add_argument("--dry-run", action="store_true")
@@ -249,7 +276,17 @@ def main():
     if args.dry_run or args.mode == "dry-run":
         return
 
-    update_experiments(row, args.experiment_id, select_section_title(args))
+    section_title = select_section_title(args)
+    if args.record_section == "c2-l03-formal":
+        update_experiments(
+            row,
+            args.experiment_id,
+            section_title,
+            header=C2_L03_FORMAL_HEADER,
+            separator=C2_L03_FORMAL_SEPARATOR,
+        )
+    else:
+        update_experiments(row, args.experiment_id, section_title)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,1 @@
+run_id,experiment_id,dataset,checkpoint,same_id_same_camera_mean,same_id_same_camera_std,same_id_cross_camera_mean,same_id_cross_camera_std,different_id_mean,different_id_std,cross_camera_gap,seed,commit

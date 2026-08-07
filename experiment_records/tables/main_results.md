@@ -1,0 +1,2 @@
+| run_id | experiment_id | experiment_family | method | dataset | branch | commit | seed | lambda | margin | mode | best_epoch | selected_epoch | rank1 | rank5 | rank10 | map | checkpoint | checkpoint_sha256 | runtime_seconds | gpu | config | log_path | log_sha256 | output_dir | status | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|

@@ -1,0 +1,1 @@
+run_id,experiment_id,experiment_family,method,dataset,branch,commit_id,config_file,seed,lambda,margin,mode,GPU,start_time,end_time,runtime,best_epoch,selected_epoch,Rank-1,Rank-5,Rank-10,mAP,checkpoint,checkpoint_sha256,log_path,log_sha256,output_dir,status,notes
