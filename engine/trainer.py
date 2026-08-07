@@ -14,9 +14,6 @@ from ignite.metrics import RunningAverage
 
 from utils.reid_metric import R1_mAP
 
-global ITER
-ITER = 0
-
 
 def _unpack_train_batch(batch):
     if len(batch) == 3:
@@ -46,6 +43,42 @@ def _item(value):
     if torch.is_tensor(value):
         return value.item()
     return value
+
+
+def _engine_epoch_length(engine):
+    """Return Ignite's authoritative epoch length for logging/evidence only."""
+    epoch_length = engine.state.epoch_length
+    if epoch_length is None or int(epoch_length) <= 0:
+        raise RuntimeError(
+            "Ignite engine.state.epoch_length must be a positive integer"
+        )
+    return int(epoch_length)
+
+
+def _attach_epoch_evidence_logging(trainer, logger):
+    """Attach observation-only epoch counters and authoritative evidence."""
+    epoch_log_state = {"iteration": 0}
+
+    @trainer.on(Events.EPOCH_STARTED)
+    def reset_epoch_log_counter(_engine):
+        epoch_log_state["iteration"] = 0
+
+    @trainer.on(Events.ITERATION_COMPLETED)
+    def increment_epoch_log_counter(_engine):
+        epoch_log_state["iteration"] += 1
+
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def log_epoch_evidence(engine):
+        logger.info(
+            "EPOCH_EVIDENCE epoch={} global_iteration={} epoch_length={}"
+            .format(
+                int(engine.state.epoch),
+                int(engine.state.iteration),
+                _engine_epoch_length(engine),
+            )
+        )
+
+    return epoch_log_state
 
 
 def create_supervised_trainer(model, optimizer, loss_fn,
@@ -218,6 +251,7 @@ def do_train(
         checkpointer,
         {'model': model, 'optimizer': optimizer}
     )
+    epoch_log_state = _attach_epoch_evidence_logging(trainer, logger)
     timer = Timer(average=True)
 
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -242,15 +276,15 @@ def do_train(
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
-        global ITER
-        ITER += 1
+        iteration_in_epoch = epoch_log_state["iteration"]
 
-        if ITER % log_period == 0:
+        if iteration_in_epoch % log_period == 0:
             logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                         "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
                         "loss_cross_camera_positive: {:.3f}, "
                         "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                        .format(engine.state.epoch, ITER, len(train_loader),
+                        .format(engine.state.epoch, iteration_in_epoch,
+                                _engine_epoch_length(engine),
                                 engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
                                 engine.state.metrics['avg_loss_triplet'],
                                 engine.state.metrics['avg_loss_camera_triplet'],
@@ -260,8 +294,6 @@ def do_train(
                                 scheduler.get_lr()[0]))
             if (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY) and engine.state.output['cross_camera_positive_count'] == 0:
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
-        if len(train_loader) == ITER:
-            ITER = 0
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)
@@ -325,6 +357,7 @@ def do_train_with_center(
             'optimizer_center': optimizer_center
         }
     )
+    epoch_log_state = _attach_epoch_evidence_logging(trainer, logger)
     timer = Timer(average=True)
 
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -349,15 +382,15 @@ def do_train_with_center(
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
-        global ITER
-        ITER += 1
+        iteration_in_epoch = epoch_log_state["iteration"]
 
-        if ITER % log_period == 0:
+        if iteration_in_epoch % log_period == 0:
             logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                         "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
                         "loss_cross_camera_positive: {:.3f}, "
                         "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                        .format(engine.state.epoch, ITER, len(train_loader),
+                        .format(engine.state.epoch, iteration_in_epoch,
+                                _engine_epoch_length(engine),
                                 engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
                                 engine.state.metrics['avg_loss_triplet'],
                                 engine.state.metrics['avg_loss_camera_triplet'],
@@ -367,8 +400,6 @@ def do_train_with_center(
                                 scheduler.get_lr()[0]))
             if (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY) and engine.state.output['cross_camera_positive_count'] == 0:
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
-        if len(train_loader) == ITER:
-            ITER = 0
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)

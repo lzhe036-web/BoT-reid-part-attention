@@ -538,6 +538,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "margin": identity["margin"],
         "mode": identity["mode"],
         "modules": identity["modules"],
+        "required_global_iteration_source": (
+            "ignite_engine_epoch_evidence"
+        ),
         "output_dir": normalized_path(Path(output_dir).resolve()),
         "start_time": utc_now(),
         "command": list(command),
@@ -593,6 +596,7 @@ def parse_training_log(log_path):
     validations = []
     current = None
     iterations_per_epoch_values = set()
+    epoch_evidence = {}
     required_training_fields = {
         "loss_total": False,
         "loss_id": False,
@@ -618,6 +622,29 @@ def parse_training_log(log_path):
         )
         if iteration_match:
             iterations_per_epoch_values.add(int(iteration_match.group(3)))
+        evidence_match = re.search(
+            r"EPOCH_EVIDENCE\s+epoch=(\d+)\s+global_iteration=(\d+)"
+            r"\s+epoch_length=(\d+)",
+            line,
+        )
+        if evidence_match:
+            epoch = int(evidence_match.group(1))
+            global_iteration = int(evidence_match.group(2))
+            epoch_length = int(evidence_match.group(3))
+            if epoch <= 0 or global_iteration <= 0 or epoch_length <= 0:
+                raise EvidenceError(
+                    "EPOCH_EVIDENCE values must be positive integers"
+                )
+            if epoch in epoch_evidence:
+                raise EvidenceError(
+                    "Duplicate EPOCH_EVIDENCE for epoch {}".format(epoch)
+                )
+            epoch_evidence[epoch] = {
+                "epoch": epoch,
+                "global_iteration": global_iteration,
+                "epoch_length": epoch_length,
+            }
+            continue
         epoch_match = re.search(r"Validation Results - Epoch:\s*(\d+)", line)
         if epoch_match:
             if current is not None:
@@ -646,15 +673,52 @@ def parse_training_log(log_path):
         )
     if not validations:
         raise EvidenceError("Training log contains no validation history")
-    if len(iterations_per_epoch_values) != 1:
-        raise EvidenceError(
-            "Training log cannot determine one iterations_per_epoch value"
-        )
-    iterations_per_epoch = next(iter(iterations_per_epoch_values))
-    for validation in validations:
-        validation["iterations_per_epoch"] = iterations_per_epoch
-        validation["global_iteration"] = int(validation["epoch"]) * iterations_per_epoch
-        validation["timestamp_utc"] = NOT_RECORDED
+    if epoch_evidence:
+        evidence_epoch_by_iteration = {}
+        for evidence in epoch_evidence.values():
+            global_iteration = evidence["global_iteration"]
+            if global_iteration in evidence_epoch_by_iteration:
+                raise EvidenceError(
+                    "EPOCH_EVIDENCE global iteration {} maps to multiple "
+                    "epochs: {} and {}".format(
+                        global_iteration,
+                        evidence_epoch_by_iteration[global_iteration],
+                        evidence["epoch"],
+                    )
+                )
+            evidence_epoch_by_iteration[global_iteration] = evidence["epoch"]
+        for validation in validations:
+            epoch = int(validation["epoch"])
+            if epoch not in epoch_evidence:
+                raise EvidenceError(
+                    "Validation epoch {} lacks EPOCH_EVIDENCE".format(epoch)
+                )
+            evidence = epoch_evidence[epoch]
+            validation["epoch_length"] = evidence["epoch_length"]
+            validation["iterations_per_epoch"] = evidence["epoch_length"]
+            validation["global_iteration"] = evidence["global_iteration"]
+            validation["global_iteration_source"] = (
+                "ignite_engine_epoch_evidence"
+            )
+            validation["timestamp_utc"] = NOT_RECORDED
+        global_iteration_source = "ignite_engine_epoch_evidence"
+    else:
+        if len(iterations_per_epoch_values) != 1:
+            raise EvidenceError(
+                "Training log cannot determine one iterations_per_epoch value"
+            )
+        iterations_per_epoch = next(iter(iterations_per_epoch_values))
+        for validation in validations:
+            validation["epoch_length"] = iterations_per_epoch
+            validation["iterations_per_epoch"] = iterations_per_epoch
+            validation["global_iteration"] = (
+                int(validation["epoch"]) * iterations_per_epoch
+            )
+            validation["global_iteration_source"] = (
+                "legacy_log_denominator_inference"
+            )
+            validation["timestamp_utc"] = NOT_RECORDED
+        global_iteration_source = "legacy_log_denominator_inference"
     runtime = NOT_RECORDED
     if timestamps:
         runtime = (max(timestamps) - min(timestamps)).total_seconds()
@@ -668,6 +732,10 @@ def parse_training_log(log_path):
         "has_cross_camera_positive_loss": (
             "loss_cross_camera_positive:" in raw_text
         ),
+        "epoch_evidence": [
+            epoch_evidence[epoch] for epoch in sorted(epoch_evidence)
+        ],
+        "global_iteration_source": global_iteration_source,
         "validations": validations,
     }
 
@@ -706,6 +774,19 @@ def read_validation_history(path):
                 raise EvidenceError(
                     "Validation row {} lacks {}".format(line_number, missing)
                 )
+            source = row.get(
+                "global_iteration_source", "legacy_validation_history"
+            )
+            row["global_iteration_source"] = source
+            if "epoch_length" not in row:
+                row["epoch_length"] = row["iterations_per_epoch"]
+            if source == "ignite_engine_epoch_evidence":
+                if int(row["epoch_length"]) != int(
+                        row["iterations_per_epoch"]):
+                    raise EvidenceError(
+                        "Authoritative validation row {} has inconsistent "
+                        "epoch length".format(line_number)
+                    )
             rows.append(row)
     if not rows:
         raise EvidenceError("Validation history is empty")
@@ -734,6 +815,20 @@ def cross_validate_log_metrics(log_info, validation_rows):
         if epoch not in by_epoch:
             raise EvidenceError("Epoch {} is absent from log validation blocks".format(epoch))
         log_row = by_epoch[epoch]
+        if log_row.get("global_iteration_source") == (
+                "ignite_engine_epoch_evidence"):
+            if row.get("global_iteration_source") != (
+                    "ignite_engine_epoch_evidence"):
+                raise EvidenceError(
+                    "Validation epoch {} does not retain authoritative Ignite "
+                    "iteration evidence".format(epoch)
+                )
+            for key in ("global_iteration", "epoch_length"):
+                if int(row[key]) != int(log_row[key]):
+                    raise EvidenceError(
+                        "Validation/log evidence conflict at epoch {} for {}"
+                        .format(epoch, key)
+                    )
         for key in keys:
             if key not in log_row:
                 raise EvidenceError("Log epoch {} lacks {}".format(epoch, key))
@@ -761,18 +856,41 @@ def _checkpoint_files(output_dir):
 
 def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
                               destination):
-    iteration_per_epoch_values = {
-        int(row["iterations_per_epoch"]) for row in validation_rows
-    }
-    if len(iteration_per_epoch_values) != 1:
-        raise EvidenceError("iterations_per_epoch is inconsistent")
-    iterations_per_epoch = next(iter(iteration_per_epoch_values))
-    if iterations_per_epoch <= 0:
-        raise EvidenceError("iterations_per_epoch must be positive")
-    validation_by_iteration = {
-        int(row["global_iteration"]): int(row["epoch"])
+    sources = {
+        row.get("global_iteration_source", "legacy_validation_history")
         for row in validation_rows
     }
+    authoritative = sources == {"ignite_engine_epoch_evidence"}
+    if "ignite_engine_epoch_evidence" in sources and not authoritative:
+        raise EvidenceError(
+            "Validation history mixes authoritative and legacy iteration evidence"
+        )
+    iterations_per_epoch = None
+    if not authoritative:
+        iteration_per_epoch_values = {
+            int(row["iterations_per_epoch"]) for row in validation_rows
+        }
+        if len(iteration_per_epoch_values) != 1:
+            raise EvidenceError("iterations_per_epoch is inconsistent")
+        iterations_per_epoch = next(iter(iteration_per_epoch_values))
+        if iterations_per_epoch <= 0:
+            raise EvidenceError("iterations_per_epoch must be positive")
+    validation_by_iteration = {}
+    validation_by_epoch = {}
+    for row in validation_rows:
+        epoch = int(row["epoch"])
+        global_iteration = int(row["global_iteration"])
+        if epoch in validation_by_epoch:
+            raise EvidenceError(
+                "Validation history contains duplicate epoch {}".format(epoch)
+            )
+        if global_iteration in validation_by_iteration:
+            raise EvidenceError(
+                "Global iteration {} maps to multiple validation epochs"
+                .format(global_iteration)
+            )
+        validation_by_epoch[epoch] = row
+        validation_by_iteration[global_iteration] = row
     rows = []
     for path in _checkpoint_files(output_dir):
         global_iteration = NOT_RECORDED
@@ -782,9 +900,21 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
         if iteration_match:
             global_iteration = int(iteration_match.group(1))
             if global_iteration in validation_by_iteration:
-                epoch = validation_by_iteration[global_iteration]
+                validation = validation_by_iteration[global_iteration]
+                epoch = int(validation["epoch"])
+                mapping_source = validation.get(
+                    "global_iteration_source", "legacy_validation_history"
+                )
+            elif authoritative:
+                raise EvidenceError(
+                    "Checkpoint global iteration {} does not exactly match "
+                    "one Ignite EPOCH_EVIDENCE record".format(
+                        global_iteration
+                    )
+                )
             elif global_iteration % iterations_per_epoch == 0:
                 epoch = global_iteration // iterations_per_epoch
+                mapping_source = "legacy_log_denominator_inference"
             else:
                 raise EvidenceError(
                     "Checkpoint iteration {} cannot map uniquely to epoch".format(
@@ -792,13 +922,20 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
                     )
                 )
         elif legacy_epoch_match:
+            if authoritative:
+                raise EvidenceError(
+                    "Authoritative Ignite evidence requires checkpoint global "
+                    "iteration filenames"
+                )
             epoch = int(legacy_epoch_match.group(1))
             global_iteration = epoch * iterations_per_epoch
+            mapping_source = "legacy_log_denominator_inference"
         else:
             continue
         rows.append({
             "epoch": epoch,
             "global_iteration": global_iteration,
+            "global_iteration_source": mapping_source,
             "filename": path.name,
             "path": normalized_path(path.resolve()),
             "size_bytes": path.stat().st_size,
@@ -819,7 +956,10 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
         raise EvidenceError("Selected checkpoint global iteration does not match best epoch")
     write_tsv(
         destination,
-        ("epoch", "global_iteration", "filename", "size_bytes", "sha256", "selected"),
+        (
+            "epoch", "global_iteration", "global_iteration_source",
+            "filename", "size_bytes", "sha256", "selected",
+        ),
         rows,
     )
     return rows, selected[0]
@@ -1428,6 +1568,19 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if not dataset_manifest.get("dataset_manifest_sha256"):
             raise EvidenceError("Dataset manifest hash is missing")
         log_info = parse_training_log(output_dir / "log.txt")
+        required_iteration_source = manifest.get(
+            "required_global_iteration_source", NOT_RECORDED
+        )
+        if (required_iteration_source != NOT_RECORDED
+                and log_info["global_iteration_source"] !=
+                required_iteration_source):
+            raise EvidenceError(
+                "Run requires global_iteration_source={} but training log "
+                "provides {}".format(
+                    required_iteration_source,
+                    log_info["global_iteration_source"],
+                )
+            )
         source_config_text = source_copy.read_text(
             encoding="utf-8", errors="replace"
         ).replace("\r\n", "\n").strip()
@@ -1532,6 +1685,9 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "best_epoch": int(best["epoch"]),
             "selected_epoch": int(best["epoch"]),
             "selected_global_iteration": int(best["global_iteration"]),
+            "selected_global_iteration_source": best.get(
+                "global_iteration_source", "legacy_validation_history"
+            ),
             "rank1_percent": float(best["rank1_percent"]),
             "rank5_percent": float(best["rank5_percent"]),
             "rank10_percent": float(best["rank10_percent"]),
