@@ -28,7 +28,19 @@ from utils.experiment_recording import (
 from utils.reproducibility import seed_analysis_process, validate_seed
 
 
-def _profile_macs(model, sample):
+def _forward_model(model, sample, camids=None):
+    if camids is None:
+        return model(sample)
+    return model(sample, camids=camids)
+
+
+def _profile_camids(model, batch_size, device):
+    if not getattr(model, "camera_conditional_part_attention", False):
+        return None
+    return torch.zeros(int(batch_size), dtype=torch.long, device=device)
+
+
+def _profile_macs(model, sample, camids=None):
     totals = {"macs": 0}
     handles = []
 
@@ -50,7 +62,7 @@ def _profile_macs(model, sample):
             handles.append(module.register_forward_hook(linear_hook))
     try:
         with torch.no_grad():
-            model(sample)
+            _forward_model(model, sample, camids=camids)
     finally:
         for handle in handles:
             handle.remove()
@@ -67,6 +79,7 @@ def profile(config_file, checkpoint, output, seed, repeats=20):
     model = build_checkpoint_model(local_cfg, checkpoint, device)
     height, width = (int(value) for value in local_cfg.INPUT.SIZE_TRAIN)
     sample = torch.zeros(1, 3, height, width, device=device)
+    sample_camids = _profile_camids(model, sample.size(0), device)
     total_params = sum(parameter.numel() for parameter in model.parameters())
     trainable_params = sum(
         parameter.numel() for parameter in model.parameters()
@@ -74,7 +87,7 @@ def profile(config_file, checkpoint, output, seed, repeats=20):
     )
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    macs = _profile_macs(model, sample)
+    macs = _profile_macs(model, sample, camids=sample_camids)
     flops = 2 * macs
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -83,14 +96,14 @@ def profile(config_file, checkpoint, output, seed, repeats=20):
         peak_forward = NOT_RECORDED
     for _ in range(5):
         with torch.no_grad():
-            model(sample)
+            _forward_model(model, sample, camids=sample_camids)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     timings = []
     for _ in range(int(repeats)):
         started = time.perf_counter()
         with torch.no_grad():
-            model(sample)
+            _forward_model(model, sample, camids=sample_camids)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         timings.append((time.perf_counter() - started) * 1000.0)
@@ -103,6 +116,8 @@ def profile(config_file, checkpoint, output, seed, repeats=20):
         "device": str(device),
         "GPU": torch.cuda.get_device_name(device) if device.type == "cuda" else NOT_RECORDED,
         "input_shape": [1, 3, height, width],
+        "inference_uses_camid": sample_camids is not None,
+        "profile_camid": 0 if sample_camids is not None else NOT_RECORDED,
         "total_params": int(total_params),
         "trainable_params": int(trainable_params),
         "MACs": int(macs),

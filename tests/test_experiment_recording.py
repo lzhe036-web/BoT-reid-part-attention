@@ -53,6 +53,7 @@ def _base_config(output_dir, variant="cross", seed=42):
         "NECK": "bnneck",
         "PART_ATTENTION": True,
         "PART_ATTENTION_PARTS": 6,
+        "CAMERA_CONDITIONAL_PART_ATTENTION": False,
         "CAMERA_AWARE_TRIPLET": False,
         "CROSS_CAMERA_POSITIVE_ONLY": False,
         "CROSS_CAMERA_POSITIVE_LAMBDA": 0.3,
@@ -71,6 +72,8 @@ def _base_config(output_dir, variant="cross", seed=42):
         model["HIERARCHICAL_CAMERA_AWARE_LOSS"] = True
         model["NORMALIZED_WEIGHTED_LOSS"] = True
         model["MULTI_GRANULARITY_PART"] = True
+    elif variant == "condpa":
+        model["CAMERA_CONDITIONAL_PART_ATTENTION"] = True
     config = {
         "SEED": seed,
         "MODEL": model,
@@ -161,10 +164,30 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
     })
     atomic_write_text(run_dir / "environment_packages.txt", "torch==synthetic\n")
     atomic_write_json(run_dir / "dataset_manifest.json", {
-        "dataset": "market1501", "dataset_manifest_sha256": "b" * 64,
+        "dataset": "market1501",
+        "dataset_manifest_sha256": "b" * 64,
+        "num_train_cameras": 6,
+        "splits": {"train": {"camera_count": 6}},
     })
+    modules = config_modules(config)
     atomic_write_json(run_dir / "model_manifest.json", {
-        "backbone": "resnet50", "modules": config_modules(config),
+        "backbone": "resnet50",
+        "modules": modules,
+        "camera_count": 6,
+        "part_count": 6,
+        "camera_embedding_params": (
+            36 if modules["camera_conditional_part_attention"] else 0
+        ),
+        "camera_embedding_shape": (
+            [6, 6] if modules["camera_conditional_part_attention"] else []
+        ),
+        "camera_embedding_initialization": (
+            "zeros" if modules["camera_conditional_part_attention"]
+            else NOT_RECORDED
+        ),
+        "inference_uses_camid": modules[
+            "camera_conditional_part_attention"
+        ],
     })
     evidence_seed = seed if applied_seed is None else applied_seed
     atomic_write_json(output / "reproducibility.json", {
@@ -274,6 +297,35 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(rows[0]["hierarchical"], "True")
             self.assertEqual(rows[0]["weighted"], "True")
             self.assertEqual(rows[0]["multi_granularity"], "True")
+
+    def test_condpa_fields_are_recorded_in_all_relevant_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = make_fixture(
+                directory,
+                variant="condpa",
+                family="c2l03_camera_conditional_part_attention",
+                experiment_id="C2-L03-CONDPA-S42",
+            )
+            records, run_dir, _output, experiments = fixture
+            finalize_fixture(records, run_dir, experiments)
+            main = _read_csv(records / "tables" / "main_results.csv")[0]
+            condpa = _read_csv(
+                records / "tables" /
+                "camera_conditional_part_attention.csv"
+            )[0]
+            runs = _read_csv(records / "runs.csv")[0]
+            for row in (main, condpa, runs):
+                self.assertEqual(
+                    row["camera_conditional_part_attention"], "True"
+                )
+                self.assertEqual(row["camera_count"], "6")
+                self.assertEqual(row["part_count"], "6")
+                self.assertEqual(row["camera_embedding_params"], "36")
+                self.assertEqual(row["inference_uses_camid"], "True")
+            self.assertEqual(
+                main["method"],
+                "C2-L03 + Camera-Conditional Part Attention",
+            )
 
     def test_distance_analysis_writes_distance_table(self):
         with tempfile.TemporaryDirectory() as directory:

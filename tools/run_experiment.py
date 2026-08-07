@@ -121,7 +121,7 @@ def _require_new_output_dir(path):
     return output
 
 
-def _model_manifest(configuration, method=None,
+def _model_manifest(configuration, num_cameras, method=None,
                     baseline_method=NOT_RECORDED,
                     baseline_commit=NOT_RECORDED):
     identity = experiment_identity(configuration)
@@ -129,6 +129,11 @@ def _model_manifest(configuration, method=None,
     scales = model.get("MULTI_GRANULARITY_SCALES", [])
     projection_dim = model.get("MULTI_GRANULARITY_DIM", NOT_RECORDED)
     multi_granularity_enabled = identity["modules"]["multi_granularity"]
+    condpa_enabled = identity["modules"][
+        "camera_conditional_part_attention"
+    ]
+    num_parts = int(model.get("PART_ATTENTION_PARTS", 0))
+    camera_count = int(num_cameras)
     descriptor_dim = NOT_RECORDED
     if (multi_granularity_enabled
             and model.get("NAME") == "resnet50"
@@ -143,12 +148,28 @@ def _model_manifest(configuration, method=None,
         "baseline_commit": baseline_commit,
         "modules": identity["modules"],
         "baseline_experiment": (
-            "C2-L03" if multi_granularity_enabled else NOT_RECORDED
+            "C2-L03"
+            if (multi_granularity_enabled or condpa_enabled)
+            else NOT_RECORDED
         ),
         "baseline_existing_attention": bool(model.get("PART_ATTENTION", False)),
         "new_module_attention": (
-            False if multi_granularity_enabled else NOT_RECORDED
+            True if condpa_enabled
+            else (False if multi_granularity_enabled else NOT_RECORDED)
         ),
+        "camera_conditional_part_attention": condpa_enabled,
+        "camera_count": camera_count,
+        "part_count": num_parts,
+        "camera_embedding_params": (
+            camera_count * num_parts if condpa_enabled else 0
+        ),
+        "camera_embedding_shape": (
+            [camera_count, num_parts] if condpa_enabled else []
+        ),
+        "camera_embedding_initialization": (
+            "zeros" if condpa_enabled else NOT_RECORDED
+        ),
+        "inference_uses_camid": condpa_enabled,
         "multi_granularity_scales": scales,
         "multi_granularity_projection_dim": projection_dim,
         "multi_granularity_aggregation": model.get(
@@ -213,6 +234,7 @@ def run(args):
             run_dir / "model_manifest.json",
             _model_manifest(
                 configuration,
+                num_cameras=dataset.num_train_cams,
                 method=args.method,
                 baseline_method=args.baseline_method,
                 baseline_commit=args.baseline_commit,

@@ -7,7 +7,7 @@
 from .baseline import Baseline
 
 
-def build_model(cfg, num_classes):
+def build_model(cfg, num_classes, num_cameras=None):
     # if cfg.MODEL.NAME == 'resnet50':
     #     model = Baseline(num_classes, cfg.MODEL.LAST_STRIDE, cfg.MODEL.PRETRAIN_PATH, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT)
     model = Baseline(
@@ -20,6 +20,10 @@ def build_model(cfg, num_classes):
         cfg.MODEL.PRETRAIN_CHOICE,
         part_attention=cfg.MODEL.PART_ATTENTION,
         part_attention_parts=cfg.MODEL.PART_ATTENTION_PARTS,
+        camera_conditional_part_attention=(
+            cfg.MODEL.CAMERA_CONDITIONAL_PART_ATTENTION
+        ),
+        num_cameras=num_cameras,
         multi_granularity_local=cfg.MODEL.MULTI_GRANULARITY_LOCAL,
         multi_granularity_scales=cfg.MODEL.MULTI_GRANULARITY_SCALES,
         multi_granularity_dim=cfg.MODEL.MULTI_GRANULARITY_DIM,

@@ -39,14 +39,60 @@ def weights_init_classifier(m):
 
 
 class PartAttentionHead(nn.Module):
-    def __init__(self, in_planes, num_parts=6):
+    def __init__(self, in_planes, num_parts=6,
+                 camera_conditional=False, num_cameras=None):
         super(PartAttentionHead, self).__init__()
-        self.num_parts = num_parts
+        self.num_parts = int(num_parts)
+        self.camera_conditional = bool(camera_conditional)
+        self.num_cameras = int(num_cameras) if num_cameras is not None else None
+        if self.num_parts <= 0:
+            raise ValueError("num_parts must be positive")
+        if self.camera_conditional:
+            if self.num_cameras is None or self.num_cameras <= 0:
+                raise ValueError(
+                    "num_cameras must be positive when camera-conditional "
+                    "part attention is enabled"
+                )
+            self.camera_embedding = nn.Embedding(
+                self.num_cameras, self.num_parts
+            )
+            nn.init.zeros_(self.camera_embedding.weight)
         self.attention = nn.Linear(in_planes, 1)
         nn.init.normal_(self.attention.weight, std=0.001)
         nn.init.constant_(self.attention.bias, 0.0)
 
-    def forward(self, x):
+    def _validate_camids(self, camids, batch_size, device):
+        if camids is None:
+            raise ValueError(
+                "camids are required when camera-conditional part attention "
+                "is enabled"
+            )
+        if not torch.is_tensor(camids):
+            raise TypeError("camids must be a torch.Tensor")
+        if camids.dtype != torch.long:
+            raise TypeError("camids must have dtype torch.long")
+        if camids.dim() != 1:
+            raise ValueError("camids must have shape [batch]")
+        if int(camids.numel()) != int(batch_size):
+            raise ValueError(
+                "camids batch size {} does not match image batch size {}"
+                .format(camids.numel(), batch_size)
+            )
+        if camids.device != device:
+            raise ValueError(
+                "camids must be on the same device as the model input"
+            )
+        if camids.numel() > 0:
+            minimum = int(camids.min().item())
+            maximum = int(camids.max().item())
+            if minimum < 0 or maximum >= self.num_cameras:
+                raise ValueError(
+                    "camids must be in [0, {}), got min={} max={}"
+                    .format(self.num_cameras, minimum, maximum)
+                )
+        return camids
+
+    def forward(self, x, camids=None, return_attention=False):
         part_feats = []
         height = x.size(2)
         for part_idx in range(self.num_parts):
@@ -58,8 +104,17 @@ class PartAttentionHead(nn.Module):
 
         part_feats = torch.stack(part_feats, dim=1)
         attention_scores = self.attention(part_feats).squeeze(-1)
-        attention_weights = F.softmax(attention_scores, dim=1).unsqueeze(-1)
-        part_feat = torch.sum(part_feats * attention_weights, dim=1)
+        if self.camera_conditional:
+            camids = self._validate_camids(
+                camids, part_feats.size(0), part_feats.device
+            )
+            attention_scores = attention_scores + self.camera_embedding(camids)
+        attention_weights = F.softmax(attention_scores, dim=1)
+        part_feat = torch.sum(
+            part_feats * attention_weights.unsqueeze(-1), dim=1
+        )
+        if return_attention:
+            return part_feat, attention_weights
         return part_feat
 
 
@@ -68,7 +123,9 @@ class Baseline(nn.Module):
 
     def __init__(self, num_classes, last_stride, model_path, neck, neck_feat,
                  model_name, pretrain_choice, part_attention=None,
-                 part_attention_parts=None, multi_granularity_local=None,
+                 part_attention_parts=None,
+                 camera_conditional_part_attention=None, num_cameras=None,
+                 multi_granularity_local=None,
                  multi_granularity_scales=None, multi_granularity_dim=None,
                  multi_granularity_aggregation=None):
         super(Baseline, self).__init__()
@@ -174,9 +231,26 @@ class Baseline(nn.Module):
         if part_attention_parts is None:
             part_attention_parts = cfg.MODEL.PART_ATTENTION_PARTS
         self.part_attention = part_attention
+        if camera_conditional_part_attention is None:
+            camera_conditional_part_attention = (
+                cfg.MODEL.CAMERA_CONDITIONAL_PART_ATTENTION
+            )
+        self.camera_conditional_part_attention = bool(
+            camera_conditional_part_attention
+        )
+        self.num_cameras = int(num_cameras) if num_cameras is not None else None
+        if self.camera_conditional_part_attention and not self.part_attention:
+            raise ValueError(
+                "camera-conditional part attention requires PART_ATTENTION=True"
+            )
 
         if self.part_attention:
-            self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
+            self.part_attention_head = PartAttentionHead(
+                self.in_planes,
+                part_attention_parts,
+                camera_conditional=self.camera_conditional_part_attention,
+                num_cameras=self.num_cameras,
+            )
 
         if multi_granularity_local is None:
             multi_granularity_local = cfg.MODEL.MULTI_GRANULARITY_LOCAL
@@ -211,7 +285,7 @@ class Baseline(nn.Module):
             self.bottleneck.apply(weights_init_kaiming)
             self.classifier.apply(weights_init_classifier)
 
-    def _forward_impl(self, x, return_shape_trace=False):
+    def _forward_impl(self, x, camids=None, return_shape_trace=False):
         feature_map = self.base(x)
         global_feat = self.gap(feature_map)  # (b, 2048, 1, 1)
         global_feat = global_feat.view(global_feat.shape[0], -1)  # flatten to (bs, 2048)
@@ -221,10 +295,17 @@ class Baseline(nn.Module):
                 'backbone_feature_map': tuple(feature_map.shape),
                 'global_feature': tuple(global_feat.shape),
                 'baseline_existing_attention': bool(self.part_attention),
+                'camera_conditional_part_attention': bool(
+                    self.camera_conditional_part_attention
+                ),
+                'camera_count': (
+                    self.num_cameras
+                    if self.camera_conditional_part_attention else 0
+                ),
                 'new_module_attention': False,
             }
         if self.part_attention:
-            part_feat = self.part_attention_head(feature_map)
+            part_feat = self.part_attention_head(feature_map, camids=camids)
             global_feat = global_feat + part_feat
         if return_shape_trace:
             shape_trace['global_feature_after_part_attention'] = tuple(
@@ -275,12 +356,14 @@ class Baseline(nn.Module):
             return result, shape_trace
         return result
 
-    def forward(self, x):
-        return self._forward_impl(x, return_shape_trace=False)
+    def forward(self, x, camids=None):
+        return self._forward_impl(
+            x, camids=camids, return_shape_trace=False
+        )
 
-    def forward_with_shape_trace(self, x):
+    def forward_with_shape_trace(self, x, camids=None):
         """Synthetic-validation helper; the formal training path never calls it."""
-        return self._forward_impl(x, return_shape_trace=True)
+        return self._forward_impl(x, camids=camids, return_shape_trace=True)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

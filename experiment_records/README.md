@@ -8,6 +8,9 @@ This directory is maintained by `tools/run_experiment.py` and
 - `evidence_manifest.tsv` indexes artifact hashes.
 - `tables/*.csv` files are the machine-readable sources of truth.
 - `tables/*.md` files are generated from the corresponding CSV files.
+- `tables/camera_conditional_part_attention.*` records CondPA/control flags,
+  camera/part counts, camera-embedding parameters, inference camid usage,
+  efficiency, and retrieval metrics.
 
 Failed or incomplete runs remain under `runs/`, but they are not written to
 successful result tables. Historical rows outside the generated section of

@@ -26,6 +26,7 @@ def make_data_loader(cfg):
         dataset = init_dataset(cfg.DATASETS.NAMES, root=cfg.DATASETS.ROOT_DIR)
 
     num_classes = dataset.num_train_pids
+    num_cameras = dataset.num_train_cams
     train_set = ImageDataset(dataset.train, train_transforms)
     if cfg.DATALOADER.SAMPLER == 'softmax':
         train_loader = DataLoader(
@@ -48,4 +49,4 @@ def make_data_loader(cfg):
         collate_fn=val_collate_fn, worker_init_fn=seed_worker,
         generator=validation_generator
     )
-    return train_loader, val_loader, len(dataset.query), num_classes
+    return train_loader, val_loader, len(dataset.query), num_classes, num_cameras

@@ -75,7 +75,7 @@ def create_supervised_trainer(model, optimizer, loss_fn,
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
         camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
-        score, feat = model(img)
+        score, feat = model(img, camids=camids)
         loss_output = loss_fn(score, feat, target, camids)
         loss, loss_dict = _loss_output_to_dict(loss_output)
         loss.backward()
@@ -123,7 +123,7 @@ def create_supervised_trainer_with_center(model, center_criterion, optimizer, op
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
         camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
-        score, feat = model(img)
+        score, feat = model(img, camids=camids)
         loss_output = loss_fn(score, feat, target, camids)
         loss, loss_dict = _loss_output_to_dict(loss_output)
         # print("Total loss is {}, center loss is {}".format(loss, center_criterion(feat, target)))
@@ -171,7 +171,10 @@ def create_supervised_evaluator(model, metrics,
         with torch.no_grad():
             data, pids, camids = batch
             data = data.to(device) if torch.cuda.device_count() >= 1 else data
-            feat = model(data)
+            model_camids = torch.as_tensor(
+                camids, dtype=torch.long, device=data.device
+            )
+            feat = model(data, camids=model_camids)
             return feat, pids, camids
 
     engine = Engine(_inference)

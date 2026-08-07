@@ -42,7 +42,9 @@ class EvidenceError(RuntimeError):
 
 MAIN_FIELDS = (
     "run_id", "experiment_id", "experiment_family", "method", "dataset",
-    "branch", "commit", "seed", "lambda", "margin", "mode", "best_epoch",
+    "camera_conditional_part_attention", "camera_count", "part_count",
+    "camera_embedding_params", "inference_uses_camid", "branch", "commit",
+    "seed", "lambda", "margin", "mode", "best_epoch",
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
     "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
     "log_sha256", "output_dir", "status", "notes",
@@ -57,9 +59,16 @@ SAME_CAMERA_FIELDS = (
 )
 CAAT_FIELDS = (
     "run_id", "experiment_id", "baseline", "camera_aware_triplet",
-    "cross_camera_positive", "same_camera_positive", "hierarchical",
-    "weighted", "multi_granularity", "lambda", "rank1", "map", "Params",
-    "FLOPs", "runtime", "seed", "commit",
+    "cross_camera_positive", "same_camera_positive",
+    "camera_conditional_part_attention", "hierarchical", "weighted",
+    "multi_granularity", "lambda", "rank1", "map", "Params", "FLOPs",
+    "runtime", "seed", "commit",
+)
+CONDPA_FIELDS = (
+    "run_id", "experiment_id", "method", "dataset",
+    "camera_conditional_part_attention", "camera_count", "part_count",
+    "camera_embedding_params", "inference_uses_camid", "seed", "rank1",
+    "map", "total_params", "FLOPs", "runtime", "checkpoint", "commit",
 )
 DISTANCE_FIELDS = (
     "run_id", "experiment_id", "dataset", "checkpoint",
@@ -76,7 +85,9 @@ ANCHOR_FIELDS = (
 )
 RUN_FIELDS = (
     "run_id", "experiment_id", "experiment_family", "method", "dataset",
-    "branch", "commit_id", "config_file", "seed", "lambda", "margin",
+    "camera_conditional_part_attention", "camera_count", "part_count",
+    "camera_embedding_params", "inference_uses_camid", "branch", "commit_id",
+    "config_file", "seed", "lambda", "margin",
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
     "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
@@ -91,6 +102,7 @@ TABLE_SCHEMAS = {
     "lambda_sensitivity": LAMBDA_FIELDS,
     "same_camera_positive_ablation": SAME_CAMERA_FIELDS,
     "caat_ablation": CAAT_FIELDS,
+    "camera_conditional_part_attention": CONDPA_FIELDS,
     "distance_distribution": DISTANCE_FIELDS,
     "anchor_coverage": ANCHOR_FIELDS,
 }
@@ -192,6 +204,9 @@ def config_modules(configuration):
         "camera_aware_triplet": enabled(("MODEL.CAMERA_AWARE_TRIPLET",)),
         "cross_camera_positive": enabled(("MODEL.CROSS_CAMERA_POSITIVE_ONLY",)),
         "same_camera_positive": enabled(("MODEL.SAME_CAMERA_POSITIVE_ONLY",)),
+        "camera_conditional_part_attention": enabled((
+            "MODEL.CAMERA_CONDITIONAL_PART_ATTENTION",
+        )),
         "hierarchical": enabled((
             "MODEL.HIERARCHICAL_CAMERA_AWARE_LOSS",
             "MODEL.HIERARCHICAL_CAMERA_AWARE",
@@ -247,6 +262,9 @@ def experiment_identity(configuration):
             "C2-L03 + Multi-Granularity Local Feature "
             "(Global + K2 + K4 + K6, mean aggregation)"
         )
+    if modules["camera_conditional_part_attention"]:
+        method = "C2-L03 + Camera-Conditional Part Attention"
+        variant = "camera_conditional_part_attention"
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
@@ -465,6 +483,7 @@ def build_dataset_manifest(dataset, configuration, data_root):
         "batch_size": nested_value(configuration, "SOLVER.IMS_PER_BATCH"),
         "num_instance": nested_value(configuration, "DATALOADER.NUM_INSTANCE"),
         "num_workers": nested_value(configuration, "DATALOADER.NUM_WORKERS"),
+        "num_train_cameras": split_payload["train"]["camera_count"],
     }
 
 
@@ -837,6 +856,19 @@ def _read_csv(path):
 
 def upsert_csv(path, fields, row, key_fields=("run_id",)):
     rows = _read_csv(path)
+    legacy_false_fields = {
+        "camera_conditional_part_attention", "inference_uses_camid",
+    }
+    rows = [
+        {
+            field: existing.get(
+                field,
+                "False" if field in legacy_false_fields else NOT_RECORDED,
+            )
+            for field in fields
+        }
+        for existing in rows
+    ]
     normalized = {field: _table_value(row.get(field, NOT_RECORDED)) for field in fields}
     key = tuple(normalized[field] for field in key_fields)
     replaced = False
@@ -1083,6 +1115,8 @@ def update_experiments_markdown(experiments_path, main_rows):
     historical = target.read_text(encoding="utf-8") if target.is_file() else "# Experiments\n"
     fields = (
         "experiment_id", "run_id", "date", "commit", "branch", "method",
+        "camera_conditional_part_attention", "camera_count", "part_count",
+        "camera_embedding_params", "inference_uses_camid",
         "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
         "seed", "lambda", "runtime_seconds", "best_epoch", "Rank-1",
         "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
@@ -1111,6 +1145,13 @@ def update_experiments_markdown(experiments_path, main_rows):
             "commit": row["commit"],
             "branch": row["branch"],
             "method": row["method"],
+            "camera_conditional_part_attention": row[
+                "camera_conditional_part_attention"
+            ],
+            "camera_count": row["camera_count"],
+            "part_count": row["part_count"],
+            "camera_embedding_params": row["camera_embedding_params"],
+            "inference_uses_camid": row["inference_uses_camid"],
             "dataset": row["dataset"],
             "config": row["config"],
             "output_dir": row["output_dir"],
@@ -1148,13 +1189,26 @@ def update_experiments_markdown(experiments_path, main_rows):
 
 
 def _prepare_table_rows(manifest, metrics, environment, efficiency,
-                        distance, anchor):
+                        distance, anchor, model_manifest):
+    modules = manifest.get("modules", {})
+    condpa_enabled = bool(
+        modules.get("camera_conditional_part_attention", False)
+    )
     common = {
         "run_id": manifest["run_id"],
         "experiment_id": manifest["experiment_id"],
         "experiment_family": manifest["experiment_family"],
         "method": manifest["method"],
         "dataset": manifest["dataset"],
+        "camera_conditional_part_attention": condpa_enabled,
+        "camera_count": model_manifest.get("camera_count", NOT_RECORDED),
+        "part_count": model_manifest.get("part_count", NOT_RECORDED),
+        "camera_embedding_params": model_manifest.get(
+            "camera_embedding_params", 0 if not condpa_enabled else NOT_RECORDED
+        ),
+        "inference_uses_camid": model_manifest.get(
+            "inference_uses_camid", False
+        ),
         "branch": manifest["branch"],
         "commit": manifest["commit_id"],
         "seed": manifest["seed"],
@@ -1196,13 +1250,13 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "seed": common["seed"], "checkpoint": common["checkpoint"],
         "commit": common["commit"],
     }
-    modules = manifest["modules"]
     caat_row = {
         "run_id": common["run_id"], "experiment_id": common["experiment_id"],
         "baseline": modules["baseline"],
         "camera_aware_triplet": modules["camera_aware_triplet"],
         "cross_camera_positive": modules["cross_camera_positive"],
         "same_camera_positive": modules["same_camera_positive"],
+        "camera_conditional_part_attention": condpa_enabled,
         "hierarchical": modules["hierarchical"], "weighted": modules["weighted"],
         "multi_granularity": modules["multi_granularity"],
         "lambda": common["lambda"], "rank1": common["rank1"],
@@ -1210,6 +1264,25 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "Params": efficiency.get("total_params", NOT_RECORDED),
         "FLOPs": efficiency.get("FLOPs", NOT_RECORDED),
         "runtime": common["runtime_seconds"], "seed": common["seed"],
+        "commit": common["commit"],
+    }
+    condpa_row = {
+        "run_id": common["run_id"],
+        "experiment_id": common["experiment_id"],
+        "method": common["method"],
+        "dataset": common["dataset"],
+        "camera_conditional_part_attention": condpa_enabled,
+        "camera_count": common["camera_count"],
+        "part_count": common["part_count"],
+        "camera_embedding_params": common["camera_embedding_params"],
+        "inference_uses_camid": common["inference_uses_camid"],
+        "seed": common["seed"],
+        "rank1": common["rank1"],
+        "map": common["map"],
+        "total_params": efficiency.get("total_params", NOT_RECORDED),
+        "FLOPs": efficiency.get("FLOPs", NOT_RECORDED),
+        "runtime": common["runtime_seconds"],
+        "checkpoint": common["checkpoint"],
         "commit": common["commit"],
     }
     distance_row = {
@@ -1235,7 +1308,10 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "same_camera_positive_count": anchor["same_camera_positive_count"],
         "commit": common["commit"],
     }
-    return common, lambda_row, same_row, caat_row, distance_row, anchor_row
+    return (
+        common, lambda_row, same_row, caat_row, condpa_row, distance_row,
+        anchor_row,
+    )
 
 
 def finalize_run(run_dir, records_root, repo_root, experiments_path,
@@ -1392,6 +1468,54 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if not efficiency_path.is_file():
             atomic_write_json(efficiency_path, efficiency)
         model_manifest = read_json(run_dir / "model_manifest.json")
+        if manifest.get("modules", {}).get(
+                "camera_conditional_part_attention", False):
+            required_condpa_evidence = (
+                "camera_count", "part_count", "camera_embedding_params",
+                "camera_embedding_shape", "camera_embedding_initialization",
+                "inference_uses_camid",
+            )
+            missing_condpa_evidence = [
+                key for key in required_condpa_evidence
+                if key not in model_manifest
+            ]
+            if missing_condpa_evidence:
+                raise EvidenceError(
+                    "CondPA model evidence lacks {}".format(
+                        missing_condpa_evidence
+                    )
+                )
+            camera_count = int(model_manifest["camera_count"])
+            part_count = int(model_manifest["part_count"])
+            if camera_count <= 0 or part_count <= 0:
+                raise EvidenceError("CondPA camera/part counts must be positive")
+            if model_manifest["camera_embedding_shape"] != [
+                    camera_count, part_count]:
+                raise EvidenceError("CondPA camera embedding shape is inconsistent")
+            if int(model_manifest["camera_embedding_params"]) != (
+                    camera_count * part_count):
+                raise EvidenceError(
+                    "CondPA camera embedding parameter count is inconsistent"
+                )
+            if model_manifest["camera_embedding_initialization"] != "zeros":
+                raise EvidenceError("CondPA camera embedding must start at zeros")
+            if model_manifest["inference_uses_camid"] is not True:
+                raise EvidenceError("CondPA inference camid evidence is missing")
+            if int(nested_value(
+                    resolved_cfg, "MODEL.PART_ATTENTION_PARTS")) != part_count:
+                raise EvidenceError("CondPA part count differs from config")
+            dataset_camera_count = dataset_manifest.get(
+                "num_train_cameras",
+                dataset_manifest.get("splits", {}).get("train", {}).get(
+                    "camera_count", NOT_RECORDED
+                ),
+            )
+            if dataset_camera_count == NOT_RECORDED:
+                raise EvidenceError("CondPA dataset camera count is missing")
+            if int(dataset_camera_count) != camera_count:
+                raise EvidenceError(
+                    "CondPA model and dataset camera counts differ"
+                )
         model_manifest.update({
             "total_params": efficiency.get("total_params", NOT_RECORDED),
             "trainable_params": efficiency.get("trainable_params", NOT_RECORDED),
@@ -1432,9 +1556,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         }
         atomic_write_json(run_dir / "analysis_summary.json", analysis_summary)
         rows = _prepare_table_rows(
-            manifest, metrics, environment, efficiency, distance, anchor
+            manifest, metrics, environment, efficiency, distance, anchor,
+            model_manifest,
         )
-        common, lambda_row, same_row, caat_row, distance_row, anchor_row = rows
+        (common, lambda_row, same_row, caat_row, condpa_row, distance_row,
+         anchor_row) = rows
         final_status = dict(status)
         final_status.update({
             "status": "success",
@@ -1462,6 +1588,14 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 same_row,
             )
         upsert_csv(tables_dir / "caat_ablation.csv", CAAT_FIELDS, caat_row)
+        if (common["camera_conditional_part_attention"]
+                or "camera_conditional_part_attention" in
+                str(manifest["experiment_family"]).lower()):
+            upsert_csv(
+                tables_dir / "camera_conditional_part_attention.csv",
+                CONDPA_FIELDS,
+                condpa_row,
+            )
         upsert_csv(
             tables_dir / "distance_distribution.csv", DISTANCE_FIELDS, distance_row
         )
@@ -1475,6 +1609,13 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "run_id": manifest["run_id"], "experiment_id": manifest["experiment_id"],
             "experiment_family": manifest["experiment_family"],
             "method": manifest["method"], "dataset": manifest["dataset"],
+            "camera_conditional_part_attention": common[
+                "camera_conditional_part_attention"
+            ],
+            "camera_count": common["camera_count"],
+            "part_count": common["part_count"],
+            "camera_embedding_params": common["camera_embedding_params"],
+            "inference_uses_camid": common["inference_uses_camid"],
             "branch": manifest["branch"], "commit_id": manifest["commit_id"],
             "config_file": manifest["config_file"], "seed": manifest["seed"],
             "lambda": manifest["lambda"], "margin": manifest["margin"],

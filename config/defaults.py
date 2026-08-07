@@ -50,6 +50,9 @@ _C.MODEL.IF_LABELSMOOTH = 'on'
 _C.MODEL.PART_ATTENTION = False
 # Number of horizontal parts for part-aware attention
 _C.MODEL.PART_ATTENTION_PARTS = 6
+# Add a camera-specific bias to the existing part-attention logits. Disabled by
+# default so historical configs and checkpoints keep their original behavior.
+_C.MODEL.CAMERA_CONDITIONAL_PART_ATTENTION = False
 # Add attention-free multi-granularity local descriptors from the shared
 # backbone feature map. Disabled by default to preserve existing experiments.
 _C.MODEL.MULTI_GRANULARITY_LOCAL = False

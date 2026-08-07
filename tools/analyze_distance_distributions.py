@@ -100,11 +100,31 @@ def _checkpoint_state(path):
     return result
 
 
-def build_checkpoint_model(local_cfg, checkpoint, device):
+def build_checkpoint_model(local_cfg, checkpoint, device, num_cameras=None):
     state = _checkpoint_state(checkpoint)
     classifier = state.get("classifier.weight")
     if classifier is None:
         raise ValueError("classifier.weight is absent; num_classes is unknown")
+    camera_conditional = bool(
+        local_cfg.MODEL.CAMERA_CONDITIONAL_PART_ATTENTION
+    )
+    if camera_conditional:
+        embedding = state.get("part_attention_head.camera_embedding.weight")
+        if embedding is None or embedding.dim() != 2:
+            raise ValueError(
+                "CondPA checkpoint lacks camera_embedding.weight"
+            )
+        checkpoint_cameras, checkpoint_parts = embedding.shape
+        if int(checkpoint_parts) != int(local_cfg.MODEL.PART_ATTENTION_PARTS):
+            raise ValueError(
+                "CondPA checkpoint part count differs from resolved config"
+            )
+        if num_cameras is None:
+            num_cameras = int(checkpoint_cameras)
+        elif int(num_cameras) != int(checkpoint_cameras):
+            raise ValueError(
+                "Dataset camera count differs from CondPA checkpoint"
+            )
     model = Baseline(
         int(classifier.shape[0]),
         local_cfg.MODEL.LAST_STRIDE,
@@ -115,6 +135,8 @@ def build_checkpoint_model(local_cfg, checkpoint, device):
         "none",
         part_attention=bool(local_cfg.MODEL.PART_ATTENTION),
         part_attention_parts=int(local_cfg.MODEL.PART_ATTENTION_PARTS),
+        camera_conditional_part_attention=camera_conditional,
+        num_cameras=num_cameras,
         multi_granularity_local=bool(
             local_cfg.MODEL.MULTI_GRANULARITY_LOCAL
         ),
@@ -129,6 +151,15 @@ def build_checkpoint_model(local_cfg, checkpoint, device):
         raise ValueError("Strict checkpoint load failed: {}".format(incompatibility))
     model.to(device).eval()
     return model
+
+
+def forward_model_with_camids(model, images, camids, device):
+    """Move images/camids together and preserve raw camids for metrics."""
+    images = images.to(device)
+    model_camids = torch.as_tensor(
+        camids, dtype=torch.long, device=images.device
+    )
+    return model(images, camids=model_camids)
 
 
 def _sample_metadata(samples, maximum, seed):
@@ -161,13 +192,20 @@ def analyze_checkpoint(config_file, checkpoint, output, seed, max_samples=4096):
         generator=make_data_loader_generator(seed, "validation"),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_checkpoint_model(local_cfg, checkpoint, device)
+    model = build_checkpoint_model(
+        local_cfg,
+        checkpoint,
+        device,
+        num_cameras=dataset.num_train_cams,
+    )
     feature_rows = []
     pid_rows = []
     camid_rows = []
     with torch.no_grad():
         for images, pids, camids in loader:
-            features = model(images.to(device))
+            features = forward_model_with_camids(
+                model, images, camids, device
+            )
             if str(local_cfg.TEST.FEAT_NORM).lower() == "yes":
                 features = torch.nn.functional.normalize(features, p=2, dim=1)
             feature_rows.append(features.cpu().numpy())

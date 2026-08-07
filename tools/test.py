@@ -56,8 +56,10 @@ def main():
         os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
     cudnn.benchmark = True
 
-    train_loader, val_loader, num_query, num_classes = make_data_loader(cfg)
-    model = build_model(cfg, num_classes)
+    train_loader, val_loader, num_query, num_classes, num_cameras = (
+        make_data_loader(cfg)
+    )
+    model = build_model(cfg, num_classes, num_cameras=num_cameras)
     model.load_param(cfg.TEST.WEIGHT)
 
     inference(cfg, model, val_loader, num_query)
