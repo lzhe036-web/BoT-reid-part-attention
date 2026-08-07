@@ -273,10 +273,32 @@ def _git_output(repo_root, args):
     return output.decode("utf-8", errors="replace").strip()
 
 
+def _git_status_entries(repo_root):
+    try:
+        output = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "status", "--porcelain=v1",
+                "--untracked-files=all", "-z",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceError("Cannot read Git worktree status: {}".format(error))
+    entries = []
+    for raw_entry in output.split(b"\0"):
+        if not raw_entry:
+            continue
+        entry = raw_entry.decode("utf-8", errors="surrogateescape")
+        if len(entry) < 4 or entry[2] != " ":
+            raise EvidenceError("Cannot parse Git worktree status entry")
+        entries.append((entry[:2], normalized_path(entry[3:])))
+    return entries
+
+
 def git_metadata(repo_root):
     commit = _git_output(repo_root, ["rev-parse", "HEAD"])
     branch = _git_output(repo_root, ["branch", "--show-current"])
-    dirty = bool(_git_output(repo_root, ["status", "--porcelain"]))
+    dirty = bool(_git_status_entries(repo_root))
     if not re.match(r"^[0-9a-fA-F]{40}$", commit):
         raise EvidenceError("Git commit is not a full SHA: {}".format(commit))
     if not branch:
@@ -303,7 +325,39 @@ def validate_git_preflight(repo_root, expected_branch, expected_commit=None):
     return metadata
 
 
-def collect_environment(run_dir, repo_root):
+def validate_git_runtime_state(repo_root, run_dir, expected_branch=None,
+                               expected_commit=None):
+    """Allow only new evidence files under this runner's exact run directory."""
+    repo_root = Path(repo_root).resolve()
+    run_dir = Path(run_dir).resolve()
+    try:
+        allowed_relative = normalized_path(run_dir.relative_to(repo_root))
+    except ValueError:
+        raise EvidenceError("Controlled run_dir must be inside the Git worktree")
+    unexpected = []
+    for status_code, path in _git_status_entries(repo_root):
+        under_current_run = (
+            path == allowed_relative or path.startswith(allowed_relative + "/")
+        )
+        if status_code != "??" or not under_current_run:
+            unexpected.append("{} {}".format(status_code, path))
+    if unexpected:
+        raise EvidenceError(
+            "Git worktree contains changes outside controlled run evidence: {}"
+            .format(", ".join(unexpected))
+        )
+    metadata = git_metadata(repo_root)
+    if expected_branch and metadata["branch"] != expected_branch:
+        raise EvidenceError("Branch changed after formal preflight")
+    if expected_commit and metadata["commit"] != expected_commit.lower():
+        raise EvidenceError("Commit changed after formal preflight")
+    metadata["controlled_evidence_dir"] = allowed_relative
+    metadata["controlled_evidence_only"] = True
+    return metadata
+
+
+def collect_environment(run_dir, repo_root, training_pythonhashseed=None,
+                        expected_branch=None, expected_commit=None):
     import torch
 
     run_dir = Path(run_dir)
@@ -334,7 +388,12 @@ def collect_environment(run_dir, repo_root):
         ).decode("utf-8", errors="replace").splitlines()[0].strip()
     except (OSError, subprocess.CalledProcessError, IndexError):
         pass
-    metadata = git_metadata(repo_root)
+    metadata = validate_git_runtime_state(
+        repo_root,
+        run_dir,
+        expected_branch=expected_branch,
+        expected_commit=expected_commit,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "recorded_at_utc": utc_now(),
@@ -352,8 +411,14 @@ def collect_environment(run_dir, repo_root):
             "CUDA_VISIBLE_DEVICES", NOT_RECORDED
         ),
         "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED", NOT_RECORDED),
+        "training_subprocess_PYTHONHASHSEED": (
+            str(training_pythonhashseed)
+            if training_pythonhashseed is not None else NOT_RECORDED
+        ),
         "git_branch": metadata["branch"],
         "git_commit": metadata["commit"],
+        "git_controlled_evidence_dir": metadata["controlled_evidence_dir"],
+        "git_controlled_evidence_only": metadata["controlled_evidence_only"],
         "environment_packages_path": normalized_path(packages_path),
         "environment_packages_sha256": sha256_file(packages_path),
     }
@@ -416,7 +481,9 @@ def generate_run_id(experiment_id, commit, seed, when=None):
 
 def initialize_run(records_root, experiment_id, experiment_family, run_id,
                    config_file, resolved_cfg, output_dir, git_info, notes,
-                   command, expected_branch):
+                   command, expected_branch, method=None,
+                   baseline_method=NOT_RECORDED,
+                   baseline_commit=NOT_RECORDED):
     records_root = Path(records_root)
     run_dir = records_root / "runs" / run_id
     if run_dir.exists():
@@ -435,7 +502,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "experiment_id": experiment_id,
         "run_id": run_id,
         "experiment_family": experiment_family,
-        "method": identity["method"],
+        "method": method or identity["method"],
+        "baseline_method": baseline_method,
+        "baseline_commit": baseline_commit,
         "dataset": identity["dataset"],
         "branch": git_info["branch"],
         "commit_id": git_info["commit"],
@@ -1173,18 +1242,20 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                  run_analyses=True, verify_git=True):
     """Validate all strong evidence, then atomically upsert result registries."""
     run_dir = Path(run_dir)
-    records_root = ensure_record_layout(records_root)
+    records_root = Path(records_root)
     manifest = read_json(run_dir / "run_manifest.json")
     try:
         status = read_json(run_dir / "run_status.json")
+        if verify_git:
+            validate_git_runtime_state(
+                repo_root,
+                run_dir,
+                expected_branch=manifest["branch"],
+                expected_commit=manifest["commit_id"],
+            )
+        records_root = ensure_record_layout(records_root)
         if int(status.get("training_exit_code", -1)) != 0:
             raise EvidenceError("Training exit code is not zero")
-        if verify_git:
-            current_git = git_metadata(repo_root)
-            if current_git["branch"] != manifest["branch"]:
-                raise EvidenceError("Branch changed between training and finalization")
-            if current_git["commit"] != manifest["commit_id"]:
-                raise EvidenceError("Commit changed between training and finalization")
         source_copy = run_dir / "config_source.yml"
         resolved_copy = run_dir / "config_resolved.yml"
         if sha256_file(source_copy) != manifest["config_source_sha256"]:
@@ -1203,7 +1274,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "dataloader_worker_seed_base",
             "dataloader_worker_seed_strategy", "sampler_seed",
             "sampler_seed_strategy", "cudnn_deterministic",
-            "cudnn_benchmark",
+            "cudnn_benchmark", "status",
         )
         missing_reproducibility = [
             key for key in required_reproducibility
@@ -1250,12 +1321,15 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 )
         if validate_seed(int(reproducibility["PYTHONHASHSEED"])) != resolved_seed:
             raise EvidenceError("PYTHONHASHSEED differs from resolved seed")
+        if reproducibility["status"] != "complete":
+            raise EvidenceError("Reproducibility evidence is not complete")
         for key in ("dataloader_worker_seed_strategy", "sampler_seed_strategy"):
             if reproducibility[key] in (NOT_RECORDED, MISSING_EVIDENCE, ""):
                 raise EvidenceError("{} is missing".format(key))
-        for key in ("cudnn_deterministic", "cudnn_benchmark"):
-            if not isinstance(reproducibility[key], bool):
-                raise EvidenceError("{} must be recorded as a boolean".format(key))
+        if reproducibility["cudnn_deterministic"] is not True:
+            raise EvidenceError("cudnn_deterministic must be true")
+        if reproducibility["cudnn_benchmark"] is not False:
+            raise EvidenceError("cudnn_benchmark must be false")
         for required in ("environment.json", "environment_packages.txt", "dataset_manifest.json", "model_manifest.json"):
             if not (run_dir / required).is_file():
                 raise EvidenceError("Required run evidence is missing: {}".format(required))
@@ -1264,6 +1338,14 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             raise EvidenceError("Environment branch evidence does not match run manifest")
         if environment.get("git_commit") != manifest["commit_id"]:
             raise EvidenceError("Environment commit evidence does not match run manifest")
+        training_hash_seed = environment.get(
+            "training_subprocess_PYTHONHASHSEED", NOT_RECORDED
+        )
+        if training_hash_seed != NOT_RECORDED:
+            if validate_seed(int(training_hash_seed)) != resolved_seed:
+                raise EvidenceError(
+                    "Training subprocess PYTHONHASHSEED differs from resolved seed"
+                )
         if not environment.get("gpus") or _gpu_label(environment) == NOT_RECORDED:
             raise EvidenceError("GPU evidence is missing")
         dataset_manifest = read_json(run_dir / "dataset_manifest.json")

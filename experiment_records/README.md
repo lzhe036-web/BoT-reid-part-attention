@@ -13,7 +13,12 @@ Failed or incomplete runs remain under `runs/`, but they are not written to
 successful result tables. Historical rows outside the generated section of
 `EXPERIMENTS.md` are never rewritten.
 
-The current legacy trainer does not expose proof of an applied training seed.
-Because the recorder is strictly read-only, it records that fact as
-`missing_evidence` and refuses to publish a successful formal row; it does not
-seed the trainer, infer a seed, or reuse a historical result.
+Formal training applies the shared protocol in `utils/reproducibility.py` before
+constructing DataLoaders, models, or optimizers, then writes the actual receipt
+to `OUTPUT_DIR/reproducibility.json`. The recorder remains fail-closed: it only
+copies and validates that training-produced evidence and never infers a seed.
+
+The runner requires a completely clean worktree before initialization. After it
+creates `runs/<run_id>/`, Git verification permits only new files beneath that
+exact run directory until finalization; tracked changes or any other untracked
+path still fail closed.

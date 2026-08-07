@@ -20,7 +20,6 @@ if str(REPO_ROOT) not in sys.path:
 from config import cfg
 from data.datasets import init_dataset
 from utils.experiment_recording import (
-    MISSING_EVIDENCE,
     NOT_RECORDED,
     atomic_write_json,
     build_dataset_manifest,
@@ -33,6 +32,11 @@ from utils.experiment_recording import (
     record_training_exit,
     validate_git_preflight,
 )
+from utils.reproducibility import (
+    RUNNER_SEED_ENV,
+    validate_seed,
+    validate_seed_evidence_chain,
+)
 
 
 def parse_args(argv=None):
@@ -44,18 +48,57 @@ def parse_args(argv=None):
     parser.add_argument("--expected-commit")
     parser.add_argument("--run-id")
     parser.add_argument("--notes", default="")
+    parser.add_argument("--method")
+    parser.add_argument("--baseline-method", default=NOT_RECORDED)
+    parser.add_argument("--baseline-commit", default=NOT_RECORDED)
     parser.add_argument(
         "--records-root",
         default=str(REPO_ROOT / "experiment_records"),
     )
+    parser.add_argument(
+        "opts",
+        help="YACS config overrides, used by isolated smoke runs",
+        default=None,
+        nargs=argparse.REMAINDER,
+    )
     return parser.parse_args(argv)
 
 
-def _load_config(config_path):
+def _load_config(config_path, opts=None):
     local_cfg = cfg.clone()
     local_cfg.merge_from_file(str(config_path))
+    local_cfg.merge_from_list(opts or [])
     local_cfg.freeze()
     return local_cfg
+
+
+def _load_explicit_source_seed(config_path):
+    import yaml
+
+    with Path(config_path).open("r", encoding="utf-8") as handle:
+        source = yaml.safe_load(handle) or {}
+    if "SEED" not in source:
+        raise RuntimeError("Formal config must explicitly declare SEED")
+    return validate_seed(source["SEED"])
+
+
+def _build_training_environment(resolved_seed, base_environment=None):
+    seed = validate_seed(resolved_seed)
+    training_env = dict(
+        os.environ if base_environment is None else base_environment
+    )
+    training_env["PYTHONHASHSEED"] = str(seed)
+    training_env[RUNNER_SEED_ENV] = str(seed)
+    return training_env
+
+
+def _launch_training_subprocess(train_command, training_env):
+    return subprocess.run(
+        train_command,
+        cwd=str(REPO_ROOT),
+        check=False,
+        env=training_env,
+    )
 
 
 def _plain_config(local_cfg):
@@ -78,7 +121,9 @@ def _require_new_output_dir(path):
     return output
 
 
-def _model_manifest(configuration):
+def _model_manifest(configuration, method=None,
+                    baseline_method=NOT_RECORDED,
+                    baseline_commit=NOT_RECORDED):
     identity = experiment_identity(configuration)
     model = configuration.get("MODEL", {})
     scales = model.get("MULTI_GRANULARITY_SCALES", [])
@@ -93,7 +138,9 @@ def _model_manifest(configuration):
         "schema_version": 1,
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
         "neck": configuration.get("MODEL", {}).get("NECK", NOT_RECORDED),
-        "method": identity["method"],
+        "method": method or identity["method"],
+        "baseline_method": baseline_method,
+        "baseline_commit": baseline_commit,
         "modules": identity["modules"],
         "baseline_experiment": (
             "C2-L03" if multi_granularity_enabled else NOT_RECORDED
@@ -120,10 +167,13 @@ def run(args):
     git_info = validate_git_preflight(
         REPO_ROOT, args.expected_branch, expected_commit=args.expected_commit
     )
-    local_cfg = _load_config(config_path)
+    local_cfg = _load_config(config_path, args.opts)
     output_dir = _require_new_output_dir(local_cfg.OUTPUT_DIR)
     configuration = _plain_config(local_cfg)
-    resolved_seed = configuration.get("SEED", NOT_RECORDED)
+    source_seed = _load_explicit_source_seed(config_path)
+    resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))
+    validate_seed_evidence_chain(source_seed, resolved_seed, resolved_seed)
+    training_env = _build_training_environment(resolved_seed)
     run_id = args.run_id or generate_run_id(
         args.experiment_id, git_info["commit"], resolved_seed
     )
@@ -139,9 +189,18 @@ def run(args):
         notes=args.notes,
         command=sys.argv,
         expected_branch=args.expected_branch,
+        method=args.method,
+        baseline_method=args.baseline_method,
+        baseline_commit=args.baseline_commit,
     )
     try:
-        environment = collect_environment(run_dir, REPO_ROOT)
+        environment = collect_environment(
+            run_dir,
+            REPO_ROOT,
+            training_pythonhashseed=training_env["PYTHONHASHSEED"],
+            expected_branch=git_info["branch"],
+            expected_commit=git_info["commit"],
+        )
         atomic_write_json(run_dir / "environment.json", environment)
         dataset = init_dataset(
             local_cfg.DATASETS.NAMES, root=local_cfg.DATASETS.ROOT_DIR
@@ -150,42 +209,23 @@ def run(args):
             dataset, configuration, local_cfg.DATASETS.ROOT_DIR
         )
         atomic_write_json(run_dir / "dataset_manifest.json", dataset_manifest)
-        atomic_write_json(run_dir / "model_manifest.json", _model_manifest(configuration))
-        atomic_write_json(run_dir / "reproducibility.json", {
-            "schema_version": 1,
-            "source_seed": configuration.get("SEED", NOT_RECORDED),
-            "resolved_seed": resolved_seed,
-            "applied_seed": NOT_RECORDED,
-            "seed": NOT_RECORDED,
-            "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED", NOT_RECORDED),
-            "python_random_seed": NOT_RECORDED,
-            "numpy_seed": NOT_RECORDED,
-            "torch_cpu_seed": NOT_RECORDED,
-            "torch_cuda_seed": NOT_RECORDED,
-            "dataloader_worker_seed_base": NOT_RECORDED,
-            "dataloader_worker_seed_strategy": NOT_RECORDED,
-            "sampler_seed": NOT_RECORDED,
-            "sampler_seed_strategy": NOT_RECORDED,
-            "cudnn_deterministic": NOT_RECORDED,
-            "cudnn_benchmark": NOT_RECORDED,
-            "status": MISSING_EVIDENCE,
-            "reason": (
-                "The legacy training code does not emit applied RNG evidence; "
-                "the bypass recorder does not alter or infer training seeds."
+        atomic_write_json(
+            run_dir / "model_manifest.json",
+            _model_manifest(
+                configuration,
+                method=args.method,
+                baseline_method=args.baseline_method,
+                baseline_commit=args.baseline_commit,
             ),
-        })
+        )
         train_command = [
             sys.executable,
             "tools/train.py",
             "--config_file",
             str(config_path),
-        ]
+        ] + list(args.opts or [])
         started = time.monotonic()
-        completed = subprocess.run(
-            train_command,
-            cwd=str(REPO_ROOT),
-            check=False,
-        )
+        completed = _launch_training_subprocess(train_command, training_env)
         runtime = time.monotonic() - started
         record_training_exit(run_dir, completed.returncode, runtime)
         if completed.returncode != 0:
