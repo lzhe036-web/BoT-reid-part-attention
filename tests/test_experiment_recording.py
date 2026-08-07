@@ -113,6 +113,7 @@ def _training_log(config_text):
         config_text.rstrip("\n"),
         "2026-08-07 10:10:00 reid_baseline.train INFO: Epoch[1] Iteration[100/100] loss_total: 1.0, loss_id: 0.4, loss_triplet: 0.5, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1{}, cross_camera_positive_count: 60.0, Acc: 0.8, Base Lr: 3.50e-04".format(first_pcc),
     ] + first_summary + [
+        "2026-08-07 10:10:00 reid_baseline.train INFO: EPOCH_EVIDENCE epoch=1 global_iteration=100 epoch_length=100",
         "2026-08-07 10:10:01 reid_baseline.train INFO: Validation Results - Epoch: 1",
         "2026-08-07 10:10:02 reid_baseline.train INFO: mAP: 80.0%",
         "2026-08-07 10:10:03 reid_baseline.train INFO: CMC curve, Rank-1  :90.0%",
@@ -120,6 +121,7 @@ def _training_log(config_text):
         "2026-08-07 10:10:05 reid_baseline.train INFO: CMC curve, Rank-10 :98.0%",
         "2026-08-07 11:00:00 reid_baseline.train INFO: Epoch[2] Iteration[100/100] loss_total: 0.8, loss_id: 0.3, loss_triplet: 0.4, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1{}, cross_camera_positive_count: 61.0, Acc: 0.9, Base Lr: 3.50e-04".format(second_pcc),
     ] + second_summary + [
+        "2026-08-07 11:00:00 reid_baseline.train INFO: EPOCH_EVIDENCE epoch=2 global_iteration=200 epoch_length=100",
         "2026-08-07 11:00:01 reid_baseline.train INFO: Validation Results - Epoch: 2",
         "2026-08-07 11:00:02 reid_baseline.train INFO: mAP: 87.8%",
         "2026-08-07 11:00:03 reid_baseline.train INFO: CMC curve, Rank-1  :95.0%",
@@ -171,6 +173,9 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "margin": identity["margin"],
         "mode": identity["mode"],
         "modules": identity["modules"],
+        "required_global_iteration_source": (
+            "ignite_engine_epoch_evidence"
+        ),
         "output_dir": normalized_path(output.resolve()),
         "start_time": "2026-08-07T10:00:00Z",
         "notes": "合成 fixture",
@@ -483,12 +488,33 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(rows[0]["global_iteration"], "200")
             self.assertEqual(rows[0]["epoch"], "2")
             self.assertEqual(rows[0]["selected"], "True")
+            self.assertEqual(
+                rows[0]["global_iteration_source"],
+                "ignite_engine_epoch_evidence",
+            )
             validation = [
                 json.loads(line)
                 for line in (run_dir / "validation_history.jsonl")
                 .read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(validation[-1]["global_iteration"], 200)
+            self.assertEqual(
+                validation[-1]["global_iteration_source"],
+                "ignite_engine_epoch_evidence",
+            )
+
+    def test_new_run_policy_rejects_legacy_iteration_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, output, experiments = make_fixture(directory)
+            log_path = output / "log.txt"
+            legacy_lines = [
+                line for line in log_path.read_text(encoding="utf-8").splitlines()
+                if "EPOCH_EVIDENCE" not in line
+            ]
+            atomic_write_text(log_path, "\n".join(legacy_lines) + "\n")
+            with self.assertRaisesRegex(
+                    EvidenceError, "requires global_iteration_source"):
+                finalize_fixture(records, run_dir, experiments)
 
     def test_csv_to_markdown_is_consistent(self):
         with tempfile.TemporaryDirectory() as directory:
