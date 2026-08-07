@@ -15,6 +15,7 @@ fi
 
 export CUDA_VISIBLE_DEVICES=0
 CONFIG="configs/softmax_triplet_c2l03_seed42_autodl.yml"
+SMOKE_OUTPUT_DIR="${SMOKE_OUTPUT_DIR:-/root/autodl-tmp/experiments/BoT/c2l03_seed42_market1501_smoke_1epoch}"
 python tools/run_experiment.py \
   --config "${CONFIG}" \
   --experiment-id C2-L03-S42-SMOKE-1E \
@@ -27,4 +28,4 @@ python tools/run_experiment.py \
   SOLVER.MAX_EPOCHS 1 \
   SOLVER.CHECKPOINT_PERIOD 1 \
   SOLVER.EVAL_PERIOD 1 \
-  OUTPUT_DIR /root/autodl-tmp/experiments/BoT/c2l03_seed42_market1501_smoke_1epoch
+  OUTPUT_DIR "${SMOKE_OUTPUT_DIR}"
