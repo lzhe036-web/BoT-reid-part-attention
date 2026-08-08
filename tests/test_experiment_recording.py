@@ -27,6 +27,7 @@ from utils.experiment_recording import (
     csv_to_markdown,
     experiment_identity,
     finalize_run,
+    git_metadata,
     normalized_path,
     sha256_file,
     validate_git_preflight,
@@ -56,6 +57,10 @@ def _base_config(output_dir, variant="cross", seed=42):
         "CROSS_CAMERA_POSITIVE_ONLY": False,
         "CROSS_CAMERA_POSITIVE_LAMBDA": 0.3,
         "CROSS_CAMERA_POSITIVE_MODE": "mean",
+        "PART_CORRESPONDENCE_CONSISTENCY": False,
+        "PCC_PARTS": 6,
+        "PCC_LAMBDA": 0.1,
+        "PCC_MODE": "fixed_index",
     }
     if variant == "cross":
         model["CROSS_CAMERA_POSITIVE_ONLY"] = True
@@ -70,6 +75,9 @@ def _base_config(output_dir, variant="cross", seed=42):
         model["HIERARCHICAL_CAMERA_AWARE_LOSS"] = True
         model["NORMALIZED_WEIGHTED_LOSS"] = True
         model["MULTI_GRANULARITY_PART"] = True
+    elif variant == "pcc":
+        model["CROSS_CAMERA_POSITIVE_ONLY"] = True
+        model["PART_CORRESPONDENCE_CONSISTENCY"] = True
     config = {
         "SEED": seed,
         "MODEL": model,
@@ -84,17 +92,33 @@ def _base_config(output_dir, variant="cross", seed=42):
 
 
 def _training_log(config_text):
+    pcc_enabled = "PART_CORRESPONDENCE_CONSISTENCY: true" in config_text
+    first_pcc = ""
+    second_pcc = ""
+    first_summary = []
+    second_summary = []
+    if pcc_enabled:
+        first_pcc = ", loss_pcc: 0.2, valid_pcc_pair_count: 12.0, mean_fixed_index_part_distance: 0.2"
+        second_pcc = ", loss_pcc: 0.1, valid_pcc_pair_count: 14.0, mean_fixed_index_part_distance: 0.1"
+        first_summary = [
+            "2026-08-07 10:10:00 reid_baseline.train INFO: PCC Epoch Summary - Epoch: 1 valid_pcc_pair_count: 1200 mean_fixed_index_part_distance: 0.200000"
+        ]
+        second_summary = [
+            "2026-08-07 11:00:00 reid_baseline.train INFO: PCC Epoch Summary - Epoch: 2 valid_pcc_pair_count: 1400 mean_fixed_index_part_distance: 0.100000"
+        ]
     return "\n".join([
         "2026-08-07 10:00:00 reid_baseline.train INFO: Start training",
         "2026-08-07 10:00:00 reid_baseline.train INFO: Loaded configuration file configs/synthetic.yml",
         config_text.rstrip("\n"),
-        "2026-08-07 10:10:00 reid_baseline.train INFO: Epoch[1] Iteration[100/100] loss_total: 1.0, loss_id: 0.4, loss_triplet: 0.5, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1, cross_camera_positive_count: 60.0, Acc: 0.8, Base Lr: 3.50e-04",
+        "2026-08-07 10:10:00 reid_baseline.train INFO: Epoch[1] Iteration[100/100] loss_total: 1.0, loss_id: 0.4, loss_triplet: 0.5, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1{}, cross_camera_positive_count: 60.0, Acc: 0.8, Base Lr: 3.50e-04".format(first_pcc),
+    ] + first_summary + [
         "2026-08-07 10:10:01 reid_baseline.train INFO: Validation Results - Epoch: 1",
         "2026-08-07 10:10:02 reid_baseline.train INFO: mAP: 80.0%",
         "2026-08-07 10:10:03 reid_baseline.train INFO: CMC curve, Rank-1  :90.0%",
         "2026-08-07 10:10:04 reid_baseline.train INFO: CMC curve, Rank-5  :96.0%",
         "2026-08-07 10:10:05 reid_baseline.train INFO: CMC curve, Rank-10 :98.0%",
-        "2026-08-07 11:00:00 reid_baseline.train INFO: Epoch[2] Iteration[100/100] loss_total: 0.8, loss_id: 0.3, loss_triplet: 0.4, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1, cross_camera_positive_count: 61.0, Acc: 0.9, Base Lr: 3.50e-04",
+        "2026-08-07 11:00:00 reid_baseline.train INFO: Epoch[2] Iteration[100/100] loss_total: 0.8, loss_id: 0.3, loss_triplet: 0.4, loss_camera_triplet: 0.0, loss_cross_camera_positive: 0.1{}, cross_camera_positive_count: 61.0, Acc: 0.9, Base Lr: 3.50e-04".format(second_pcc),
+    ] + second_summary + [
         "2026-08-07 11:00:01 reid_baseline.train INFO: Validation Results - Epoch: 2",
         "2026-08-07 11:00:02 reid_baseline.train INFO: mAP: 87.8%",
         "2026-08-07 11:00:03 reid_baseline.train INFO: CMC curve, Rank-1  :95.0%",
@@ -136,6 +160,13 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "config_resolved_sha256": sha256_file(resolved),
         "seed": seed,
         "lambda": identity["lambda"],
+        "cross_camera_positive_lambda": identity["cross_camera_positive_lambda"],
+        "pcc_enabled": identity["pcc_enabled"],
+        "pcc_parts": identity["pcc_parts"],
+        "pcc_lambda": identity["pcc_lambda"],
+        "pcc_mode": identity["pcc_mode"],
+        "alignment_strategy": identity["alignment_strategy"],
+        "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
         "modules": identity["modules"],
@@ -244,6 +275,26 @@ class ExperimentRecordingTest(unittest.TestCase):
             rows = _read_csv(records / "tables" / "lambda_sensitivity.csv")
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["lambda"], "0.3")
+
+    def test_pcc_experiment_writes_explicit_lambda_fields_and_pcc_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = make_fixture(
+                directory, variant="pcc",
+                family="c2l03_fixed_index_part_correspondence_consistency",
+                experiment_id="C2-PCC-Fixed",
+            )
+            records, run_dir, _output, experiments = fixture
+            finalize_fixture(records, run_dir, experiments)
+            main = _read_csv(records / "tables" / "main_results.csv")[0]
+            pcc = _read_csv(records / "tables" / "pcc_ablation.csv")[0]
+            self.assertEqual(main["cross_camera_positive_lambda"], "0.3")
+            self.assertEqual(main["pcc_lambda"], "0.1")
+            self.assertEqual(main["alignment_strategy"], "fixed_index")
+            self.assertEqual(pcc["valid_pcc_pair_count"], "2600")
+            self.assertAlmostEqual(
+                float(pcc["mean_fixed_index_part_distance"]),
+                (1200 * 0.2 + 1400 * 0.1) / 2600.0,
+            )
 
     def test_same_camera_experiment_writes_same_camera_table(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -365,6 +416,52 @@ class ExperimentRecordingTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(EvidenceError, "clean Git"):
                 validate_git_preflight("unused", "C2L03")
+
+    def test_post_init_git_check_allows_only_current_run_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            run_dir = repo / "experiment_records" / "runs" / "run-001"
+            run_dir.mkdir(parents=True)
+
+            def controlled_output(_repo, args):
+                if args[0] == "rev-parse":
+                    return FULL_COMMIT
+                if args[0] == "branch":
+                    return "exp/c2l03-fixed-index-pcc"
+                return "?? experiment_records/runs/run-001/run_manifest.json"
+
+            with mock.patch(
+                "utils.experiment_recording._git_output",
+                side_effect=controlled_output,
+            ):
+                metadata = git_metadata(
+                    repo, allowed_dirty_paths=(run_dir,)
+                )
+            self.assertFalse(metadata["dirty"])
+            self.assertEqual(
+                metadata["controlled_dirty_paths"],
+                ["experiment_records/runs/run-001/run_manifest.json"],
+            )
+
+            def polluted_output(_repo, args):
+                if args[0] == "rev-parse":
+                    return FULL_COMMIT
+                if args[0] == "branch":
+                    return "exp/c2l03-fixed-index-pcc"
+                return "\n".join([
+                    "?? experiment_records/runs/run-001/run_manifest.json",
+                    " M modeling/baseline.py",
+                ])
+
+            with mock.patch(
+                "utils.experiment_recording._git_output",
+                side_effect=polluted_output,
+            ):
+                metadata = git_metadata(
+                    repo, allowed_dirty_paths=(run_dir,)
+                )
+            self.assertTrue(metadata["dirty"])
+            self.assertEqual(metadata["dirty_paths"], ["modeling/baseline.py"])
 
     def test_checkpoint_sha256_is_correct(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -9,6 +9,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from config import cfg
+from layers.part_correspondence_consistency import build_local_part_descriptors
 from .backbones.resnet import ResNet, BasicBlock, Bottleneck
 from .backbones.senet import SENet, SEResNetBottleneck, SEBottleneck, SEResNeXtBottleneck
 from .backbones.resnet_ibn_a import resnet50_ibn_a
@@ -66,7 +67,8 @@ class Baseline(nn.Module):
     in_planes = 2048
 
     def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice,
-                 part_attention=None, part_attention_parts=None):
+                 part_attention=None, part_attention_parts=None,
+                 part_correspondence_consistency=None, pcc_parts=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -170,6 +172,20 @@ class Baseline(nn.Module):
         if part_attention_parts is None:
             part_attention_parts = cfg.MODEL.PART_ATTENTION_PARTS
         self.part_attention = part_attention
+        if part_correspondence_consistency is None:
+            part_correspondence_consistency = cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+        if pcc_parts is None:
+            pcc_parts = cfg.MODEL.PCC_PARTS
+        self.part_correspondence_consistency = part_correspondence_consistency
+        self.pcc_parts = pcc_parts
+        if self.part_correspondence_consistency:
+            if not self.part_attention or part_attention_parts != 6:
+                raise ValueError(
+                    "Fixed-Index PCC requires the unchanged C2L03 "
+                    "PartAttentionHead with 6 parts"
+                )
+            if self.pcc_parts != 6:
+                raise ValueError("Fixed-Index PCC requires PCC_PARTS=6")
 
         if self.part_attention:
             self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
@@ -202,6 +218,11 @@ class Baseline(nn.Module):
 
         if self.training:
             cls_score = self.classifier(feat)
+            if self.part_correspondence_consistency:
+                pcc_local_features = build_local_part_descriptors(
+                    feature_map, self.pcc_parts
+                )
+                return cls_score, global_feat, pcc_local_features
             return cls_score, global_feat  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':

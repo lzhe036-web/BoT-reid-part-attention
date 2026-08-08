@@ -85,7 +85,18 @@ def _model_manifest(configuration):
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
         "neck": configuration.get("MODEL", {}).get("NECK", NOT_RECORDED),
         "method": identity["method"],
+        "baseline": identity["baseline"],
         "modules": identity["modules"],
+        "part_correspondence_consistency": {
+            "enabled": identity["pcc_enabled"],
+            "parts": identity["pcc_parts"],
+            "mode": identity["pcc_mode"],
+            "alignment_strategy": identity["alignment_strategy"],
+            "lambda": identity["pcc_lambda"],
+        },
+        "cross_camera_positive_lambda": identity[
+            "cross_camera_positive_lambda"
+        ],
         "total_params": NOT_RECORDED,
         "trainable_params": NOT_RECORDED,
         "FLOPs": NOT_RECORDED,
