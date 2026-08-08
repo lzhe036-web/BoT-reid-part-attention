@@ -6,6 +6,7 @@ from __future__ import absolute_import
 import csv
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -265,6 +266,49 @@ def finalize_fixture(records, run_dir, experiments):
 
 
 class ExperimentRecordingTest(unittest.TestCase):
+    def test_git_metadata_clean_preflight_and_dirty_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            subprocess.check_call(
+                ["git", "init", "-b", "metadata-test", str(repo)], **quiet
+            )
+            subprocess.check_call(
+                ["git", "-C", str(repo), "config", "user.name", "Test User"],
+                **quiet
+            )
+            subprocess.check_call(
+                [
+                    "git", "-C", str(repo), "config", "user.email",
+                    "test@example.com",
+                ],
+                **quiet
+            )
+            tracked = repo / "tracked.txt"
+            tracked.write_text("clean\n", encoding="utf-8")
+            subprocess.check_call(
+                ["git", "-C", str(repo), "add", "tracked.txt"], **quiet
+            )
+            subprocess.check_call(
+                ["git", "-C", str(repo), "commit", "-m", "initial"], **quiet
+            )
+
+            metadata = git_metadata(repo)
+            self.assertEqual(set(metadata), {"commit", "branch", "dirty"})
+            self.assertRegex(metadata["commit"], r"^[0-9a-f]{40}$")
+            self.assertEqual(metadata["branch"], "metadata-test")
+            self.assertFalse(metadata["dirty"])
+            self.assertEqual(
+                validate_git_preflight(
+                    repo, "metadata-test", metadata["commit"]
+                ),
+                metadata,
+            )
+
+            tracked.write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(EvidenceError, "clean Git"):
+                validate_git_preflight(repo, "metadata-test", metadata["commit"])
+
     def test_success_experiment_writes_main_results(self):
         with tempfile.TemporaryDirectory() as directory:
             records, run_dir, output, experiments = make_fixture(directory)

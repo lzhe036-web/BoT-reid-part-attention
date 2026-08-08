@@ -444,10 +444,6 @@ def git_metadata(repo_root):
         "commit": commit.lower(),
         "branch": branch,
         "dirty": dirty,
-        "dirty_paths": uncontrolled,
-        "controlled_dirty_paths": [
-            path for path in dirty_paths if path not in uncontrolled
-        ],
     }
 
 
