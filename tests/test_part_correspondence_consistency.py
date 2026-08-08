@@ -158,7 +158,7 @@ class PartCorrespondenceConsistencyTest(unittest.TestCase):
         self.assertEqual(output['valid_pcc_pair_count'], 0)
 
     def test_formal_config_changes_only_pcc_keys_and_output_dir(self):
-        with (REPO_ROOT / 'configs' / 'softmax_triplet_cross_camera_positive_lambda03_autodl.yml').open(encoding='utf-8') as handle:
+        with (REPO_ROOT / 'configs' / 'softmax_triplet_c2l03_seed42_autodl.yml').open(encoding='utf-8') as handle:
             baseline = yaml.safe_load(handle)
         with (REPO_ROOT / 'configs' / 'softmax_triplet_c2l03_fixed_index_pcc_autodl.yml').open(encoding='utf-8') as handle:
             pcc = yaml.safe_load(handle)
@@ -170,6 +170,8 @@ class PartCorrespondenceConsistencyTest(unittest.TestCase):
             stripped['MODEL'].pop(key)
         stripped['OUTPUT_DIR'] = baseline['OUTPUT_DIR']
         self.assertEqual(stripped, baseline)
+        self.assertEqual(pcc['SEED'], 42)
+        self.assertEqual(pcc['MODEL']['NAME'], 'resnet50')
         self.assertTrue(pcc['MODEL']['PART_ATTENTION'])
         self.assertEqual(pcc['MODEL']['PART_ATTENTION_PARTS'], 6)
         self.assertEqual(pcc['MODEL']['CROSS_CAMERA_POSITIVE_LAMBDA'], 0.3)

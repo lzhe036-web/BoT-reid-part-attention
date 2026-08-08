@@ -1706,8 +1706,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "distance_distribution": "complete",
             "anchor_coverage": "complete",
             "efficiency_profile": efficiency.get("status", NOT_RECORDED),
-            "analysis_commit": git_metadata(
-                repo_root, allowed_dirty_paths=(run_dir,)
+            "analysis_commit": validate_git_runtime_state(
+                repo_root,
+                run_dir,
+                expected_branch=manifest["branch"],
+                expected_commit=manifest["commit_id"],
             )["commit"] if verify_git else manifest["commit_id"],
             "analysis_time": utc_now(),
             "source_checkpoint_sha256": selected["sha256"],

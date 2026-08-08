@@ -192,6 +192,7 @@ class ReproducibilityProtocolTest(unittest.TestCase):
         baseline = yaml.safe_load(BASELINE_CONFIG.read_text(encoding="utf-8"))
         formal = yaml.safe_load(FORMAL_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual(formal.pop("SEED"), 42)
+        self.assertEqual(formal["MODEL"].pop("NAME"), "resnet50")
         self.assertNotEqual(formal.pop("OUTPUT_DIR"), baseline.pop("OUTPUT_DIR"))
         self.assertEqual(formal, baseline)
         self.assertTrue(formal["MODEL"]["PART_ATTENTION"])
