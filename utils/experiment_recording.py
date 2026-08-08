@@ -42,10 +42,13 @@ class EvidenceError(RuntimeError):
 
 MAIN_FIELDS = (
     "run_id", "experiment_id", "experiment_family", "method", "dataset",
-    "branch", "commit", "seed", "lambda", "margin", "mode", "best_epoch",
+    "branch", "commit", "seed", "lambda", "cross_camera_positive_lambda",
+    "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
+    "alignment_strategy", "baseline", "margin", "mode", "best_epoch",
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
     "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
-    "log_sha256", "output_dir", "status", "notes",
+    "log_sha256", "output_dir", "valid_pcc_pair_count",
+    "mean_fixed_index_part_distance", "status", "notes",
 )
 LAMBDA_FIELDS = (
     "run_id", "experiment_id", "method", "dataset", "lambda", "seed",
@@ -74,13 +77,22 @@ ANCHOR_FIELDS = (
     "coverage_percent", "cross_camera_positive_count",
     "same_camera_positive_count", "commit",
 )
+PCC_FIELDS = (
+    "run_id", "experiment_id", "baseline", "pcc_enabled",
+    "alignment_strategy", "pcc_parts", "cross_camera_positive_lambda",
+    "pcc_lambda", "valid_pcc_pair_count",
+    "mean_fixed_index_part_distance", "best_epoch", "rank1", "map",
+    "runtime", "seed", "commit",
+)
 RUN_FIELDS = (
     "run_id", "experiment_id", "experiment_family", "method", "dataset",
-    "branch", "commit_id", "config_file", "seed", "lambda", "margin",
+    "branch", "commit_id", "config_file", "seed", "lambda",
+    "cross_camera_positive_lambda", "pcc_lambda", "pcc_enabled",
+    "pcc_parts", "pcc_mode", "alignment_strategy", "baseline", "margin",
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
     "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
-    "notes",
+    "valid_pcc_pair_count", "mean_fixed_index_part_distance", "notes",
 )
 EVIDENCE_FIELDS = (
     "run_id", "artifact_type", "path", "size_bytes", "sha256",
@@ -93,6 +105,7 @@ TABLE_SCHEMAS = {
     "caat_ablation": CAAT_FIELDS,
     "distance_distribution": DISTANCE_FIELDS,
     "anchor_coverage": ANCHOR_FIELDS,
+    "pcc_ablation": PCC_FIELDS,
 }
 
 
@@ -206,6 +219,9 @@ def config_modules(configuration):
             "MODEL.MULTI_GRANULARITY_PART",
             "MODEL.MULTI_GRANULARITY",
         )),
+        "part_correspondence_consistency": enabled((
+            "MODEL.PART_CORRESPONDENCE_CONSISTENCY",
+        )),
     }
 
 
@@ -241,6 +257,12 @@ def experiment_identity(configuration):
         relation = "none"
         loss_lambda = NOT_RECORDED
         mode = NOT_RECORDED
+    pcc_enabled = modules["part_correspondence_consistency"]
+    pcc_mode = nested_value(configuration, "MODEL.PCC_MODE")
+    if pcc_enabled:
+        method = "C2-L03 + Fixed-Index Part Correspondence Consistency"
+        variant = "fixed_index_pcc"
+        relation = "same_pid_different_camera_same_index"
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
@@ -253,6 +275,17 @@ def experiment_identity(configuration):
         "margin": nested_value(configuration, "SOLVER.MARGIN"),
         "mode": mode,
         "modules": modules,
+        "baseline": "C2-L03" if pcc_enabled else NOT_RECORDED,
+        "cross_camera_positive_lambda": nested_value(
+            configuration, "MODEL.CROSS_CAMERA_POSITIVE_LAMBDA"
+        ) if modules["cross_camera_positive"] else NOT_RECORDED,
+        "pcc_enabled": pcc_enabled,
+        "pcc_parts": nested_value(configuration, "MODEL.PCC_PARTS")
+        if pcc_enabled else NOT_RECORDED,
+        "pcc_lambda": nested_value(configuration, "MODEL.PCC_LAMBDA")
+        if pcc_enabled else NOT_RECORDED,
+        "pcc_mode": pcc_mode if pcc_enabled else NOT_RECORDED,
+        "alignment_strategy": pcc_mode if pcc_enabled else NOT_RECORDED,
     }
 
 
@@ -267,15 +300,50 @@ def _git_output(repo_root, args):
     return output.decode("utf-8", errors="replace").strip()
 
 
-def git_metadata(repo_root):
+def _allowed_git_paths(repo_root, paths):
+    root = Path(repo_root).resolve()
+    allowed = []
+    for path in paths or ():
+        try:
+            relative = Path(path).resolve().relative_to(root)
+        except ValueError:
+            continue
+        allowed.append(normalized_path(relative).rstrip("/"))
+    return tuple(allowed)
+
+
+def git_metadata(repo_root, allowed_dirty_paths=()):
     commit = _git_output(repo_root, ["rev-parse", "HEAD"])
     branch = _git_output(repo_root, ["branch", "--show-current"])
-    dirty = bool(_git_output(repo_root, ["status", "--porcelain"]))
+    status_text = _git_output(
+        repo_root, ["status", "--porcelain=v1", "--untracked-files=all"]
+    )
+    dirty_paths = []
+    for line in status_text.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].split(" -> ")[-1].strip('"')
+        dirty_paths.append(normalized_path(path))
+    allowed = _allowed_git_paths(repo_root, allowed_dirty_paths)
+    uncontrolled = [
+        path for path in dirty_paths
+        if not any(path == prefix or path.startswith(prefix + "/")
+                   for prefix in allowed)
+    ]
+    dirty = bool(uncontrolled)
     if not re.match(r"^[0-9a-fA-F]{40}$", commit):
         raise EvidenceError("Git commit is not a full SHA: {}".format(commit))
     if not branch:
         raise EvidenceError("Detached HEAD is not allowed for formal training")
-    return {"commit": commit.lower(), "branch": branch, "dirty": dirty}
+    return {
+        "commit": commit.lower(),
+        "branch": branch,
+        "dirty": dirty,
+        "dirty_paths": uncontrolled,
+        "controlled_dirty_paths": [
+            path for path in dirty_paths if path not in uncontrolled
+        ],
+    }
 
 
 def validate_git_preflight(repo_root, expected_branch, expected_commit=None):
@@ -328,7 +396,7 @@ def collect_environment(run_dir, repo_root):
         ).decode("utf-8", errors="replace").splitlines()[0].strip()
     except (OSError, subprocess.CalledProcessError, IndexError):
         pass
-    metadata = git_metadata(repo_root)
+    metadata = git_metadata(repo_root, allowed_dirty_paths=(run_dir,))
     return {
         "schema_version": SCHEMA_VERSION,
         "recorded_at_utc": utc_now(),
@@ -441,6 +509,13 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "config_resolved_sha256": sha256_file(resolved_copy),
         "seed": seed,
         "lambda": identity["lambda"],
+        "cross_camera_positive_lambda": identity["cross_camera_positive_lambda"],
+        "pcc_enabled": identity["pcc_enabled"],
+        "pcc_parts": identity["pcc_parts"],
+        "pcc_lambda": identity["pcc_lambda"],
+        "pcc_mode": identity["pcc_mode"],
+        "alignment_strategy": identity["alignment_strategy"],
+        "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
         "modules": identity["modules"],
@@ -499,6 +574,7 @@ def parse_training_log(log_path):
     validations = []
     current = None
     iterations_per_epoch_values = set()
+    pcc_epoch_summaries = []
     required_training_fields = {
         "loss_total": False,
         "loss_id": False,
@@ -519,6 +595,18 @@ def parse_training_log(log_path):
         required_training_fields["loss_id"] |= "loss_id:" in line
         required_training_fields["loss_triplet"] |= "loss_triplet:" in line
         required_training_fields["learning_rate"] |= "Base Lr:" in line
+        pcc_summary = re.search(
+            r"PCC Epoch Summary - Epoch:\s*(\d+)\s+"
+            r"valid_pcc_pair_count:\s*(\d+)\s+"
+            r"mean_fixed_index_part_distance:\s*([0-9.eE+-]+)",
+            line,
+        )
+        if pcc_summary:
+            pcc_epoch_summaries.append({
+                "epoch": int(pcc_summary.group(1)),
+                "valid_pcc_pair_count": int(pcc_summary.group(2)),
+                "mean_fixed_index_part_distance": float(pcc_summary.group(3)),
+            })
         iteration_match = re.search(
             r"Epoch\[(\d+)\]\s+Iteration\[(\d+)/(\d+)\]", line
         )
@@ -564,6 +652,18 @@ def parse_training_log(log_path):
     runtime = NOT_RECORDED
     if timestamps:
         runtime = (max(timestamps) - min(timestamps)).total_seconds()
+    total_pcc_pairs = sum(
+        row["valid_pcc_pair_count"] for row in pcc_epoch_summaries
+    )
+    mean_pcc_distance = NOT_RECORDED
+    if total_pcc_pairs:
+        mean_pcc_distance = sum(
+            row["valid_pcc_pair_count"]
+            * row["mean_fixed_index_part_distance"]
+            for row in pcc_epoch_summaries
+        ) / float(total_pcc_pairs)
+    elif pcc_epoch_summaries:
+        mean_pcc_distance = 0.0
     return {
         "path": normalized_path(path.resolve()),
         "sha256": sha256_file(path),
@@ -574,6 +674,11 @@ def parse_training_log(log_path):
         "has_cross_camera_positive_loss": (
             "loss_cross_camera_positive:" in raw_text
         ),
+        "has_pcc_loss": "loss_pcc:" in raw_text,
+        "pcc_epoch_summaries": pcc_epoch_summaries,
+        "valid_pcc_pair_count": total_pcc_pairs
+        if pcc_epoch_summaries else NOT_RECORDED,
+        "mean_fixed_index_part_distance": mean_pcc_distance,
         "validations": validations,
     }
 
@@ -1009,7 +1114,10 @@ def update_experiments_markdown(experiments_path, main_rows):
     fields = (
         "experiment_id", "run_id", "date", "commit", "branch", "method",
         "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
-        "seed", "lambda", "runtime_seconds", "best_epoch", "Rank-1",
+        "seed", "lambda", "cross_camera_positive_lambda", "pcc_lambda",
+        "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy",
+        "baseline", "valid_pcc_pair_count",
+        "mean_fixed_index_part_distance", "runtime_seconds", "best_epoch", "Rank-1",
         "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
         "status", "notes",
     )
@@ -1044,6 +1152,17 @@ def update_experiments_markdown(experiments_path, main_rows):
             "GPU": row["gpu"],
             "seed": row["seed"],
             "lambda": row["lambda"],
+            "cross_camera_positive_lambda": row["cross_camera_positive_lambda"],
+            "pcc_lambda": row["pcc_lambda"],
+            "pcc_enabled": row["pcc_enabled"],
+            "pcc_parts": row["pcc_parts"],
+            "pcc_mode": row["pcc_mode"],
+            "alignment_strategy": row["alignment_strategy"],
+            "baseline": row["baseline"],
+            "valid_pcc_pair_count": row["valid_pcc_pair_count"],
+            "mean_fixed_index_part_distance": row[
+                "mean_fixed_index_part_distance"
+            ],
             "runtime_seconds": row["runtime_seconds"],
             "best_epoch": row["best_epoch"],
             "Rank-1": row["rank1"],
@@ -1084,6 +1203,17 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "commit": manifest["commit_id"],
         "seed": manifest["seed"],
         "lambda": manifest["lambda"],
+        "cross_camera_positive_lambda": manifest.get(
+            "cross_camera_positive_lambda", manifest["lambda"]
+        ),
+        "pcc_lambda": manifest.get("pcc_lambda", NOT_RECORDED),
+        "pcc_enabled": manifest.get("pcc_enabled", False),
+        "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
+        "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
+        "alignment_strategy": manifest.get(
+            "alignment_strategy", NOT_RECORDED
+        ),
+        "baseline": manifest.get("baseline", NOT_RECORDED),
         "margin": manifest["margin"],
         "mode": manifest["mode"],
         "best_epoch": metrics["best_epoch"],
@@ -1100,6 +1230,8 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "log_path": metrics["log_path"],
         "log_sha256": metrics["log_sha256"],
         "output_dir": manifest["output_dir"],
+        "valid_pcc_pair_count": metrics["valid_pcc_pair_count"],
+        "mean_fixed_index_part_distance": metrics["mean_fixed_index_part_distance"],
         "status": "success",
         "notes": manifest["notes"],
     }
@@ -1160,7 +1292,28 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "same_camera_positive_count": anchor["same_camera_positive_count"],
         "commit": common["commit"],
     }
-    return common, lambda_row, same_row, caat_row, distance_row, anchor_row
+    pcc_row = {
+        "run_id": common["run_id"],
+        "experiment_id": common["experiment_id"],
+        "baseline": common["baseline"],
+        "pcc_enabled": common["pcc_enabled"],
+        "alignment_strategy": common["alignment_strategy"],
+        "pcc_parts": common["pcc_parts"],
+        "cross_camera_positive_lambda": common["cross_camera_positive_lambda"],
+        "pcc_lambda": common["pcc_lambda"],
+        "valid_pcc_pair_count": common["valid_pcc_pair_count"],
+        "mean_fixed_index_part_distance": common["mean_fixed_index_part_distance"],
+        "best_epoch": common["best_epoch"],
+        "rank1": common["rank1"],
+        "map": common["map"],
+        "runtime": common["runtime_seconds"],
+        "seed": common["seed"],
+        "commit": common["commit"],
+    }
+    return (
+        common, lambda_row, same_row, caat_row, distance_row, anchor_row,
+        pcc_row,
+    )
 
 
 def finalize_run(run_dir, records_root, repo_root, experiments_path,
@@ -1174,7 +1327,9 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if int(status.get("training_exit_code", -1)) != 0:
             raise EvidenceError("Training exit code is not zero")
         if verify_git:
-            current_git = git_metadata(repo_root)
+            current_git = git_metadata(
+                repo_root, allowed_dirty_paths=(run_dir,)
+            )
             if current_git["branch"] != manifest["branch"]:
                 raise EvidenceError("Branch changed between training and finalization")
             if current_git["commit"] != manifest["commit_id"]:
@@ -1277,6 +1432,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             raise EvidenceError("Enabled camera-aware loss is absent from log")
         if modules.get("cross_camera_positive") and not log_info["has_cross_camera_positive_loss"]:
             raise EvidenceError("Enabled cross-camera positive loss is absent from log")
+        if modules.get("part_correspondence_consistency"):
+            if not log_info["has_pcc_loss"]:
+                raise EvidenceError("Enabled PCC loss is absent from log")
+            if not log_info["pcc_epoch_summaries"]:
+                raise EvidenceError("Enabled PCC has no epoch pair statistics")
         validation_source = output_dir / "validation_history.jsonl"
         if validation_source.is_file():
             copy_file_atomic(validation_source, run_dir / "validation_history.jsonl")
@@ -1329,6 +1489,10 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "log_path": log_info["path"],
             "log_sha256": log_info["sha256"],
             "runtime_seconds": runtime_seconds,
+            "valid_pcc_pair_count": log_info["valid_pcc_pair_count"],
+            "mean_fixed_index_part_distance": log_info[
+                "mean_fixed_index_part_distance"
+            ],
             "run_dir": str(run_dir),
         }
         atomic_write_json(run_dir / "metrics_summary.json", metrics)
@@ -1337,7 +1501,9 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "distance_distribution": "complete",
             "anchor_coverage": "complete",
             "efficiency_profile": efficiency.get("status", NOT_RECORDED),
-            "analysis_commit": git_metadata(repo_root)["commit"] if verify_git else manifest["commit_id"],
+            "analysis_commit": git_metadata(
+                repo_root, allowed_dirty_paths=(run_dir,)
+            )["commit"] if verify_git else manifest["commit_id"],
             "analysis_time": utc_now(),
             "source_checkpoint_sha256": selected["sha256"],
             "training_evidence_separate_from_post_hoc_analysis": True,
@@ -1346,7 +1512,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         rows = _prepare_table_rows(
             manifest, metrics, environment, efficiency, distance, anchor
         )
-        common, lambda_row, same_row, caat_row, distance_row, anchor_row = rows
+        (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
+         pcc_row) = rows
         final_status = dict(status)
         final_status.update({
             "status": "success",
@@ -1378,6 +1545,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             tables_dir / "distance_distribution.csv", DISTANCE_FIELDS, distance_row
         )
         upsert_csv(tables_dir / "anchor_coverage.csv", ANCHOR_FIELDS, anchor_row)
+        if manifest.get("pcc_enabled", False):
+            upsert_csv(tables_dir / "pcc_ablation.csv", PCC_FIELDS, pcc_row)
         for table_name in TABLE_SCHEMAS:
             csv_to_markdown(
                 tables_dir / "{}.csv".format(table_name),
@@ -1389,7 +1558,19 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "method": manifest["method"], "dataset": manifest["dataset"],
             "branch": manifest["branch"], "commit_id": manifest["commit_id"],
             "config_file": manifest["config_file"], "seed": manifest["seed"],
-            "lambda": manifest["lambda"], "margin": manifest["margin"],
+            "lambda": manifest["lambda"],
+            "cross_camera_positive_lambda": manifest.get(
+                "cross_camera_positive_lambda", manifest["lambda"]
+            ),
+            "pcc_lambda": manifest.get("pcc_lambda", NOT_RECORDED),
+            "pcc_enabled": manifest.get("pcc_enabled", False),
+            "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
+            "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
+            "alignment_strategy": manifest.get(
+                "alignment_strategy", NOT_RECORDED
+            ),
+            "baseline": manifest.get("baseline", NOT_RECORDED),
+            "margin": manifest["margin"],
             "mode": manifest["mode"], "GPU": _gpu_label(environment),
             "start_time": manifest["start_time"], "end_time": final_status["end_time"],
             "runtime": runtime_seconds, "best_epoch": metrics["best_epoch"],
@@ -1400,6 +1581,10 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "checkpoint_sha256": selected["sha256"],
             "log_path": log_info["path"], "log_sha256": log_info["sha256"],
             "output_dir": manifest["output_dir"], "status": "success",
+            "valid_pcc_pair_count": metrics["valid_pcc_pair_count"],
+            "mean_fixed_index_part_distance": metrics[
+                "mean_fixed_index_part_distance"
+            ],
             "notes": manifest["notes"],
         }
         upsert_csv(records_root / "runs.csv", RUN_FIELDS, run_row)

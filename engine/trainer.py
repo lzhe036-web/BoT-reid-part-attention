@@ -39,7 +39,24 @@ def _loss_output_to_dict(loss_output):
         'loss_camera_triplet': loss_output.new_tensor(0.0),
         'loss_cross_camera_positive': loss_output.new_tensor(0.0),
         'cross_camera_positive_count': 0,
+        'loss_pcc': loss_output.new_tensor(0.0),
+        'valid_pcc_pair_count': 0,
+        'mean_fixed_index_part_distance': loss_output.new_tensor(0.0),
     }
+
+
+def _unpack_train_model_output(model_output):
+    if not isinstance(model_output, (tuple, list)):
+        raise RuntimeError("Training model output must be a tuple or list")
+    if len(model_output) == 2:
+        score, feat = model_output
+        return score, feat, None
+    if len(model_output) == 3:
+        score, feat, pcc_local_features = model_output
+        return score, feat, pcc_local_features
+    raise RuntimeError(
+        "Training model output must contain 2 values, or 3 when PCC is enabled"
+    )
 
 
 def _item(value):
@@ -75,8 +92,13 @@ def create_supervised_trainer(model, optimizer, loss_fn,
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
         camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
-        score, feat = model(img)
-        loss_output = loss_fn(score, feat, target, camids)
+        score, feat, pcc_local_features = _unpack_train_model_output(model(img))
+        if pcc_local_features is None:
+            loss_output = loss_fn(score, feat, target, camids)
+        else:
+            loss_output = loss_fn(
+                score, feat, target, camids, pcc_local_features
+            )
         loss, loss_dict = _loss_output_to_dict(loss_output)
         loss.backward()
         optimizer.step()
@@ -89,6 +111,11 @@ def create_supervised_trainer(model, optimizer, loss_fn,
             'loss_camera_triplet': _item(loss_dict['loss_camera_triplet']),
             'loss_cross_camera_positive': _item(loss_dict.get('loss_cross_camera_positive', loss_dict['loss_total'].new_tensor(0.0) if torch.is_tensor(loss_dict['loss_total']) else 0.0)),
             'cross_camera_positive_count': loss_dict['cross_camera_positive_count'],
+            'loss_pcc': _item(loss_dict.get('loss_pcc', 0.0)),
+            'valid_pcc_pair_count': loss_dict.get('valid_pcc_pair_count', 0),
+            'mean_fixed_index_part_distance': _item(
+                loss_dict.get('mean_fixed_index_part_distance', 0.0)
+            ),
             'acc': acc.item(),
         }
 
@@ -123,8 +150,13 @@ def create_supervised_trainer_with_center(model, center_criterion, optimizer, op
         img = img.to(device) if torch.cuda.device_count() >= 1 else img
         target = target.to(device) if torch.cuda.device_count() >= 1 else target
         camids = camids.to(device) if camids is not None and torch.cuda.device_count() >= 1 else camids
-        score, feat = model(img)
-        loss_output = loss_fn(score, feat, target, camids)
+        score, feat, pcc_local_features = _unpack_train_model_output(model(img))
+        if pcc_local_features is None:
+            loss_output = loss_fn(score, feat, target, camids)
+        else:
+            loss_output = loss_fn(
+                score, feat, target, camids, pcc_local_features
+            )
         loss, loss_dict = _loss_output_to_dict(loss_output)
         # print("Total loss is {}, center loss is {}".format(loss, center_criterion(feat, target)))
         loss.backward()
@@ -142,6 +174,11 @@ def create_supervised_trainer_with_center(model, center_criterion, optimizer, op
             'loss_camera_triplet': _item(loss_dict['loss_camera_triplet']),
             'loss_cross_camera_positive': _item(loss_dict.get('loss_cross_camera_positive', loss_dict['loss_total'].new_tensor(0.0) if torch.is_tensor(loss_dict['loss_total']) else 0.0)),
             'cross_camera_positive_count': loss_dict['cross_camera_positive_count'],
+            'loss_pcc': _item(loss_dict.get('loss_pcc', 0.0)),
+            'valid_pcc_pair_count': loss_dict.get('valid_pcc_pair_count', 0),
+            'mean_fixed_index_part_distance': _item(
+                loss_dict.get('mean_fixed_index_part_distance', 0.0)
+            ),
             'acc': acc.item(),
         }
 
@@ -227,6 +264,10 @@ def do_train(
     RunningAverage(output_transform=lambda x: x['loss_camera_triplet']).attach(trainer, 'avg_loss_camera_triplet')
     RunningAverage(output_transform=lambda x: x['loss_cross_camera_positive']).attach(trainer, 'avg_loss_cross_camera_positive')
     RunningAverage(output_transform=lambda x: x['cross_camera_positive_count']).attach(trainer, 'avg_cross_camera_positive_count')
+    if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+        RunningAverage(output_transform=lambda x: x['loss_pcc']).attach(trainer, 'avg_loss_pcc')
+        RunningAverage(output_transform=lambda x: x['valid_pcc_pair_count']).attach(trainer, 'avg_valid_pcc_pair_count')
+        RunningAverage(output_transform=lambda x: x['mean_fixed_index_part_distance']).attach(trainer, 'avg_mean_fixed_index_part_distance')
     RunningAverage(output_transform=lambda x: x['acc']).attach(trainer, 'avg_acc')
 
     @trainer.on(Events.STARTED)
@@ -236,29 +277,72 @@ def do_train(
     @trainer.on(Events.EPOCH_STARTED)
     def adjust_learning_rate(engine):
         scheduler.step()
+        if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+            engine.state.pcc_epoch_pair_count = 0
+            engine.state.pcc_epoch_distance_sum = 0.0
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
         global ITER
         ITER += 1
 
+        if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+            pair_count = int(engine.state.output['valid_pcc_pair_count'])
+            engine.state.pcc_epoch_pair_count += pair_count
+            engine.state.pcc_epoch_distance_sum += (
+                pair_count
+                * float(engine.state.output['mean_fixed_index_part_distance'])
+            )
+
         if ITER % log_period == 0:
-            logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
-                        "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
-                        "loss_cross_camera_positive: {:.3f}, "
-                        "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                        .format(engine.state.epoch, ITER, len(train_loader),
-                                engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
-                                engine.state.metrics['avg_loss_triplet'],
-                                engine.state.metrics['avg_loss_camera_triplet'],
-                                engine.state.metrics['avg_loss_cross_camera_positive'],
-                                engine.state.metrics['avg_cross_camera_positive_count'],
-                                engine.state.metrics['avg_acc'],
-                                scheduler.get_lr()[0]))
+            if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+                logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                            "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                            "loss_cross_camera_positive: {:.3f}, loss_pcc: {:.3f}, "
+                            "cross_camera_positive_count: {:.1f}, valid_pcc_pair_count: {:.1f}, "
+                            "mean_fixed_index_part_distance: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                            .format(engine.state.epoch, ITER, len(train_loader),
+                                    engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
+                                    engine.state.metrics['avg_loss_triplet'],
+                                    engine.state.metrics['avg_loss_camera_triplet'],
+                                    engine.state.metrics['avg_loss_cross_camera_positive'],
+                                    engine.state.metrics['avg_loss_pcc'],
+                                    engine.state.metrics['avg_cross_camera_positive_count'],
+                                    engine.state.metrics['avg_valid_pcc_pair_count'],
+                                    engine.state.metrics['avg_mean_fixed_index_part_distance'],
+                                    engine.state.metrics['avg_acc'],
+                                    scheduler.get_lr()[0]))
+            else:
+                logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                            "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                            "loss_cross_camera_positive: {:.3f}, "
+                            "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                            .format(engine.state.epoch, ITER, len(train_loader),
+                                    engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
+                                    engine.state.metrics['avg_loss_triplet'],
+                                    engine.state.metrics['avg_loss_camera_triplet'],
+                                    engine.state.metrics['avg_loss_cross_camera_positive'],
+                                    engine.state.metrics['avg_cross_camera_positive_count'],
+                                    engine.state.metrics['avg_acc'],
+                                    scheduler.get_lr()[0]))
             if (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY) and engine.state.output['cross_camera_positive_count'] == 0:
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
         if len(train_loader) == ITER:
             ITER = 0
+
+    if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+        @trainer.on(Events.EPOCH_COMPLETED)
+        def log_pcc_epoch_summary(engine):
+            pair_count = int(engine.state.pcc_epoch_pair_count)
+            mean_distance = (
+                engine.state.pcc_epoch_distance_sum / float(pair_count)
+                if pair_count else 0.0
+            )
+            logger.info(
+                "PCC Epoch Summary - Epoch: {} valid_pcc_pair_count: {} "
+                "mean_fixed_index_part_distance: {:.6f}"
+                .format(engine.state.epoch, pair_count, mean_distance)
+            )
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)
