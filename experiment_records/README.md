@@ -10,6 +10,8 @@ This directory is maintained by `tools/run_experiment.py` and
 - `tables/*.md` files are generated from the corresponding CSV files.
 - `tables/pcc_ablation.csv` records explicit cross-camera-positive and PCC
   weights separately for fixed-index PCC runs.
+- `tables/granularity_fusion_ablation.csv` compares the static fusion control
+  with per-sample dynamic gating and links trained-checkpoint gate evidence.
 
 Failed or incomplete runs remain under `runs/`, but they are not written to
 successful result tables. Historical rows outside the generated section of

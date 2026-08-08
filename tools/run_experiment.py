@@ -130,7 +130,10 @@ def _model_manifest(configuration, method=None,
     projection_dim = model.get("MULTI_GRANULARITY_DIM", NOT_RECORDED)
     multi_granularity_enabled = identity["modules"]["multi_granularity"]
     descriptor_dim = NOT_RECORDED
-    if (multi_granularity_enabled
+    fusion_enabled = identity["multi_granularity_fusion"]
+    if fusion_enabled:
+        descriptor_dim = identity["fusion_dimension"]
+    elif (multi_granularity_enabled
             and model.get("NAME") == "resnet50"
             and projection_dim != NOT_RECORDED):
         descriptor_dim = 2048 + len(scales) * int(projection_dim)
@@ -165,6 +168,18 @@ def _model_manifest(configuration, method=None,
         "multi_granularity_aggregation": model.get(
             "MULTI_GRANULARITY_AGGREGATION", NOT_RECORDED
         ),
+        "multi_granularity_fusion": fusion_enabled,
+        "fusion_mode": identity["fusion_mode"],
+        "dynamic_granularity_gating": identity[
+            "dynamic_granularity_gating"
+        ],
+        "fusion_dimension": identity["fusion_dimension"],
+        "gating_hidden_dimension": identity["gating_hidden_dimension"],
+        "component_count": identity["component_count"],
+        "static_parameter_count": identity["static_parameter_count"],
+        "dynamic_parameter_count": identity["dynamic_parameter_count"],
+        "gate_analysis_path": NOT_RECORDED,
+        "gate_analysis_sha256": NOT_RECORDED,
         "descriptor_dim": descriptor_dim,
         "total_params": NOT_RECORDED,
         "trainable_params": NOT_RECORDED,

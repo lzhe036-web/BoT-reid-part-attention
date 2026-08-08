@@ -115,6 +115,10 @@ def build_checkpoint_model(local_cfg, checkpoint, device):
         "none",
         part_attention=bool(local_cfg.MODEL.PART_ATTENTION),
         part_attention_parts=int(local_cfg.MODEL.PART_ATTENTION_PARTS),
+        part_correspondence_consistency=bool(
+            local_cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+        ),
+        pcc_parts=int(local_cfg.MODEL.PCC_PARTS),
         multi_granularity_local=bool(
             local_cfg.MODEL.MULTI_GRANULARITY_LOCAL
         ),
@@ -122,6 +126,18 @@ def build_checkpoint_model(local_cfg, checkpoint, device):
         multi_granularity_dim=int(local_cfg.MODEL.MULTI_GRANULARITY_DIM),
         multi_granularity_aggregation=(
             local_cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
+        ),
+        multi_granularity_fusion=bool(
+            local_cfg.MODEL.MULTI_GRANULARITY_FUSION
+        ),
+        multi_granularity_fusion_mode=(
+            local_cfg.MODEL.MULTI_GRANULARITY_FUSION_MODE
+        ),
+        multi_granularity_fusion_dim=int(
+            local_cfg.MODEL.MULTI_GRANULARITY_FUSION_DIM
+        ),
+        dynamic_gating_hidden_dim=int(
+            local_cfg.MODEL.DYNAMIC_GATING_HIDDEN_DIM
         ),
     )
     incompatibility = model.load_state_dict(state, strict=True)

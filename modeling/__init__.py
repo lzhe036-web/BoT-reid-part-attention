@@ -28,5 +28,13 @@ def build_model(cfg, num_classes):
         multi_granularity_aggregation=(
             cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
         ),
+        multi_granularity_fusion=cfg.MODEL.MULTI_GRANULARITY_FUSION,
+        multi_granularity_fusion_mode=(
+            cfg.MODEL.MULTI_GRANULARITY_FUSION_MODE
+        ),
+        multi_granularity_fusion_dim=(
+            cfg.MODEL.MULTI_GRANULARITY_FUSION_DIM
+        ),
+        dynamic_gating_hidden_dim=cfg.MODEL.DYNAMIC_GATING_HIDDEN_DIM,
     )
     return model

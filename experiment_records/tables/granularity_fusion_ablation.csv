@@ -1,0 +1,1 @@
+run_id,experiment_id,method,baseline,multi_granularity_fusion,fusion_mode,dynamic_granularity_gating,fusion_dimension,gating_hidden_dimension,component_count,static_parameter_count,dynamic_parameter_count,gate_analysis_path,gate_analysis_sha256,best_epoch,rank1,map,runtime,seed,commit

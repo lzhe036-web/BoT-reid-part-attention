@@ -13,6 +13,7 @@ from layers.part_correspondence_consistency import build_local_part_descriptors
 from .backbones.resnet import ResNet, BasicBlock, Bottleneck
 from .backbones.senet import SENet, SEResNetBottleneck, SEBottleneck, SEResNeXtBottleneck
 from .backbones.resnet_ibn_a import resnet50_ibn_a
+from .granularity_fusion import GranularityFusion
 from .multi_granularity_local import MultiGranularityLocalFeature
 
 
@@ -73,7 +74,11 @@ class Baseline(nn.Module):
                  part_correspondence_consistency=None, pcc_parts=None,
                  multi_granularity_local=None,
                  multi_granularity_scales=None, multi_granularity_dim=None,
-                 multi_granularity_aggregation=None):
+                 multi_granularity_aggregation=None,
+                 multi_granularity_fusion=None,
+                 multi_granularity_fusion_mode=None,
+                 multi_granularity_fusion_dim=None,
+                 dynamic_gating_hidden_dim=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -205,7 +210,35 @@ class Baseline(nn.Module):
             multi_granularity_aggregation = (
                 cfg.MODEL.MULTI_GRANULARITY_AGGREGATION
             )
+        if multi_granularity_fusion is None:
+            multi_granularity_fusion = (
+                cfg.MODEL.MULTI_GRANULARITY_FUSION
+            )
+        if multi_granularity_fusion_mode is None:
+            multi_granularity_fusion_mode = (
+                cfg.MODEL.MULTI_GRANULARITY_FUSION_MODE
+            )
+        if multi_granularity_fusion_dim is None:
+            multi_granularity_fusion_dim = (
+                cfg.MODEL.MULTI_GRANULARITY_FUSION_DIM
+            )
+        if dynamic_gating_hidden_dim is None:
+            dynamic_gating_hidden_dim = (
+                cfg.MODEL.DYNAMIC_GATING_HIDDEN_DIM
+            )
         self.multi_granularity_local = bool(multi_granularity_local)
+        self.multi_granularity_fusion = bool(multi_granularity_fusion)
+        self.multi_granularity_fusion_mode = str(
+            multi_granularity_fusion_mode
+        ).lower()
+        self.multi_granularity_fusion_dim = int(
+            multi_granularity_fusion_dim
+        )
+        self.dynamic_gating_hidden_dim = int(dynamic_gating_hidden_dim)
+        if self.multi_granularity_fusion and not self.multi_granularity_local:
+            raise ValueError(
+                "granularity fusion requires MULTI_GRANULARITY_LOCAL=True"
+            )
         self.descriptor_dim = self.in_planes
         if self.multi_granularity_local:
             self.multi_granularity_head = MultiGranularityLocalFeature(
@@ -214,7 +247,25 @@ class Baseline(nn.Module):
                 projection_dim=multi_granularity_dim,
                 aggregation=multi_granularity_aggregation,
             )
-            self.descriptor_dim += self.multi_granularity_head.output_dim
+            if self.multi_granularity_fusion:
+                if tuple(self.multi_granularity_head.scales) != (2, 4, 6):
+                    raise ValueError(
+                        "granularity fusion requires scales [2, 4, 6]"
+                    )
+                if (self.multi_granularity_head.projection_dim !=
+                        self.multi_granularity_fusion_dim):
+                    raise ValueError(
+                        "local projection and fusion dimensions must match"
+                    )
+                self.granularity_fusion = GranularityFusion(
+                    global_dim=self.in_planes,
+                    fusion_dim=self.multi_granularity_fusion_dim,
+                    hidden_dim=self.dynamic_gating_hidden_dim,
+                    mode=self.multi_granularity_fusion_mode,
+                )
+                self.descriptor_dim = self.multi_granularity_fusion_dim
+            else:
+                self.descriptor_dim += self.multi_granularity_head.output_dim
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.descriptor_dim, self.num_classes)
@@ -228,7 +279,8 @@ class Baseline(nn.Module):
             self.bottleneck.apply(weights_init_kaiming)
             self.classifier.apply(weights_init_classifier)
 
-    def _forward_impl(self, x, return_shape_trace=False):
+    def _forward_impl(self, x, return_shape_trace=False,
+                      return_fusion_details=False):
         feature_map = self.base(x)
         global_feat = self.gap(feature_map)  # (b, 2048, 1, 1)
         global_feat = global_feat.view(global_feat.shape[0], -1)  # flatten to (bs, 2048)
@@ -248,6 +300,7 @@ class Baseline(nn.Module):
                 global_feat.shape
             )
 
+        fusion_details = None
         if self.multi_granularity_local:
             local_features, local_details = self.multi_granularity_head(
                 feature_map, return_details=True
@@ -263,7 +316,25 @@ class Baseline(nn.Module):
                     shape_trace['k{}_aggregated'.format(scale)] = tuple(
                         details['aggregated'].shape
                     )
-            global_feat = torch.cat((global_feat,) + local_features, dim=1)
+            if self.multi_granularity_fusion:
+                global_feat, fusion_details = self.granularity_fusion(
+                    global_feat, local_features, return_details=True
+                )
+                if return_shape_trace:
+                    shape_trace['fusion_components'] = tuple(
+                        fusion_details['components'].shape
+                    )
+                    shape_trace['fusion_weights'] = tuple(
+                        fusion_details['weights'].shape
+                    )
+                    shape_trace['fusion_descriptor'] = tuple(
+                        global_feat.shape
+                    )
+                    shape_trace['fusion_mode'] = fusion_details['mode']
+            else:
+                global_feat = torch.cat(
+                    (global_feat,) + local_features, dim=1
+                )
         if return_shape_trace:
             shape_trace['concat_feature'] = tuple(global_feat.shape)
 
@@ -296,6 +367,10 @@ class Baseline(nn.Module):
                 result = global_feat
         if return_shape_trace:
             return result, shape_trace
+        if return_fusion_details:
+            if fusion_details is None:
+                raise RuntimeError("granularity fusion is not enabled")
+            return result, fusion_details
         return result
 
     def forward(self, x):
@@ -304,6 +379,10 @@ class Baseline(nn.Module):
     def forward_with_shape_trace(self, x):
         """Synthetic-validation helper; the formal training path never calls it."""
         return self._forward_impl(x, return_shape_trace=True)
+
+    def forward_with_granularity_details(self, x):
+        """Read-only analysis path returning descriptor and fusion weights."""
+        return self._forward_impl(x, return_fusion_details=True)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

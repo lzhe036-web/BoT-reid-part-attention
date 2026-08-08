@@ -48,7 +48,11 @@ MAIN_FIELDS = (
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
     "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
     "log_sha256", "output_dir", "valid_pcc_pair_count",
-    "mean_fixed_index_part_distance", "status", "notes",
+    "mean_fixed_index_part_distance", "multi_granularity_fusion",
+    "fusion_mode", "dynamic_granularity_gating", "fusion_dimension",
+    "gating_hidden_dimension", "component_count", "static_parameter_count",
+    "dynamic_parameter_count", "gate_analysis_path",
+    "gate_analysis_sha256", "status", "notes",
 )
 LAMBDA_FIELDS = (
     "run_id", "experiment_id", "method", "dataset", "lambda", "seed",
@@ -84,6 +88,15 @@ PCC_FIELDS = (
     "mean_fixed_index_part_distance", "best_epoch", "rank1", "map",
     "runtime", "seed", "commit",
 )
+FUSION_FIELDS = (
+    "run_id", "experiment_id", "method", "baseline",
+    "multi_granularity_fusion", "fusion_mode",
+    "dynamic_granularity_gating", "fusion_dimension",
+    "gating_hidden_dimension", "component_count", "static_parameter_count",
+    "dynamic_parameter_count", "gate_analysis_path",
+    "gate_analysis_sha256", "best_epoch", "rank1", "map", "runtime",
+    "seed", "commit",
+)
 RUN_FIELDS = (
     "run_id", "experiment_id", "experiment_family", "method", "dataset",
     "branch", "commit_id", "config_file", "seed", "lambda",
@@ -92,7 +105,12 @@ RUN_FIELDS = (
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
     "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
-    "valid_pcc_pair_count", "mean_fixed_index_part_distance", "notes",
+    "valid_pcc_pair_count", "mean_fixed_index_part_distance",
+    "multi_granularity_fusion", "fusion_mode",
+    "dynamic_granularity_gating", "fusion_dimension",
+    "gating_hidden_dimension", "component_count", "static_parameter_count",
+    "dynamic_parameter_count", "gate_analysis_path",
+    "gate_analysis_sha256", "notes",
 )
 EVIDENCE_FIELDS = (
     "run_id", "artifact_type", "path", "size_bytes", "sha256",
@@ -106,6 +124,7 @@ TABLE_SCHEMAS = {
     "distance_distribution": DISTANCE_FIELDS,
     "anchor_coverage": ANCHOR_FIELDS,
     "pcc_ablation": PCC_FIELDS,
+    "granularity_fusion_ablation": FUSION_FIELDS,
 }
 
 
@@ -223,11 +242,70 @@ def config_modules(configuration):
         "part_correspondence_consistency": enabled((
             "MODEL.PART_CORRESPONDENCE_CONSISTENCY",
         )),
+        "multi_granularity_fusion": enabled((
+            "MODEL.MULTI_GRANULARITY_FUSION",
+        )),
+        "dynamic_granularity_gating": (
+            enabled(("MODEL.MULTI_GRANULARITY_FUSION",))
+            and str(nested_value(
+                configuration,
+                "MODEL.MULTI_GRANULARITY_FUSION_MODE",
+                "",
+            )).lower() == "dynamic"
+        ),
+        "camera_conditional_part_attention": enabled((
+            "MODEL.CAMERA_CONDITIONAL_PART_ATTENTION",
+        )),
+    }
+
+
+def granularity_fusion_metadata(configuration):
+    modules = config_modules(configuration)
+    enabled = modules["multi_granularity_fusion"]
+    if not enabled:
+        return {
+            "multi_granularity_fusion": False,
+            "fusion_mode": NOT_RECORDED,
+            "dynamic_granularity_gating": False,
+            "fusion_dimension": NOT_RECORDED,
+            "gating_hidden_dimension": NOT_RECORDED,
+            "component_count": NOT_RECORDED,
+            "static_parameter_count": NOT_RECORDED,
+            "dynamic_parameter_count": NOT_RECORDED,
+        }
+    fusion_dim = int(nested_value(
+        configuration, "MODEL.MULTI_GRANULARITY_FUSION_DIM"
+    ))
+    hidden_dim = int(nested_value(
+        configuration, "MODEL.DYNAMIC_GATING_HIDDEN_DIM"
+    ))
+    model_name = str(nested_value(configuration, "MODEL.NAME", "resnet50"))
+    global_dim = 512 if model_name in ("resnet18", "resnet34") else 2048
+    component_count = 4
+    global_projection = global_dim * fusion_dim + fusion_dim
+    static_count = global_projection + component_count
+    dynamic_count = global_projection + (
+        component_count * fusion_dim * hidden_dim + hidden_dim
+        + hidden_dim * component_count + component_count
+    )
+    mode = str(nested_value(
+        configuration, "MODEL.MULTI_GRANULARITY_FUSION_MODE"
+    )).lower()
+    return {
+        "multi_granularity_fusion": True,
+        "fusion_mode": mode,
+        "dynamic_granularity_gating": mode == "dynamic",
+        "fusion_dimension": fusion_dim,
+        "gating_hidden_dimension": hidden_dim,
+        "component_count": component_count,
+        "static_parameter_count": static_count,
+        "dynamic_parameter_count": dynamic_count,
     }
 
 
 def experiment_identity(configuration):
     modules = config_modules(configuration)
+    fusion = granularity_fusion_metadata(configuration)
     if modules["same_camera_positive"]:
         method = "Same-camera positive only"
         variant = "same_camera_positive"
@@ -264,6 +342,19 @@ def experiment_identity(configuration):
         method = "C2-L03 + Fixed-Index Part Correspondence Consistency"
         variant = "fixed_index_pcc"
         relation = "same_pid_different_camera_same_index"
+    elif fusion["multi_granularity_fusion"]:
+        if fusion["fusion_mode"] == "static":
+            method = "C2-L03 + Multi-Granularity Static Fusion"
+            variant = "multi_granularity_static_fusion"
+        elif fusion["fusion_mode"] == "dynamic":
+            method = "C2-L03 + Dynamic Granularity Gating"
+            variant = "dynamic_granularity_gating"
+        else:
+            raise EvidenceError(
+                "Unsupported granularity fusion mode: {}".format(
+                    fusion["fusion_mode"]
+                )
+            )
     elif modules["multi_granularity"] and modules["cross_camera_positive"]:
         method = (
             "C2-L03 + Multi-Granularity Local Feature "
@@ -295,6 +386,16 @@ def experiment_identity(configuration):
         if pcc_enabled else NOT_RECORDED,
         "pcc_mode": pcc_mode if pcc_enabled else NOT_RECORDED,
         "alignment_strategy": pcc_mode if pcc_enabled else NOT_RECORDED,
+        "multi_granularity_fusion": fusion["multi_granularity_fusion"],
+        "fusion_mode": fusion["fusion_mode"],
+        "dynamic_granularity_gating": fusion[
+            "dynamic_granularity_gating"
+        ],
+        "fusion_dimension": fusion["fusion_dimension"],
+        "gating_hidden_dimension": fusion["gating_hidden_dimension"],
+        "component_count": fusion["component_count"],
+        "static_parameter_count": fusion["static_parameter_count"],
+        "dynamic_parameter_count": fusion["dynamic_parameter_count"],
     }
 
 
@@ -567,6 +668,20 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "pcc_mode": identity["pcc_mode"],
         "alignment_strategy": identity["alignment_strategy"],
         "baseline": identity["baseline"],
+        "multi_granularity_fusion": identity[
+            "multi_granularity_fusion"
+        ],
+        "fusion_mode": identity["fusion_mode"],
+        "dynamic_granularity_gating": identity[
+            "dynamic_granularity_gating"
+        ],
+        "fusion_dimension": identity["fusion_dimension"],
+        "gating_hidden_dimension": identity["gating_hidden_dimension"],
+        "component_count": identity["component_count"],
+        "static_parameter_count": identity["static_parameter_count"],
+        "dynamic_parameter_count": identity["dynamic_parameter_count"],
+        "gate_analysis_path": NOT_RECORDED,
+        "gate_analysis_sha256": NOT_RECORDED,
         "margin": identity["margin"],
         "mode": identity["mode"],
         "modules": identity["modules"],
@@ -1252,6 +1367,21 @@ def _run_analysis_tools(repo_root, run_dir, manifest, selected_checkpoint):
             efficiency_path,
             efficiency_placeholder("efficiency profiler failed"),
         )
+    if manifest.get("dynamic_granularity_gating", False):
+        gate_summary_path = run_dir / "granularity_gating_summary.json"
+        gate_csv_path = run_dir / "granularity_gating_per_sample.csv"
+        gate_command = [
+            sys.executable,
+            str(Path(repo_root) / "tools" / "analyze_granularity_gating.py"),
+            "--config", config_path,
+            "--checkpoint", selected_checkpoint["path"],
+            "--output-dir", str(run_dir),
+            "--split", "all",
+        ]
+        gate = subprocess.run(gate_command, cwd=str(repo_root), check=False)
+        if (gate.returncode != 0 or not gate_summary_path.is_file()
+                or not gate_csv_path.is_file()):
+            raise EvidenceError("Dynamic granularity gate analysis failed")
 
 
 def _artifact_rows(run_dir, log_info, selected_checkpoint, final_status):
@@ -1307,7 +1437,12 @@ def update_experiments_markdown(experiments_path, main_rows):
         "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
         "seed", "lambda", "cross_camera_positive_lambda", "pcc_lambda",
         "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy",
-        "baseline", "valid_pcc_pair_count",
+        "baseline", "multi_granularity_fusion", "fusion_mode",
+        "dynamic_granularity_gating", "fusion_dimension",
+        "gating_hidden_dimension", "component_count",
+        "static_parameter_count", "dynamic_parameter_count",
+        "gate_analysis_path", "gate_analysis_sha256",
+        "valid_pcc_pair_count",
         "mean_fixed_index_part_distance", "runtime_seconds", "best_epoch", "Rank-1",
         "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
         "status", "notes",
@@ -1350,6 +1485,32 @@ def update_experiments_markdown(experiments_path, main_rows):
             "pcc_mode": row["pcc_mode"],
             "alignment_strategy": row["alignment_strategy"],
             "baseline": row["baseline"],
+            "multi_granularity_fusion": row.get(
+                "multi_granularity_fusion", NOT_RECORDED
+            ),
+            "fusion_mode": row.get("fusion_mode", NOT_RECORDED),
+            "dynamic_granularity_gating": row.get(
+                "dynamic_granularity_gating", NOT_RECORDED
+            ),
+            "fusion_dimension": row.get(
+                "fusion_dimension", NOT_RECORDED
+            ),
+            "gating_hidden_dimension": row.get(
+                "gating_hidden_dimension", NOT_RECORDED
+            ),
+            "component_count": row.get("component_count", NOT_RECORDED),
+            "static_parameter_count": row.get(
+                "static_parameter_count", NOT_RECORDED
+            ),
+            "dynamic_parameter_count": row.get(
+                "dynamic_parameter_count", NOT_RECORDED
+            ),
+            "gate_analysis_path": row.get(
+                "gate_analysis_path", NOT_RECORDED
+            ),
+            "gate_analysis_sha256": row.get(
+                "gate_analysis_sha256", NOT_RECORDED
+            ),
             "valid_pcc_pair_count": row["valid_pcc_pair_count"],
             "mean_fixed_index_part_distance": row[
                 "mean_fixed_index_part_distance"
@@ -1423,6 +1584,32 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "output_dir": manifest["output_dir"],
         "valid_pcc_pair_count": metrics["valid_pcc_pair_count"],
         "mean_fixed_index_part_distance": metrics["mean_fixed_index_part_distance"],
+        "multi_granularity_fusion": manifest.get(
+            "multi_granularity_fusion", False
+        ),
+        "fusion_mode": manifest.get("fusion_mode", NOT_RECORDED),
+        "dynamic_granularity_gating": manifest.get(
+            "dynamic_granularity_gating", False
+        ),
+        "fusion_dimension": manifest.get(
+            "fusion_dimension", NOT_RECORDED
+        ),
+        "gating_hidden_dimension": manifest.get(
+            "gating_hidden_dimension", NOT_RECORDED
+        ),
+        "component_count": manifest.get("component_count", NOT_RECORDED),
+        "static_parameter_count": manifest.get(
+            "static_parameter_count", NOT_RECORDED
+        ),
+        "dynamic_parameter_count": manifest.get(
+            "dynamic_parameter_count", NOT_RECORDED
+        ),
+        "gate_analysis_path": manifest.get(
+            "gate_analysis_path", NOT_RECORDED
+        ),
+        "gate_analysis_sha256": manifest.get(
+            "gate_analysis_sha256", NOT_RECORDED
+        ),
         "status": "success",
         "notes": manifest["notes"],
     }
@@ -1501,9 +1688,33 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "seed": common["seed"],
         "commit": common["commit"],
     }
+    fusion_row = {
+        "run_id": common["run_id"],
+        "experiment_id": common["experiment_id"],
+        "method": common["method"],
+        "baseline": common["baseline"],
+        "multi_granularity_fusion": common["multi_granularity_fusion"],
+        "fusion_mode": common["fusion_mode"],
+        "dynamic_granularity_gating": common[
+            "dynamic_granularity_gating"
+        ],
+        "fusion_dimension": common["fusion_dimension"],
+        "gating_hidden_dimension": common["gating_hidden_dimension"],
+        "component_count": common["component_count"],
+        "static_parameter_count": common["static_parameter_count"],
+        "dynamic_parameter_count": common["dynamic_parameter_count"],
+        "gate_analysis_path": common["gate_analysis_path"],
+        "gate_analysis_sha256": common["gate_analysis_sha256"],
+        "best_epoch": common["best_epoch"],
+        "rank1": common["rank1"],
+        "map": common["map"],
+        "runtime": common["runtime_seconds"],
+        "seed": common["seed"],
+        "commit": common["commit"],
+    }
     return (
         common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-        pcc_row,
+        pcc_row, fusion_row,
     )
 
 
@@ -1670,6 +1881,28 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         )
         if run_analyses:
             _run_analysis_tools(repo_root, run_dir, manifest, selected)
+        if manifest.get("dynamic_granularity_gating", False):
+            gate_summary_path = run_dir / "granularity_gating_summary.json"
+            gate_csv_path = run_dir / "granularity_gating_per_sample.csv"
+            if not gate_summary_path.is_file() or not gate_csv_path.is_file():
+                raise EvidenceError(
+                    "Dynamic gating requires per-sample CSV and summary JSON"
+                )
+            gate_summary = read_json(gate_summary_path)
+            if gate_summary.get("checkpoint_sha256") != selected["sha256"]:
+                raise EvidenceError(
+                    "Gate analysis checkpoint hash does not match selection"
+                )
+            if gate_summary.get("per_sample_csv_sha256") != sha256_file(
+                    gate_csv_path):
+                raise EvidenceError("Gate analysis CSV hash is inconsistent")
+            manifest["gate_analysis_path"] = normalized_path(
+                gate_summary_path.resolve()
+            )
+            manifest["gate_analysis_sha256"] = sha256_file(
+                gate_summary_path
+            )
+            atomic_write_json(run_dir / "run_manifest.json", manifest)
         anchor = validate_anchor_coverage(read_json(run_dir / "anchor_coverage.json"))
         distance = validate_distance_distribution(
             read_json(run_dir / "distance_distribution.json")
@@ -1686,6 +1919,12 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "MACs": efficiency.get("MACs", NOT_RECORDED),
             "selected_checkpoint_sha256": selected["sha256"],
             "efficiency_profile": "efficiency_profile.json",
+            "gate_analysis_path": manifest.get(
+                "gate_analysis_path", NOT_RECORDED
+            ),
+            "gate_analysis_sha256": manifest.get(
+                "gate_analysis_sha256", NOT_RECORDED
+            ),
         })
         atomic_write_json(run_dir / "model_manifest.json", model_manifest)
         runtime_seconds = float(status["training_runtime_seconds"])
@@ -1719,8 +1958,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "distance_distribution": "complete",
             "anchor_coverage": "complete",
             "efficiency_profile": efficiency.get("status", NOT_RECORDED),
-            "analysis_commit": git_metadata(
-                repo_root, allowed_dirty_paths=(run_dir,)
+            "analysis_commit": validate_git_runtime_state(
+                repo_root,
+                run_dir,
+                expected_branch=manifest["branch"],
+                expected_commit=manifest["commit_id"],
             )["commit"] if verify_git else manifest["commit_id"],
             "analysis_time": utc_now(),
             "source_checkpoint_sha256": selected["sha256"],
@@ -1731,7 +1973,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             manifest, metrics, environment, efficiency, distance, anchor
         )
         (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-         pcc_row) = rows
+         pcc_row, fusion_row) = rows
         final_status = dict(status)
         final_status.update({
             "status": "success",
@@ -1765,6 +2007,12 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         upsert_csv(tables_dir / "anchor_coverage.csv", ANCHOR_FIELDS, anchor_row)
         if manifest.get("pcc_enabled", False):
             upsert_csv(tables_dir / "pcc_ablation.csv", PCC_FIELDS, pcc_row)
+        if manifest.get("multi_granularity_fusion", False):
+            upsert_csv(
+                tables_dir / "granularity_fusion_ablation.csv",
+                FUSION_FIELDS,
+                fusion_row,
+            )
         for table_name in TABLE_SCHEMAS:
             csv_to_markdown(
                 tables_dir / "{}.csv".format(table_name),
@@ -1803,6 +2051,34 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "mean_fixed_index_part_distance": metrics[
                 "mean_fixed_index_part_distance"
             ],
+            "multi_granularity_fusion": manifest.get(
+                "multi_granularity_fusion", False
+            ),
+            "fusion_mode": manifest.get("fusion_mode", NOT_RECORDED),
+            "dynamic_granularity_gating": manifest.get(
+                "dynamic_granularity_gating", False
+            ),
+            "fusion_dimension": manifest.get(
+                "fusion_dimension", NOT_RECORDED
+            ),
+            "gating_hidden_dimension": manifest.get(
+                "gating_hidden_dimension", NOT_RECORDED
+            ),
+            "component_count": manifest.get(
+                "component_count", NOT_RECORDED
+            ),
+            "static_parameter_count": manifest.get(
+                "static_parameter_count", NOT_RECORDED
+            ),
+            "dynamic_parameter_count": manifest.get(
+                "dynamic_parameter_count", NOT_RECORDED
+            ),
+            "gate_analysis_path": manifest.get(
+                "gate_analysis_path", NOT_RECORDED
+            ),
+            "gate_analysis_sha256": manifest.get(
+                "gate_analysis_sha256", NOT_RECORDED
+            ),
             "notes": manifest["notes"],
         }
         upsert_csv(records_root / "runs.csv", RUN_FIELDS, run_row)

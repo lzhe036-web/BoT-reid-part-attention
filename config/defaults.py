@@ -56,6 +56,15 @@ _C.MODEL.MULTI_GRANULARITY_LOCAL = False
 _C.MODEL.MULTI_GRANULARITY_SCALES = [2, 4, 6]
 _C.MODEL.MULTI_GRANULARITY_DIM = 256
 _C.MODEL.MULTI_GRANULARITY_AGGREGATION = "mean"
+# Fuse Global/K2/K4/K6 into one descriptor. Disabled by default so legacy
+# multi-granularity concatenation and all historical experiments are unchanged.
+_C.MODEL.MULTI_GRANULARITY_FUSION = False
+_C.MODEL.MULTI_GRANULARITY_FUSION_MODE = "static"
+_C.MODEL.MULTI_GRANULARITY_FUSION_DIM = 256
+_C.MODEL.DYNAMIC_GATING_HIDDEN_DIM = 256
+# Parallel-A is intentionally not implemented here; this flag exists so the
+# independent Parallel-B experiment configs can explicitly prove it is off.
+_C.MODEL.CAMERA_CONDITIONAL_PART_ATTENTION = False
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5
