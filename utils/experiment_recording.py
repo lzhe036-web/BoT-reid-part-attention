@@ -1511,6 +1511,19 @@ LOG_ITERATION_RE = re.compile(
     r"Epoch\[(?P<epoch>\d+)\]\s+Iteration\["
     r"(?P<iteration>\d+)/(?P<iterations_per_epoch>\d+)\]"
 )
+RECORDER_COMPLETION_RE = re.compile(
+    r"^\[experiment recorder\] ended_at_utc=(?P<ended_at_utc>[^,]+), "
+    r"exit_code=(?P<exit_code>-?\d+), "
+    r"pre_finalization_elapsed_seconds=(?P<total_runtime>[0-9.eE+-]+), "
+    r"environment_collection_runtime_seconds=(?P<environment_runtime>[0-9.eE+-]+), "
+    r"profiling_runtime_seconds=(?P<profiling_runtime>[0-9.eE+-]+), "
+    r"training_runtime_seconds=(?P<training_runtime>[0-9.eE+-]+), "
+    r"runtime_source=time\.monotonic$"
+)
+KNOWN_CONFIG_FINALIZATION_ERROR = (
+    "resolved config protocol mismatch: MODEL.IF_LABELSMOOTH "
+    "expected 'on', got True"
+)
 
 
 def _positive_evidence_integer(value, label):
@@ -1622,6 +1635,104 @@ def _structured_iteration_evidence(output):
         dataset["train_loader_batches"],
         "dataset_manifest.json train_loader_batches",
     )
+
+
+def _reconcile_training_exit_code(output, manifest, status, log_path):
+    """Recover a training success overwritten by the known finalization bug."""
+    manifest_exit = manifest.get("exit_code")
+    status_exit = status.get("exit_code")
+    if manifest_exit == 0 and status_exit == 0:
+        return None
+    if type(manifest_exit) is not int or type(status_exit) is not int:
+        raise EvidenceIncompleteError("Recovery exit_code fields must be integers")
+    if manifest_exit != status_exit:
+        raise EvidenceIncompleteError(
+            "Recovery manifest/status exit_code mismatch"
+        )
+    errors = status.get("errors")
+    if not isinstance(errors, list) or KNOWN_CONFIG_FINALIZATION_ERROR not in errors:
+        raise EvidenceIncompleteError(
+            "Nonzero exit_code lacks the known post-training finalization error"
+        )
+
+    completions = []
+    with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_number, line in enumerate(handle, 1):
+            match = RECORDER_COMPLETION_RE.fullmatch(line.strip())
+            if match is not None:
+                completion = match.groupdict()
+                completion["line_number"] = line_number
+                completions.append(completion)
+    if len(completions) != 1:
+        raise EvidenceIncompleteError(
+            "Recovery requires exactly one recorder completion record"
+        )
+    completion = completions[0]
+    if int(completion["exit_code"]) != 0:
+        raise EvidenceIncompleteError(
+            "Recorder completion does not prove a zero training exit code"
+        )
+    if completion["ended_at_utc"] != manifest.get("ended_at_utc") or (
+            completion["ended_at_utc"] != status.get("ended_at_utc")):
+        raise EvidenceIncompleteError(
+            "Recorder completion ended_at_utc does not match run state"
+        )
+
+    runtime_fields = (
+        ("environment_runtime", "environment_collection_runtime_seconds"),
+        ("profiling_runtime", "profiling_runtime_seconds"),
+        ("training_runtime", "training_runtime_seconds"),
+    )
+    for log_field, state_field in runtime_fields:
+        _require_close(
+            float(completion[log_field]),
+            manifest.get(state_field),
+            "recorder completion {}".format(state_field),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+        _require_close(
+            status.get(state_field),
+            manifest.get(state_field),
+            "run_status {}".format(state_field),
+        )
+    pre_finalization_elapsed = _finite_number(
+        float(completion["total_runtime"]),
+        "recorder completion pre_finalization_elapsed_seconds",
+        positive=True,
+    )
+    recorded_total = _finite_number(
+        manifest.get("total_run_runtime_seconds"),
+        "total_run_runtime_seconds",
+        positive=True,
+    )
+    _require_close(
+        status.get("total_run_runtime_seconds"),
+        recorded_total,
+        "run_status total_run_runtime_seconds",
+    )
+    if recorded_total < pre_finalization_elapsed or (
+            recorded_total - pre_finalization_elapsed > 5.0):
+        raise EvidenceIncompleteError(
+            "Recorder completion elapsed time is incompatible with run state"
+        )
+
+    audit = {
+        "schema_version": 1,
+        "source": "log.txt experiment recorder completion",
+        "log_path": os.path.relpath(str(log_path), str(output)).replace("\\", "/"),
+        "log_sha256": sha256_file(log_path),
+        "log_line_number": int(completion["line_number"]),
+        "manifest_exit_code_before_recovery": manifest_exit,
+        "status_exit_code_before_recovery": status_exit,
+        "reconciled_training_exit_code": 0,
+        "known_finalization_error": KNOWN_CONFIG_FINALIZATION_ERROR,
+    }
+    for item in (manifest, status):
+        item["exit_code"] = 0
+        item["status"] = "training_succeeded_pending_evidence"
+        item["training_exit_code_reconciliation"] = audit
+    return audit
 
 
 def _iterations_per_epoch(output, validation_records):
@@ -2745,6 +2856,19 @@ def _git_commit_object_exists(repo_root, commit):
     return completed.returncode == 0
 
 
+def _git_commit_is_ancestor(repo_root, ancestor, descendant):
+    completed = subprocess.run(
+        [
+            "git", "-C", str(repo_root), "merge-base", "--is-ancestor",
+            str(ancestor), str(descendant),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def _git_blob_sha256(repo_root, commit, relative_path):
     try:
         content = subprocess.check_output(
@@ -2908,16 +3032,51 @@ def recover_existing_run(output_dir, record_dir, repo_root,
     selected_hash = sha256_file(selected_path)
     if selected_hash != selected_checkpoint["sha256"]:
         raise EvidenceIncompleteError("Recovery selected checkpoint SHA256 mismatch")
+    exit_code_reconciliation = _reconcile_training_exit_code(
+        output, manifest, status, log_path
+    )
 
     resolved_path = output / "config_resolved.yml"
     backup_path = output / "config_resolved.pre_type_fix.yml"
     repair_path = output / "config_repair_manifest.json"
     if repair_path.is_file():
         repair = read_json(repair_path)
+        repair_commit = repair.get("repair_code_commit")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(repair_commit)) or (
+                not _git_commit_object_exists(repo, repair_commit)):
+            raise EvidenceIncompleteError(
+                "Config repair commit is missing or invalid"
+            )
+        if not _git_commit_is_ancestor(
+                repo, repair_commit, finalization_commit):
+            raise EvidenceIncompleteError(
+                "Current recovery commit does not descend from config repair commit"
+            )
         _validate_repaired_config_state(
-            output, manifest, reproducibility, efficiency, repair,
-            finalization_commit,
+            output, manifest, reproducibility, efficiency, repair, repair_commit,
         )
+        attempts = repair.get("recovery_attempt_commits")
+        if attempts is None:
+            attempts = [repair_commit]
+        if not isinstance(attempts, list) or not all(
+                re.fullmatch(r"[0-9a-f]{40}", str(item)) for item in attempts):
+            raise EvidenceIncompleteError(
+                "Config repair recovery_attempt_commits is invalid"
+            )
+        if finalization_commit not in attempts:
+            attempts.append(finalization_commit)
+        repair["recovery_attempt_commits"] = attempts
+        if exit_code_reconciliation is not None:
+            repair["training_exit_code_reconciliation"] = (
+                exit_code_reconciliation
+            )
+        manifest["finalization_commit"] = finalization_commit
+        manifest["finalization_mode"] = "recover_existing_run"
+        status["finalization_commit"] = finalization_commit
+        status["finalization_mode"] = "recover_existing_run"
+        atomic_write_json(output / "run_manifest.json", manifest)
+        atomic_write_json(output / "run_status.json", status)
+        atomic_write_json(repair_path, repair)
     else:
         if backup_path.exists():
             raise EvidenceIncompleteError(
@@ -2984,6 +3143,7 @@ def recover_existing_run(output_dir, record_dir, repo_root,
             "training_commit": training_commit,
             "finalization_commit": finalization_commit,
             "repair_code_commit": finalization_commit,
+            "recovery_attempt_commits": [finalization_commit],
             "source_config": {
                 "path": str(source_path),
                 "sha256": source_hash,
@@ -3009,6 +3169,10 @@ def recover_existing_run(output_dir, record_dir, repo_root,
             },
             "training_artifacts_modified": False,
         }
+        if exit_code_reconciliation is not None:
+            repair["training_exit_code_reconciliation"] = (
+                exit_code_reconciliation
+            )
         atomic_write_json(output / "run_manifest.json", manifest)
         atomic_write_json(output / "run_status.json", status)
         atomic_write_json(output / "reproducibility.json", reproducibility)

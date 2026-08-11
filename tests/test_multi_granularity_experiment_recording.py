@@ -720,6 +720,32 @@ def make_recovery_fixture(root):
     return output, training_commit, finalization_commit, broken_text.encode("utf-8")
 
 
+def mark_known_post_training_finalization_failure(output):
+    manifest_path = output / "run_manifest.json"
+    status_path = output / "run_status.json"
+    manifest = recording.read_json(manifest_path)
+    status = recording.read_json(status_path)
+    manifest["exit_code"] = 1
+    manifest["status"] = "failed"
+    status["exit_code"] = 1
+    status["status"] = "failed"
+    status["errors"] = [recording.KNOWN_CONFIG_FINALIZATION_ERROR]
+    atomic_write_json(manifest_path, manifest)
+    atomic_write_json(status_path, status)
+    log_path = output / "log.txt"
+    existing = log_path.read_text(encoding="utf-8")
+    completion = (
+        "[experiment recorder] ended_at_utc={}, exit_code=0, "
+        "pre_finalization_elapsed_seconds=19.500000, "
+        "environment_collection_runtime_seconds=1.500000, "
+        "profiling_runtime_seconds=5.000000, "
+        "training_runtime_seconds=12.500000, "
+        "runtime_source=time.monotonic\n"
+    ).format(manifest["ended_at_utc"])
+    if completion not in existing:
+        atomic_write_text(log_path, existing + completion)
+
+
 def make_checkpoint_binding_fixture(root, records=None, checkpoint_iterations=None,
                                     log_iterations_per_epoch=186,
                                     structured_iterations_per_epoch=186):
@@ -921,6 +947,133 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(rows[0]["training_commit"], training_commit)
             self.assertEqual(rows[0]["finalization_commit"], finalization_commit)
 
+    def test_recovery_reconciles_known_post_training_finalization_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, _training, finalization_commit, _broken = (
+                make_recovery_fixture(root)
+            )
+            mark_known_post_training_finalization_failure(output)
+            records = (
+                output / "experiment_records" /
+                "c2_l03_multi_granularity_part"
+            )
+
+            result = recover_existing_run(
+                output, records, output, fixture_root=output
+            )
+
+            manifest = recording.read_json(output / "run_manifest.json")
+            status = recording.read_json(output / "run_status.json")
+            repair = recording.read_json(output / "config_repair_manifest.json")
+            self.assertEqual(result["metrics"]["selected_epoch"], 120)
+            self.assertEqual(manifest["exit_code"], 0)
+            self.assertEqual(status["exit_code"], 0)
+            self.assertEqual(status["errors"], [])
+            self.assertEqual(
+                manifest["training_exit_code_reconciliation"]
+                ["manifest_exit_code_before_recovery"],
+                1,
+            )
+            self.assertEqual(
+                repair["training_exit_code_reconciliation"]
+                ["reconciled_training_exit_code"],
+                0,
+            )
+            self.assertEqual(
+                repair["recovery_attempt_commits"],
+                [finalization_commit],
+            )
+
+    def test_recovery_continues_after_partial_ancestor_repair_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, _training, repair_commit, _broken = make_recovery_fixture(root)
+            mark_known_post_training_finalization_failure(output)
+            records = (
+                output / "experiment_records" /
+                "c2_l03_multi_granularity_part"
+            )
+            with mock.patch.object(
+                    recording, "finalize_run",
+                    side_effect=EvidenceIncompleteError(
+                        "simulated post-repair finalization failure"
+                    )):
+                with self.assertRaisesRegex(
+                        EvidenceIncompleteError, "simulated post-repair"):
+                    recover_existing_run(
+                        output, records, output, fixture_root=output
+                    )
+
+            mark_known_post_training_finalization_failure(output)
+            marker = output / "second_recovery_code_marker.txt"
+            marker.write_text("second recovery code\n", encoding="utf-8")
+            run_git(output, "add", marker.name)
+            run_git(output, "commit", "-m", "second recovery commit")
+            current_commit = subprocess.check_output(
+                ["git", "-C", str(output), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+
+            result = recover_existing_run(
+                output, records, output, fixture_root=output
+            )
+
+            manifest = recording.read_json(output / "run_manifest.json")
+            repair = recording.read_json(output / "config_repair_manifest.json")
+            self.assertEqual(result["metrics"]["selected_epoch"], 120)
+            self.assertEqual(manifest["finalization_commit"], current_commit)
+            self.assertEqual(repair["repair_code_commit"], repair_commit)
+            self.assertEqual(
+                repair["recovery_attempt_commits"],
+                [repair_commit, current_commit],
+            )
+
+    def test_recovery_rejects_nonzero_exit_without_completion_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, _training, _finalization, _broken = make_recovery_fixture(root)
+            manifest_path = output / "run_manifest.json"
+            status_path = output / "run_status.json"
+            manifest = recording.read_json(manifest_path)
+            status = recording.read_json(status_path)
+            manifest["exit_code"] = 1
+            status["exit_code"] = 1
+            status["errors"] = [recording.KNOWN_CONFIG_FINALIZATION_ERROR]
+            atomic_write_json(manifest_path, manifest)
+            atomic_write_json(status_path, status)
+
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError,
+                    "exactly one recorder completion record"):
+                recover_existing_run(
+                    output,
+                    output / "experiment_records" /
+                    "c2_l03_multi_granularity_part",
+                    output,
+                    fixture_root=output,
+                )
+
+    def test_recovery_rejects_nonzero_exit_without_known_finalization_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, _training, _finalization, _broken = make_recovery_fixture(root)
+            mark_known_post_training_finalization_failure(output)
+            status_path = output / "run_status.json"
+            status = recording.read_json(status_path)
+            status["errors"] = ["unrelated failure"]
+            atomic_write_json(status_path, status)
+
+            with self.assertRaisesRegex(
+                    EvidenceIncompleteError, "known post-training"):
+                recover_existing_run(
+                    output,
+                    output / "experiment_records" /
+                    "c2_l03_multi_granularity_part",
+                    output,
+                    fixture_root=output,
+                )
+
     def test_finalization_only_recovery_failure_never_registers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -944,6 +1097,12 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(recovery.call_count, 1)
         formal.assert_not_called()
+
+    def test_post_training_finalization_failure_keeps_training_exit_zero(self):
+        error = EvidenceIncompleteError("synthetic finalization failure")
+        self.assertEqual(runner._failure_exit_code(error, 0), 0)
+        self.assertEqual(runner._failure_exit_code(error, 7), 7)
+        self.assertEqual(runner._failure_exit_code(error, None), 1)
 
     def test_formal_preflight_accepts_exact_clean_branch(self):
         self.assertEqual(

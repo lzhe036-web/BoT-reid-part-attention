@@ -129,6 +129,10 @@ def _append_run_log(output_dir, message):
 def _failure_exit_code(error, training_exit_code=None):
     if training_exit_code not in (None, 0):
         return int(training_exit_code)
+    if training_exit_code == 0:
+        # The training subprocess completed successfully.  A later profiler,
+        # evidence, or registry exception must not overwrite that exit status.
+        return 0
     if isinstance(error, KeyboardInterrupt):
         return 130
     if isinstance(error, SystemExit):
@@ -310,7 +314,9 @@ def _run_formal(args):
                 except BaseException:
                     pass
                 try:
-                    record_run_failure(output_dir, error, failed=True)
+                    record_run_failure(
+                        output_dir, error, failed=exit_code != 0
+                    )
                 except BaseException:
                     pass
             raise
