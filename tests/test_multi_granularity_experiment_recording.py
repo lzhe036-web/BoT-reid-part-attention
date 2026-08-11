@@ -2213,6 +2213,21 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             result = finalize_run(output, root / "records")
             self.assertEqual(result["run_row"]["status"], TRAINING_COMPLETE)
 
+    def test_formal_efficiency_allows_cuda_driver_reserved_gpu_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = make_success_fixture(root, execution_mode="formal")
+            profile_path = output / "efficiency_profile.json"
+            profile = recording.read_json(profile_path)
+            profile["measurement"]["gpu_total_memory_mib"] = (
+                24576.0 - 481.125
+            )
+            atomic_write_json(profile_path, profile)
+
+            result = finalize_run(output, root / "records")
+
+            self.assertEqual(result["run_row"]["status"], TRAINING_COMPLETE)
+
     def test_formal_efficiency_mutations_never_finalize(self):
         def set_argv(profile, option, value):
             index = profile["argv"].index(option)
@@ -2282,6 +2297,11 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
             "gpu_memory_environment": lambda profile: profile["measurement"].update(
                 gpu_total_memory_mib=(
                     profile["measurement"]["gpu_total_memory_mib"] + 1.0
+                )
+            ),
+            "gpu_memory_reserved_gap": lambda profile: profile["measurement"].update(
+                gpu_total_memory_mib=(
+                    profile["measurement"]["gpu_total_memory_mib"] - 600.0
                 )
             ),
             "model_descriptor": lambda profile: profile["variants"][1].update(

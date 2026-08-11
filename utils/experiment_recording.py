@@ -833,6 +833,30 @@ def _require_close(actual, expected, label, rel_tol=1e-12, abs_tol=1e-9):
         )
 
 
+def _validate_cuda_visible_gpu_memory(cuda_visible_mib, physical_mib):
+    """Cross-check PyTorch-visible memory against nvidia-smi physical memory."""
+    cuda_visible = _finite_number(
+        cuda_visible_mib, "efficiency CUDA-visible GPU memory", positive=True
+    )
+    physical = _finite_number(
+        physical_mib, "environment physical GPU memory", positive=True
+    )
+    if cuda_visible > physical:
+        raise EvidenceIncompleteError(
+            "Efficiency CUDA-visible GPU memory exceeds physical GPU memory"
+        )
+    reserved = physical - cuda_visible
+    maximum_reserved = max(512.0, physical * 0.02)
+    if reserved > maximum_reserved:
+        raise EvidenceIncompleteError(
+            "Efficiency/environment GPU memory reserved gap is too large: "
+            "physical={!r}, CUDA-visible={!r}, maximum_reserved={!r}".format(
+                physical, cuda_visible, maximum_reserved
+            )
+        )
+    return True
+
+
 def _parse_formal_profiler_argv(argv):
     """Parse the exact top-level formal profiler command without defaults."""
     required_options = (
@@ -1214,10 +1238,9 @@ def validate_efficiency_profile(profile, formal, source_sha256=None,
             raise EvidenceIncompleteError(
                 "Environment primary GPU driver evidence is internally inconsistent"
             )
-        _require_close(
+        _validate_cuda_visible_gpu_memory(
             measurement["gpu_total_memory_mib"],
             primary_gpu.get("total_memory_mib"),
-            "efficiency/environment GPU memory",
         )
         experiment = variants[1]
         for profile_field, model_field in (
