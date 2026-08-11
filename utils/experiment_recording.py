@@ -1571,6 +1571,8 @@ def _log_iteration_evidence(output):
     if not log_path.is_file():
         return None, 0
     epoch_totals = {}
+    observed_totals = set()
+    internally_consistent = True
     with log_path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, 1):
             match = LOG_ITERATION_RE.search(line)
@@ -1587,19 +1589,22 @@ def _log_iteration_evidence(output):
                 )
             existing = epoch_totals.get(epoch)
             if existing is not None and existing != total:
-                raise EvidenceIncompleteError(
-                    "log.txt reports conflicting iterations per epoch for epoch {}: "
-                    "{} and {}".format(epoch, existing, total)
-                )
-            epoch_totals[epoch] = total
-    totals = set(epoch_totals.values())
-    if len(totals) > 1:
-        raise EvidenceIncompleteError(
-            "log.txt reports inconsistent iterations per epoch: {}".format(
-                sorted(totals)
-            )
-        )
-    return (totals.pop() if totals else None), len(epoch_totals)
+                internally_consistent = False
+            epoch_totals.setdefault(epoch, total)
+            observed_totals.add(total)
+
+    # The progress logger calls len(train_loader) independently from Ignite's
+    # epoch accounting.  A dynamic identity sampler can refresh that display
+    # denominator at an epoch boundary before the logger's epoch label advances.
+    # Such progress text is not authoritative iteration evidence.  Discard the
+    # whole log source when it is internally inconsistent; validation history
+    # and the dataset manifest must still agree in _iterations_per_epoch.
+    if not internally_consistent or len(observed_totals) > 1:
+        return None, 0
+    return (
+        observed_totals.pop() if observed_totals else None,
+        len(epoch_totals),
+    )
 
 
 def _structured_iteration_evidence(output):

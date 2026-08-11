@@ -1259,6 +1259,31 @@ class MultiGranularityExperimentRecordingTest(unittest.TestCase):
                     "validation_history.jsonl=186.*log.txt=185"):
                 recording._checkpoint_manifest_rows(output, records, selected)
 
+    def test_checkpoint_binding_ignores_inconsistent_progress_denominators(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, records, selected = make_checkpoint_binding_fixture(
+                Path(directory), log_iterations_per_epoch=None
+            )
+            atomic_write_text(
+                output / "log.txt",
+                "Epoch[9] Iteration[180/183] fixture\n"
+                "Epoch[9] Iteration[20/184] fixture\n",
+            )
+
+            self.assertEqual(
+                recording._log_iteration_evidence(output),
+                (None, 0),
+            )
+            rows, selected_row = recording.build_checkpoint_manifest(
+                output, records, selected
+            )
+
+            self.assertEqual(
+                [(row["epoch"], row["global_iteration"]) for row in rows],
+                [(40, 7440), (80, 14880), (120, 22320)],
+            )
+            self.assertEqual(selected_row["global_iteration"], 22320)
+
     def test_checkpoint_binding_rejects_malformed_checkpoint_filename(self):
         with tempfile.TemporaryDirectory() as directory:
             output, records, selected = make_checkpoint_binding_fixture(
