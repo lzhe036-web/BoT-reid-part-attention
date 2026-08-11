@@ -67,6 +67,14 @@ margin 是 `SOLVER.MARGIN`。两者数值恰好都为 0.3，但定义不同。
 | C2-L05 | 待核实 | 待核实 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda05_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda05_market1501 | 待核实 | 待核实 | 待核实 | 0.5 | 待核实 | 待核实 | 待实验/待归档 | 待核实 | 待核实 | 待实验/待归档 | no | λ 消融；独立 C2 λ=0.5 运行见 C2-CCPO-Market，但不能自动视为本配置的同一次运行。 |
 | C2-L10 | 待核实 | 待核实 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda10_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501 | 待核实 | 待核实 | 待核实 | 1.0 | 待核实 | 待核实 | 待实验/待归档 | 待核实 | 待核实 | 待实验/待归档 | no | λ 消融；不能由配置推断结果。 |
 
+## C2-L03 Multi-Granularity Part Experiments
+
+| 实验编号 | 日期 | 训练 commit | 分支 | 实验类型 | 数据集 | config 文件 | OUTPUT_DIR | 日志路径 | GPU | seed | lambda | 训练时间 | best epoch | Rank-1 | Rank-5 | Rank-10 | mAP | re-ranking | 备注 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C2-MGP-K246-S42 | 2026-08-05 | f7e9e46 | exp/c2-l03-multi-granularity-local-feature | C2-L03 + Global + Multi-Granularity Part K={2,4,6} | Market1501 | configs/softmax_triplet_c2_l03_multi_granularity_part_autodl.yml | /root/autodl-tmp/experiments/BoT/c2_l03_multi_granularity_part_market1501 | /root/autodl-tmp/experiments/BoT/c2_l03_multi_granularity_part_market1501/log.txt | NVIDIA GeForce RTX 4090 | 42 | 0.3 | 0:46:58 | 120 | 94.8% | 98.4% | 98.9% | 87.5% | no | Global 与 K=2/4/6 局部分支 concat 融合，每个局部分支 256 维；未启用 fixed-index PCC 或软对齐；正式台账保留精确指标（Rank-1 94.7743475%，mAP 87.5333545%）及证据哈希；finalization commit 40293f4；n=1，外部归档尚未记录，不作稳定性或显著性结论。 |
+
+机器可读真源位于 `experiment_records/c2_l03_multi_granularity_part/`。本次恢复仅修复并登记已完成训练的证据，没有重新训练；训练运行时间为 2818.077 秒，总流程时间为 2836.141 秒。
+
 ## Duke Validation Experiments
 
 Market1501 current best: C2-L03, lambda=0.3, Rank-1=95.0, mAP=87.8（用户确认；原始运行证据待归档）。
