@@ -39,4 +39,5 @@ python tools/run_experiment.py \
   --expected-commit "${CURRENT_COMMIT}" \
   --parent-branch "${PARENT_BRANCH}" \
   --parent-commit "${PARENT_COMMIT}" \
+  --feature-reference-commit "${PARENT_COMMIT}" \
   --notes "C2-L03 Soft-Min alignment; tau=0.1 candidate; K=6; Seed=42; formal 120-epoch protocol."

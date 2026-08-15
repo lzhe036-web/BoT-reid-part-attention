@@ -15,7 +15,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.experiment_recording import (
     TABLE_SCHEMAS,
-    _read_csv,
     csv_to_markdown,
     ensure_record_layout,
     update_experiments_markdown,
@@ -37,8 +36,7 @@ def main(argv=None):
             root / "tables" / "{}.csv".format(name),
             root / "tables" / "{}.md".format(name),
         )
-    main_rows = _read_csv(root / "tables" / "main_results.csv")
-    update_experiments_markdown(args.experiments, main_rows)
+    update_experiments_markdown(args.experiments, root)
     return 0
 
 

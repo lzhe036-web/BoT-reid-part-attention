@@ -45,11 +45,27 @@
 | C2-L10 | 待填写 | 待填写 | exp/cross-camera-positive-lambda-sensitivity | Cross-camera positive only | Market1501 | configs/softmax_triplet_cross_camera_positive_lambda10_autodl.yml | /root/autodl-tmp/experiments/BoT/cross_camera_positive_lambda10_market1501 | 待填写 | 待填写 | 待填写 | 1.0 | 待填写 | 待填写 | 待填写 | 待填写 | C2 lambda sensitivity, no extra hard negative. |
 
 <!-- AUTO-EXPERIMENT-RESULTS:START -->
-## Automated Formal Experiment Runs
+## Formal Results
 
-This section is generated from `experiment_records/tables/main_results.csv`.
-Historical experiment rows outside this section are never rewritten.
+Generated only from successful formal rows in `experiment_records/tables/main_results.csv`.
 
-| experiment_id | run_id | run_kind | date | commit | branch | parent_branch | parent_commit | method | method_family | method_variant | dataset | config | output_dir | log_path | log_sha256 | GPU | seed | lambda | cross_camera_positive_lambda | pcc_lambda | pcc_enabled | pcc_parts | pcc_mode | alignment_strategy | alignment_mode | alignment_temperature | gating_mode | gating_temperature | multigranular_feature_signature_sha256 | baseline | valid_pcc_pair_count | mean_fixed_index_part_distance | hard_alignment_loss | valid_alignment_pair_count | mean_hard_path_cost | mean_path_absolute_offset | soft_alignment_loss | mean_soft_path_cost | runtime_seconds | best_epoch | Rank-1 | Rank-5 | Rank-10 | mAP | checkpoint | checkpoint_sha256 | status | notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| schema_version | run_id | experiment_id | experiment_family | run_kind | method | method_family | method_variant | dataset | branch | commit | parent_branch | parent_commit | seed | lambda | cross_camera_positive_lambda | pcc_lambda | pcc_enabled | pcc_parts | pcc_mode | alignment_strategy | alignment_mode | alignment_temperature | gating_mode | gating_temperature | multigranular_feature_signature | multigranular_feature_signature_sha256 | feature_reference_commit | feature_reference_signature_sha256 | current_feature_signature_sha256 | feature_compatibility_status | feature_compatibility_evidence_path | feature_compatibility_evidence_size_bytes | feature_compatibility_evidence_sha256 | baseline | margin | mode | best_epoch | selected_epoch | rank1 | rank5 | rank10 | map | checkpoint | checkpoint_sha256 | runtime_seconds | gpu | config | source_config_path | source_config_sha256 | resolved_config_path | resolved_config_sha256 | log_path | training_log_size_bytes | log_sha256 | console_log_path | console_log_size_bytes | console_log_sha256 | artifact_manifest_path | artifact_manifest_size_bytes | artifact_manifest_sha256 | output_dir | valid_pcc_pair_count | mean_fixed_index_part_distance | hard_alignment_loss | valid_alignment_pair_count | mean_hard_path_cost | mean_path_absolute_offset | soft_alignment_loss | mean_soft_path_cost | status | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 <!-- AUTO-EXPERIMENT-RESULTS:END -->
+<!-- AUTO-EXPERIMENT-RUNS:START -->
+## Run Registry / All Recorded Runs
+
+Generated from `experiment_records/runs.csv`, per-run manifests, statuses, and `evidence_manifest.tsv`.
+
+| schema_version | run_id | experiment_id | experiment_family | run_kind | method | method_family | method_variant | dataset | branch | commit_id | parent_branch | parent_commit | config_file | seed | lambda | cross_camera_positive_lambda | pcc_lambda | pcc_enabled | pcc_parts | pcc_mode | alignment_strategy | alignment_mode | alignment_temperature | gating_mode | gating_temperature | multigranular_feature_signature | multigranular_feature_signature_sha256 | feature_reference_commit | feature_reference_signature_sha256 | current_feature_signature_sha256 | feature_compatibility_status | feature_compatibility_evidence_path | feature_compatibility_evidence_size_bytes | feature_compatibility_evidence_sha256 | baseline | margin | mode | GPU | start_time | end_time | runtime | best_epoch | selected_epoch | Rank-1 | Rank-5 | Rank-10 | mAP | checkpoint | checkpoint_sha256 | source_config_path | source_config_sha256 | resolved_config_path | resolved_config_sha256 | log_path | training_log_size_bytes | log_sha256 | console_log_path | console_log_size_bytes | console_log_sha256 | artifact_manifest_path | artifact_manifest_size_bytes | artifact_manifest_sha256 | output_dir | status | valid_pcc_pair_count | mean_fixed_index_part_distance | hard_alignment_loss | valid_alignment_pair_count | mean_hard_path_cost | mean_path_absolute_offset | soft_alignment_loss | mean_soft_path_cost | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+<!-- AUTO-EXPERIMENT-RUNS:END -->
+
+<!-- AUTO-CHECKPOINT-EVIDENCE:START -->
+## Checkpoint Evidence
+
+Generated from each run's authoritative `checkpoint_manifest.tsv`; epochs and iterations are Ignite evidence, never inferred.
+
+| run_id | experiment_id | run_kind | checkpoint_path | size_bytes | ignite_epoch | global_iteration | sha256 | selected |
+|---|---|---|---|---|---|---|---|---|
+<!-- AUTO-CHECKPOINT-EVIDENCE:END -->

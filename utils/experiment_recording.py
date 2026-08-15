@@ -34,12 +34,16 @@ from utils.multigranular_signature import (
 )
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 NOT_RECORDED = "not_recorded"
 MISSING_EVIDENCE = "missing_evidence"
 NOT_APPLICABLE = "not_applicable"
 AUTO_RESULTS_START = "<!-- AUTO-EXPERIMENT-RESULTS:START -->"
 AUTO_RESULTS_END = "<!-- AUTO-EXPERIMENT-RESULTS:END -->"
+AUTO_RUNS_START = "<!-- AUTO-EXPERIMENT-RUNS:START -->"
+AUTO_RUNS_END = "<!-- AUTO-EXPERIMENT-RUNS:END -->"
+AUTO_CHECKPOINTS_START = "<!-- AUTO-CHECKPOINT-EVIDENCE:START -->"
+AUTO_CHECKPOINTS_END = "<!-- AUTO-CHECKPOINT-EVIDENCE:END -->"
 
 
 class EvidenceError(RuntimeError):
@@ -56,10 +60,20 @@ MAIN_FIELDS = (
     "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
     "multigranular_feature_signature_sha256",
+    "feature_reference_commit", "feature_reference_signature_sha256",
+    "current_feature_signature_sha256", "feature_compatibility_status",
+    "feature_compatibility_evidence_path",
+    "feature_compatibility_evidence_size_bytes",
+    "feature_compatibility_evidence_sha256",
     "baseline", "margin", "mode", "best_epoch",
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
-    "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
-    "log_sha256", "output_dir", "valid_pcc_pair_count",
+    "checkpoint_sha256", "runtime_seconds", "gpu", "config",
+    "source_config_path", "source_config_sha256", "resolved_config_path",
+    "resolved_config_sha256", "log_path", "training_log_size_bytes",
+    "log_sha256", "console_log_path", "console_log_size_bytes",
+    "console_log_sha256", "artifact_manifest_path",
+    "artifact_manifest_size_bytes", "artifact_manifest_sha256",
+    "output_dir", "valid_pcc_pair_count",
     "mean_fixed_index_part_distance", "hard_alignment_loss",
     "valid_alignment_pair_count", "mean_hard_path_cost",
     "mean_path_absolute_offset", "soft_alignment_loss",
@@ -125,10 +139,20 @@ RUN_FIELDS = (
     "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode",
     "alignment_temperature", "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
-    "multigranular_feature_signature_sha256", "baseline", "margin",
+    "multigranular_feature_signature_sha256",
+    "feature_reference_commit", "feature_reference_signature_sha256",
+    "current_feature_signature_sha256", "feature_compatibility_status",
+    "feature_compatibility_evidence_path",
+    "feature_compatibility_evidence_size_bytes",
+    "feature_compatibility_evidence_sha256", "baseline", "margin",
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
-    "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
+    "checkpoint_sha256", "source_config_path", "source_config_sha256",
+    "resolved_config_path", "resolved_config_sha256", "log_path",
+    "training_log_size_bytes", "log_sha256", "console_log_path",
+    "console_log_size_bytes", "console_log_sha256",
+    "artifact_manifest_path", "artifact_manifest_size_bytes",
+    "artifact_manifest_sha256", "output_dir", "status",
     "valid_pcc_pair_count", "mean_fixed_index_part_distance",
     "hard_alignment_loss", "valid_alignment_pair_count",
     "mean_hard_path_cost", "mean_path_absolute_offset",
@@ -477,19 +501,33 @@ def validate_parent_lineage(repo_root, parent_branch, parent_commit,
 
 def validate_git_runtime_state(repo_root, run_dir, expected_branch=None,
                                expected_commit=None):
-    """Allow only new evidence files under this runner's exact run directory."""
+    """Allow only recorder-owned evidence changes during a run."""
     repo_root = Path(repo_root).resolve()
     run_dir = Path(run_dir).resolve()
     try:
         allowed_relative = normalized_path(run_dir.relative_to(repo_root))
     except ValueError:
         raise EvidenceError("Controlled run_dir must be inside the Git worktree")
+    records_relative = normalized_path(
+        run_dir.parent.parent.relative_to(repo_root)
+    )
+    controlled_files = {
+        "EXPERIMENTS.md",
+        records_relative + "/runs.csv",
+        records_relative + "/evidence_manifest.tsv",
+    }
+    controlled_table_prefix = records_relative + "/tables/"
     unexpected = []
     for status_code, path in _git_status_entries(repo_root):
         under_current_run = (
             path == allowed_relative or path.startswith(allowed_relative + "/")
         )
-        if status_code != "??" or not under_current_run:
+        controlled_table = (
+            path.startswith(controlled_table_prefix)
+            and (path.endswith(".csv") or path.endswith(".md"))
+        )
+        controlled_registry = path in controlled_files or controlled_table
+        if not (under_current_run or controlled_registry):
             unexpected.append("{} {}".format(status_code, path))
     if unexpected:
         raise EvidenceError(
@@ -503,6 +541,7 @@ def validate_git_runtime_state(repo_root, run_dir, expected_branch=None,
         raise EvidenceError("Commit changed after formal preflight")
     metadata["controlled_evidence_dir"] = allowed_relative
     metadata["controlled_evidence_only"] = True
+    metadata["controlled_registry_files"] = sorted(controlled_files)
     return metadata
 
 
@@ -635,10 +674,11 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
                    baseline_method=NOT_RECORDED,
                    baseline_commit=NOT_RECORDED, run_kind="formal",
                    parent_branch=NOT_RECORDED,
-                   parent_commit=NOT_RECORDED):
+                   parent_commit=NOT_RECORDED,
+                   feature_compatibility=None, experiments_path=None):
     if run_kind not in ("formal", "smoke"):
         raise EvidenceError("run_kind must be 'formal' or 'smoke'")
-    records_root = Path(records_root)
+    records_root = ensure_record_layout(records_root)
     run_dir = records_root / "runs" / run_id
     if run_dir.exists():
         raise EvidenceError("run_id already exists: {}".format(run_id))
@@ -654,6 +694,46 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
     )
     seed_value = nested_value(configuration, "SEED")
     seed = validate_seed(seed_value) if seed_value != NOT_RECORDED else NOT_RECORDED
+    feature_path = run_dir / "feature_compatibility.json"
+    feature_reference_commit = NOT_RECORDED
+    feature_reference_signature = NOT_RECORDED
+    current_feature_signature = NOT_RECORDED
+    feature_status = NOT_RECORDED
+    feature_path_value = NOT_RECORDED
+    feature_size = NOT_RECORDED
+    feature_sha256 = NOT_RECORDED
+    if feature_compatibility is not None:
+        feature_reference_commit = feature_compatibility.get(
+            "feature_reference_commit", MISSING_EVIDENCE
+        )
+        feature_reference_signature = feature_compatibility.get(
+            "feature_reference_signature_sha256", MISSING_EVIDENCE
+        )
+        current_feature_signature = feature_compatibility.get(
+            "current_feature_signature_sha256", MISSING_EVIDENCE
+        )
+        feature_status = feature_compatibility.get(
+            "feature_compatibility_status", MISSING_EVIDENCE
+        )
+        if feature_status != "compatible":
+            raise EvidenceError(
+                "Shared multigranular features are not compatible: {}".format(
+                    feature_compatibility.get("mismatched_components", [])
+                )
+            )
+        if parent_commit not in (None, "", NOT_RECORDED):
+            if str(feature_reference_commit).lower() != str(parent_commit).lower():
+                raise EvidenceError(
+                    "Feature reference commit differs from the recorded parent"
+                )
+        atomic_write_json(feature_path, feature_compatibility)
+        feature_path_value = normalized_path(feature_path.resolve())
+        feature_size = feature_path.stat().st_size
+        feature_sha256 = sha256_file(feature_path)
+    elif identity["alignment_mode"] == "soft_min":
+        raise EvidenceError(
+            "Soft-Min runs require parent-bound feature compatibility evidence"
+        )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": experiment_id,
@@ -692,6 +772,13 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "multigranular_feature_signature_sha256": (
             feature_signature_sha256
         ),
+        "feature_reference_commit": feature_reference_commit,
+        "feature_reference_signature_sha256": feature_reference_signature,
+        "current_feature_signature_sha256": current_feature_signature,
+        "feature_compatibility_status": feature_status,
+        "feature_compatibility_evidence_path": feature_path_value,
+        "feature_compatibility_evidence_size_bytes": feature_size,
+        "feature_compatibility_evidence_sha256": feature_sha256,
         "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
@@ -700,19 +787,58 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
             "ignite_engine_epoch_evidence"
         ),
         "output_dir": normalized_path(Path(output_dir).resolve()),
+        "training_log_path": normalized_path(
+            (Path(output_dir).resolve() / "log.txt")
+        ),
+        "training_log_sha256": NOT_RECORDED,
+        "console_log_path": normalized_path(
+            (run_dir / "console.log").resolve()
+        ),
+        "console_log_sha256": NOT_RECORDED,
+        "console_log_streams": "stdout_stderr_combined_in_process_order",
+        "console_log_encoding": "utf-8",
+        "console_log_decode_errors": "replace",
+        "console_log_flush_policy": "every_stream_chunk",
+        "artifact_manifest_path": normalized_path(
+            (run_dir / "artifact_hashes.tsv").resolve()
+        ),
+        "artifact_manifest_sha256": NOT_RECORDED,
+        "experiments_path": normalized_path(Path(
+            experiments_path or records_root.parent / "EXPERIMENTS.md"
+        ).resolve()),
         "start_time": utc_now(),
         "command": list(command),
         "notes": notes,
     }
     atomic_write_json(run_dir / "run_manifest.json", manifest)
-    atomic_write_json(run_dir / "run_status.json", {
+    status_payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "status": "running",
         "phase": "initialized",
         "training_exit_code": NOT_RECORDED,
         "updated_at_utc": utc_now(),
-    })
+    }
+    atomic_write_json(run_dir / "run_status.json", status_payload)
+    _register_run_state(run_dir, status_payload)
+    try:
+        update_experiments_markdown(
+            experiments_path or records_root.parent / "EXPERIMENTS.md",
+            records_root,
+        )
+    except BaseException as error:
+        status_payload.update({
+            "status": "incomplete",
+            "phase": "recording",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "updated_at_utc": utc_now(),
+        })
+        atomic_write_json(run_dir / "run_status.json", status_payload)
+        _register_run_state(
+            run_dir, status_payload, write_artifact_manifest=True
+        )
+        raise
     return run_dir, manifest
 
 
@@ -728,7 +854,35 @@ def record_training_exit(run_dir, exit_code, runtime_seconds, end_time=None):
         "updated_at_utc": utc_now(),
     })
     atomic_write_json(run_dir / "run_status.json", status)
+    _register_run_state(run_dir, status)
+    update_experiments_markdown(
+        _experiments_path_for_run(run_dir), Path(run_dir).parent.parent
+    )
     return status
+
+
+def record_console_log_evidence(run_dir):
+    """Hash a closed, non-empty console tee and refresh run evidence."""
+    run_dir = Path(run_dir)
+    console_path = run_dir / "console.log"
+    if not console_path.is_file() or console_path.stat().st_size <= 0:
+        raise EvidenceError("Console log is missing or empty")
+    manifest_path = run_dir / "run_manifest.json"
+    manifest = read_json(manifest_path)
+    manifest["console_log_path"] = normalized_path(console_path.resolve())
+    manifest["console_log_size_bytes"] = console_path.stat().st_size
+    manifest["console_log_sha256"] = sha256_file(console_path)
+    atomic_write_json(manifest_path, manifest)
+    status = read_json(run_dir / "run_status.json")
+    _register_run_state(run_dir, status)
+    update_experiments_markdown(
+        _experiments_path_for_run(run_dir), run_dir.parent.parent
+    )
+    return {
+        "path": manifest["console_log_path"],
+        "size_bytes": manifest["console_log_size_bytes"],
+        "sha256": manifest["console_log_sha256"],
+    }
 
 
 def record_run_failure(run_dir, error, status="incomplete"):
@@ -737,36 +891,123 @@ def record_run_failure(run_dir, error, status="incomplete"):
     payload = read_json(path) if path.is_file() else {"schema_version": SCHEMA_VERSION}
     payload.update({
         "status": status,
-        "phase": "failed" if status == "failed" else "finalization",
+        "phase": (
+            "interrupted" if status == "interrupted"
+            else "failed" if status == "failed" else "finalization"
+        ),
         "error_type": type(error).__name__,
         "error": str(error),
         "updated_at_utc": utc_now(),
     })
     atomic_write_json(path, payload)
-    _register_failed_or_incomplete_run(run_dir, payload)
+    _register_run_state(run_dir, payload, write_artifact_manifest=True)
+    update_experiments_markdown(
+        _experiments_path_for_run(run_dir), Path(run_dir).parent.parent
+    )
     return payload
 
 
-def _register_failed_or_incomplete_run(run_dir, status_payload):
-    """Retain terminal non-success runs without touching formal tables."""
+def _experiments_path_for_run(run_dir):
     run_dir = Path(run_dir)
-    if run_dir.parent.name != "runs":
-        raise EvidenceError(
-            "Failed run evidence directory is outside the run registry"
-        )
-    records_root = ensure_record_layout(run_dir.parent.parent)
     manifest_path = run_dir / "run_manifest.json"
-    if not manifest_path.is_file():
-        raise EvidenceError("Failed run manifest is missing")
-    manifest = read_json(manifest_path)
-    terminal_status = status_payload.get("status", "incomplete")
-    row = {
+    if manifest_path.is_file():
+        value = read_json(manifest_path).get("experiments_path")
+        if value not in (None, "", NOT_RECORDED, MISSING_EVIDENCE):
+            return Path(value)
+    return run_dir.parent.parent.parent / "EXPERIMENTS.md"
+
+
+def _selected_checkpoint_from_manifest(run_dir):
+    path = Path(run_dir) / "checkpoint_manifest.tsv"
+    if not path.is_file() or path.stat().st_size == 0:
+        return None
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    selected = [
+        row for row in rows
+        if str(row.get("selected", "")).lower() == "true"
+    ]
+    return selected[0] if len(selected) == 1 else None
+
+
+def _artifact_type_for_path(path, selected_checkpoint=None):
+    path = Path(path)
+    if path.name == "console.log":
+        return "console_log"
+    if path.name == "log.txt":
+        return "training_log"
+    if path.name == "config_source.yml":
+        return "source_config"
+    if path.name == "config_resolved.yml":
+        return "resolved_config"
+    if path.name == "feature_compatibility.json":
+        return "feature_compatibility"
+    if path.name == "artifact_hashes.tsv":
+        return "artifact_manifest"
+    if path.suffix == ".pt":
+        if selected_checkpoint and normalized_path(path.resolve()) == normalized_path(
+                Path(selected_checkpoint).resolve()):
+            return "selected_checkpoint"
+        return "checkpoint"
+    return path.stem
+
+
+def _run_row_from_manifest(run_dir, manifest, status_payload):
+    run_dir = Path(run_dir)
+    selected = _selected_checkpoint_from_manifest(run_dir)
+    metrics_path = run_dir / "metrics_summary.json"
+    metrics = read_json(metrics_path) if metrics_path.is_file() else {}
+    environment_path = run_dir / "environment.json"
+    environment = read_json(environment_path) if environment_path.is_file() else {}
+    console_path = Path(manifest.get(
+        "console_log_path", run_dir / "console.log"
+    ))
+    output_value = manifest.get("output_dir", NOT_RECORDED)
+    training_path = Path(manifest.get(
+        "training_log_path",
+        Path(output_value) / "log.txt" if output_value not in (
+            None, "", NOT_RECORDED, MISSING_EVIDENCE
+        ) else NOT_RECORDED,
+    ))
+    artifact_path = Path(manifest.get(
+        "artifact_manifest_path", run_dir / "artifact_hashes.tsv"
+    ))
+    source_path = run_dir / "config_source.yml"
+    resolved_path = run_dir / "config_resolved.yml"
+    actual_feature_path = run_dir / "feature_compatibility.json"
+    feature_path = (
+        actual_feature_path if actual_feature_path.is_file()
+        else Path(manifest.get(
+            "feature_compatibility_evidence_path", NOT_RECORDED
+        ))
+    )
+
+    def evidence(path, manifest_sha_key=None):
+        if str(path) in ("", NOT_RECORDED, MISSING_EVIDENCE):
+            return NOT_RECORDED, NOT_RECORDED
+        value = normalized_path(path.resolve())
+        if path.is_file():
+            return value, sha256_file(path)
+        recorded = manifest.get(manifest_sha_key, NOT_RECORDED) if manifest_sha_key else NOT_RECORDED
+        return value, recorded
+
+    console_value, console_sha = evidence(console_path, "console_log_sha256")
+    training_value, training_sha = evidence(training_path, "training_log_sha256")
+    artifact_value, artifact_sha = evidence(
+        artifact_path, "artifact_manifest_sha256"
+    )
+    feature_value, feature_sha = evidence(
+        feature_path, "feature_compatibility_evidence_sha256"
+    )
+    source_value, source_sha = evidence(source_path, "config_source_sha256")
+    resolved_value, resolved_sha = evidence(
+        resolved_path, "config_resolved_sha256"
+    )
+    return {
         "schema_version": SCHEMA_VERSION,
         "run_id": manifest.get("run_id", run_dir.name),
         "experiment_id": manifest.get("experiment_id", NOT_RECORDED),
-        "experiment_family": manifest.get(
-            "experiment_family", NOT_RECORDED
-        ),
+        "experiment_family": manifest.get("experiment_family", NOT_RECORDED),
         "run_kind": manifest.get("run_kind", NOT_RECORDED),
         "method": manifest.get("method", NOT_RECORDED),
         "method_family": manifest.get("method_family", NOT_RECORDED),
@@ -777,6 +1018,10 @@ def _register_failed_or_incomplete_run(run_dir, status_payload):
         "parent_branch": manifest.get("parent_branch", NOT_RECORDED),
         "parent_commit": manifest.get("parent_commit", NOT_RECORDED),
         "config_file": manifest.get("config_file", NOT_RECORDED),
+        "source_config_path": source_value,
+        "source_config_sha256": source_sha,
+        "resolved_config_path": resolved_value,
+        "resolved_config_sha256": resolved_sha,
         "seed": manifest.get("seed", NOT_RECORDED),
         "lambda": manifest.get("lambda", NOT_RECORDED),
         "cross_camera_positive_lambda": manifest.get(
@@ -786,39 +1031,175 @@ def _register_failed_or_incomplete_run(run_dir, status_payload):
         "pcc_enabled": manifest.get("pcc_enabled", NOT_RECORDED),
         "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
         "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
-        "alignment_strategy": manifest.get(
-            "alignment_strategy", NOT_RECORDED
-        ),
+        "alignment_strategy": manifest.get("alignment_strategy", NOT_RECORDED),
         "alignment_mode": manifest.get("alignment_mode", NOT_RECORDED),
-        "alignment_temperature": manifest.get(
-            "alignment_temperature", NOT_RECORDED
-        ),
+        "alignment_temperature": manifest.get("alignment_temperature", NOT_RECORDED),
         "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
-        "gating_temperature": manifest.get(
-            "gating_temperature", NOT_RECORDED
-        ),
+        "gating_temperature": manifest.get("gating_temperature", NOT_RECORDED),
         "multigranular_feature_signature": manifest.get(
             "multigranular_feature_signature", NOT_RECORDED
         ),
         "multigranular_feature_signature_sha256": manifest.get(
             "multigranular_feature_signature_sha256", NOT_RECORDED
         ),
+        "feature_reference_commit": manifest.get(
+            "feature_reference_commit", NOT_RECORDED
+        ),
+        "feature_reference_signature_sha256": manifest.get(
+            "feature_reference_signature_sha256", NOT_RECORDED
+        ),
+        "current_feature_signature_sha256": manifest.get(
+            "current_feature_signature_sha256", NOT_RECORDED
+        ),
+        "feature_compatibility_status": manifest.get(
+            "feature_compatibility_status", NOT_RECORDED
+        ),
+        "feature_compatibility_evidence_path": feature_value,
+        "feature_compatibility_evidence_size_bytes": (
+            feature_path.stat().st_size if feature_path.is_file()
+            else manifest.get(
+                "feature_compatibility_evidence_size_bytes", NOT_RECORDED
+            )
+        ),
+        "feature_compatibility_evidence_sha256": feature_sha,
         "baseline": manifest.get("baseline", NOT_RECORDED),
         "margin": manifest.get("margin", NOT_RECORDED),
         "mode": manifest.get("mode", NOT_RECORDED),
+        "GPU": _gpu_label(environment),
         "start_time": manifest.get("start_time", NOT_RECORDED),
         "end_time": status_payload.get(
-            "training_end_time", status_payload.get(
-                "updated_at_utc", NOT_RECORDED
-            )
+            "training_end_time", status_payload.get("updated_at_utc", NOT_RECORDED)
         ),
-        "runtime": status_payload.get(
-            "training_runtime_seconds", NOT_RECORDED
+        "runtime": status_payload.get("training_runtime_seconds", NOT_RECORDED),
+        "best_epoch": metrics.get("best_epoch", NOT_RECORDED),
+        "selected_epoch": metrics.get("selected_epoch", NOT_RECORDED),
+        "Rank-1": metrics.get("rank1_percent", NOT_RECORDED),
+        "Rank-5": metrics.get("rank5_percent", NOT_RECORDED),
+        "Rank-10": metrics.get("rank10_percent", NOT_RECORDED),
+        "mAP": metrics.get("map_percent", NOT_RECORDED),
+        "checkpoint": (
+            selected.get("path", NOT_RECORDED) if selected else NOT_RECORDED
         ),
+        "checkpoint_sha256": (
+            selected.get("sha256", NOT_RECORDED) if selected else NOT_RECORDED
+        ),
+        "log_path": training_value,
+        "training_log_size_bytes": (
+            training_path.stat().st_size if training_path.is_file()
+            else NOT_RECORDED
+        ),
+        "log_sha256": training_sha,
+        "console_log_path": console_value,
+        "console_log_size_bytes": (
+            console_path.stat().st_size if console_path.is_file()
+            else manifest.get("console_log_size_bytes", NOT_RECORDED)
+        ),
+        "console_log_sha256": console_sha,
+        "artifact_manifest_path": artifact_value,
+        "artifact_manifest_size_bytes": (
+            artifact_path.stat().st_size if artifact_path.is_file()
+            else NOT_RECORDED
+        ),
+        "artifact_manifest_sha256": artifact_sha,
         "output_dir": manifest.get("output_dir", NOT_RECORDED),
-        "status": terminal_status,
+        "status": status_payload.get("status", NOT_RECORDED),
+        "valid_pcc_pair_count": metrics.get("valid_pcc_pair_count", NOT_RECORDED),
+        "mean_fixed_index_part_distance": metrics.get(
+            "mean_fixed_index_part_distance", NOT_RECORDED
+        ),
+        "hard_alignment_loss": metrics.get("hard_alignment_loss", NOT_RECORDED),
+        "valid_alignment_pair_count": metrics.get(
+            "valid_alignment_pair_count", NOT_RECORDED
+        ),
+        "mean_hard_path_cost": metrics.get("mean_hard_path_cost", NOT_RECORDED),
+        "mean_path_absolute_offset": metrics.get(
+            "mean_path_absolute_offset", NOT_RECORDED
+        ),
+        "soft_alignment_loss": metrics.get("soft_alignment_loss", NOT_RECORDED),
+        "mean_soft_path_cost": metrics.get("mean_soft_path_cost", NOT_RECORDED),
         "notes": manifest.get("notes", NOT_RECORDED),
     }
+
+
+def _write_partial_artifact_manifest(run_dir, manifest):
+    run_dir = Path(run_dir)
+    paths = [
+        path for path in sorted(run_dir.iterdir())
+        if path.is_file() and path.name not in (
+            "artifact_hashes.tsv", "run_manifest.json"
+        )
+    ]
+    output_value = manifest.get("output_dir", NOT_RECORDED)
+    output_dir = Path(output_value) if output_value not in (
+        None, "", NOT_RECORDED, MISSING_EVIDENCE
+    ) else None
+    if output_dir is not None and output_dir.is_dir():
+        log_path = output_dir / "log.txt"
+        if log_path.is_file():
+            paths.append(log_path)
+        paths.extend(sorted(output_dir.glob("*.pt")))
+    selected = _selected_checkpoint_from_manifest(run_dir)
+    selected_path = selected.get("path") if selected else None
+    seen = set()
+    rows = []
+    for path in paths:
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        rows.append({
+            "artifact_type": _artifact_type_for_path(path, selected_path),
+            "path": normalized_path(path.resolve()),
+            "size_bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        })
+    write_tsv(
+        run_dir / "artifact_hashes.tsv",
+        ("artifact_type", "path", "size_bytes", "sha256"), rows,
+    )
+    return rows
+
+
+def _register_run_state(run_dir, status_payload,
+                        write_artifact_manifest=False):
+    """Register any run state without ever touching formal result tables."""
+    run_dir = Path(run_dir)
+    if run_dir.parent.name != "runs":
+        raise EvidenceError(
+            "Failed run evidence directory is outside the run registry"
+        )
+    records_root = ensure_record_layout(run_dir.parent.parent)
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        raise EvidenceError("Run manifest is missing")
+    manifest = read_json(manifest_path)
+    console_path = run_dir / "console.log"
+    if console_path.is_file():
+        manifest.update({
+            "console_log_path": normalized_path(console_path.resolve()),
+            "console_log_size_bytes": console_path.stat().st_size,
+            "console_log_sha256": sha256_file(console_path),
+        })
+    output_value = manifest.get("output_dir", NOT_RECORDED)
+    if output_value not in (None, "", NOT_RECORDED, MISSING_EVIDENCE):
+        training_path = Path(output_value) / "log.txt"
+        if training_path.is_file():
+            manifest.update({
+                "training_log_path": normalized_path(training_path.resolve()),
+                "training_log_size_bytes": training_path.stat().st_size,
+                "training_log_sha256": sha256_file(training_path),
+            })
+    atomic_write_json(manifest_path, manifest)
+    if write_artifact_manifest:
+        _write_partial_artifact_manifest(run_dir, manifest)
+        artifact_path = run_dir / "artifact_hashes.tsv"
+        manifest["artifact_manifest_path"] = normalized_path(
+            artifact_path.resolve()
+        )
+        manifest["artifact_manifest_size_bytes"] = artifact_path.stat().st_size
+        manifest["artifact_manifest_sha256"] = sha256_file(artifact_path)
+        atomic_write_json(manifest_path, manifest)
+    row = _run_row_from_manifest(run_dir, manifest, status_payload)
     upsert_csv(records_root / "runs.csv", RUN_FIELDS, row)
     evidence_paths = [
         path for path in sorted(run_dir.iterdir()) if path.is_file()
@@ -833,6 +1214,8 @@ def _register_failed_or_incomplete_run(run_dir, status_payload):
             evidence_paths.append(log_path)
         evidence_paths.extend(sorted(output_dir.glob("*.pt")))
     seen = set()
+    selected = _selected_checkpoint_from_manifest(run_dir)
+    selected_path = selected.get("path") if selected else None
     for evidence_path in evidence_paths:
         resolved = str(evidence_path.resolve())
         if resolved in seen:
@@ -842,7 +1225,9 @@ def _register_failed_or_incomplete_run(run_dir, status_payload):
             "schema_version": SCHEMA_VERSION,
             "run_id": row["run_id"],
             "run_kind": row["run_kind"],
-            "artifact_type": evidence_path.stem,
+            "artifact_type": _artifact_type_for_path(
+                evidence_path, selected_path
+            ),
             "path": normalized_path(evidence_path.resolve()),
             "size_bytes": evidence_path.stat().st_size,
             "sha256": sha256_file(evidence_path),
@@ -853,6 +1238,7 @@ def _register_failed_or_incomplete_run(run_dir, status_payload):
             evidence_row,
             key_fields=("run_id", "path"),
         )
+    return row
 
 
 def parse_training_log(log_path):
@@ -1659,10 +2045,11 @@ def _artifact_rows(run_dir, log_info, checkpoint_rows, final_status):
     rows = []
     final_status_bytes = json_text(final_status).encode("utf-8")
     for path in sorted(run_dir.iterdir()):
-        if not path.is_file() or path.name in ("artifact_hashes.tsv", "run_status.json"):
+        if not path.is_file() or path.name in (
+                "artifact_hashes.tsv", "run_status.json", "run_manifest.json"):
             continue
         rows.append({
-            "artifact_type": path.stem,
+            "artifact_type": _artifact_type_for_path(path),
             "path": path.name,
             "size_bytes": path.stat().st_size,
             "sha256": sha256_file(path),
@@ -1694,6 +2081,26 @@ def _artifact_rows(run_dir, log_info, checkpoint_rows, final_status):
     return rows
 
 
+def _remove_run_from_formal_tables(records_root, run_id):
+    """Rollback a finalization that failed after formal table staging."""
+    tables = Path(records_root) / "tables"
+    for name, fields in TABLE_SCHEMAS.items():
+        path = tables / "{}.csv".format(name)
+        rows = migrate_delimited_schema(path, fields, delimiter=",")
+        kept = [row for row in rows if row.get("run_id") != str(run_id)]
+        if len(kept) == len(rows):
+            continue
+        temporary = path.with_name("{}.tmp.{}".format(path.name, os.getpid()))
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle, fieldnames=fields, lineterminator="\n"
+            )
+            writer.writeheader()
+            writer.writerows(kept)
+        os.replace(str(temporary), str(path))
+        csv_to_markdown(path, tables / "{}.md".format(name))
+
+
 def _lambda_table_eligible(manifest):
     family = str(manifest["experiment_family"]).lower()
     identifier = str(manifest["experiment_id"]).lower()
@@ -1703,116 +2110,159 @@ def _lambda_table_eligible(manifest):
     )
 
 
-def update_experiments_markdown(experiments_path, main_rows):
-    target = Path(experiments_path)
-    historical = target.read_text(encoding="utf-8") if target.is_file() else "# Experiments\n"
-    fields = (
-        "experiment_id", "run_id", "run_kind", "date", "commit", "branch",
-        "parent_branch", "parent_commit",
-        "method", "method_family", "method_variant",
-        "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
-        "seed", "lambda", "cross_camera_positive_lambda", "pcc_lambda",
-        "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy",
-        "alignment_mode", "alignment_temperature", "gating_mode",
-        "gating_temperature", "multigranular_feature_signature_sha256",
-        "baseline", "valid_pcc_pair_count",
-        "mean_fixed_index_part_distance", "hard_alignment_loss",
-        "valid_alignment_pair_count", "mean_hard_path_cost",
-        "mean_path_absolute_offset", "soft_alignment_loss",
-        "mean_soft_path_cost", "runtime_seconds", "best_epoch", "Rank-1",
-        "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
-        "status", "notes",
-    )
+def _read_tsv_rows(path):
+    target = Path(path)
+    if not target.is_file() or target.stat().st_size == 0:
+        return []
+    with target.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def _markdown_value(value):
+    if value is None or value == "":
+        value = NOT_RECORDED
+    return (_normalized_text(value).replace("\\", "\\\\")
+            .replace("|", "\\|").replace("\n", "<br>"))
+
+
+def _markdown_table_section(start, end, title, source_text, fields, rows):
     lines = [
-        AUTO_RESULTS_START,
-        "## Automated Formal Experiment Runs",
-        "",
-        "This section is generated from `experiment_records/tables/main_results.csv`.",
-        "Historical experiment rows outside this section are never rewritten.",
-        "",
+        start, "## {}".format(title), "", source_text, "",
         "| " + " | ".join(fields) + " |",
         "|" + "|".join("---" for _ in fields) + "|",
     ]
-    for row in main_rows:
-        date_match = re.search(r"(\d{8})T", row["run_id"])
-        run_date = NOT_RECORDED
-        if date_match:
-            compact = date_match.group(1)
-            run_date = "{}-{}-{}".format(compact[:4], compact[4:6], compact[6:8])
-        values = {
-            "experiment_id": row["experiment_id"],
-            "run_id": row["run_id"],
-            "run_kind": row["run_kind"],
-            "date": run_date,
-            "commit": row["commit"],
-            "branch": row["branch"],
-            "parent_branch": row["parent_branch"],
-            "parent_commit": row["parent_commit"],
-            "method": row["method"],
-            "method_family": row["method_family"],
-            "method_variant": row["method_variant"],
-            "dataset": row["dataset"],
-            "config": row["config"],
-            "output_dir": row["output_dir"],
-            "log_path": row["log_path"],
-            "log_sha256": row["log_sha256"],
-            "GPU": row["gpu"],
-            "seed": row["seed"],
-            "lambda": row["lambda"],
-            "cross_camera_positive_lambda": row["cross_camera_positive_lambda"],
-            "pcc_lambda": row["pcc_lambda"],
-            "pcc_enabled": row["pcc_enabled"],
-            "pcc_parts": row["pcc_parts"],
-            "pcc_mode": row["pcc_mode"],
-            "alignment_strategy": row["alignment_strategy"],
-            "alignment_mode": row["alignment_mode"],
-            "alignment_temperature": row["alignment_temperature"],
-            "gating_mode": row["gating_mode"],
-            "gating_temperature": row["gating_temperature"],
-            "multigranular_feature_signature_sha256": row[
-                "multigranular_feature_signature_sha256"
-            ],
-            "baseline": row["baseline"],
-            "valid_pcc_pair_count": row["valid_pcc_pair_count"],
-            "mean_fixed_index_part_distance": row[
-                "mean_fixed_index_part_distance"
-            ],
-            "hard_alignment_loss": row["hard_alignment_loss"],
-            "valid_alignment_pair_count": row[
-                "valid_alignment_pair_count"
-            ],
-            "mean_hard_path_cost": row["mean_hard_path_cost"],
-            "mean_path_absolute_offset": row[
-                "mean_path_absolute_offset"
-            ],
-            "soft_alignment_loss": row["soft_alignment_loss"],
-            "mean_soft_path_cost": row["mean_soft_path_cost"],
-            "runtime_seconds": row["runtime_seconds"],
-            "best_epoch": row["best_epoch"],
-            "Rank-1": row["rank1"],
-            "Rank-5": row["rank5"],
-            "Rank-10": row["rank10"],
-            "mAP": row["map"],
-            "checkpoint": row["checkpoint"],
-            "checkpoint_sha256": row["checkpoint_sha256"],
-            "status": row["status"],
-            "notes": row["notes"],
-        }
+    for row in rows:
         lines.append("| " + " | ".join(
-            str(values[field]).replace("|", "\\|").replace("\n", " ")
+            _markdown_value(row.get(field, NOT_RECORDED))
             for field in fields
         ) + " |")
-    lines.extend([AUTO_RESULTS_END, ""])
-    generated = "\n".join(lines)
-    if AUTO_RESULTS_START in historical and AUTO_RESULTS_END in historical:
-        prefix = historical.split(AUTO_RESULTS_START, 1)[0].rstrip()
-        suffix = historical.split(AUTO_RESULTS_END, 1)[1].lstrip()
-        content = prefix + "\n\n" + generated
-        if suffix:
-            content += "\n" + suffix
-    else:
-        content = historical.rstrip() + "\n\n" + generated
+    lines.extend([end, ""])
+    return "\n".join(lines)
+
+
+def _replace_generated_section(content, start, end, generated):
+    has_start = start in content
+    has_end = end in content
+    if has_start != has_end:
+        raise EvidenceError(
+            "EXPERIMENTS.md has an incomplete generated section {}".format(start)
+        )
+    if has_start:
+        prefix, remainder = content.split(start, 1)
+        _, suffix = remainder.split(end, 1)
+        return prefix.rstrip() + "\n\n" + generated.rstrip() + "\n" + suffix.lstrip()
+    return content.rstrip() + "\n\n" + generated.rstrip() + "\n"
+
+
+def _authoritative_run_rows(records_root):
+    records_root = Path(records_root)
+    registry = {
+        row.get("run_id"): row for row in _read_csv(records_root / "runs.csv")
+        if row.get("run_id")
+    }
+    for run_dir in sorted((records_root / "runs").glob("*")):
+        manifest_path = run_dir / "run_manifest.json"
+        status_path = run_dir / "run_status.json"
+        if not manifest_path.is_file() or not status_path.is_file():
+            continue
+        manifest = read_json(manifest_path)
+        status = read_json(status_path)
+        registry[manifest.get("run_id", run_dir.name)] = _run_row_from_manifest(
+            run_dir, manifest, status
+        )
+    return sorted(
+        registry.values(),
+        key=lambda row: (row.get("start_time", ""), row.get("run_id", "")),
+    )
+
+
+def _authoritative_checkpoint_rows(records_root, run_rows):
+    run_index = {row.get("run_id"): row for row in run_rows}
+    rows = []
+    for run_dir in sorted((Path(records_root) / "runs").glob("*")):
+        path = run_dir / "checkpoint_manifest.tsv"
+        if not path.is_file():
+            continue
+        for checkpoint in _read_tsv_rows(path):
+            run = run_index.get(run_dir.name, {})
+            rows.append({
+                "run_id": checkpoint.get("run_id", run_dir.name),
+                "experiment_id": run.get("experiment_id", NOT_RECORDED),
+                "run_kind": run.get("run_kind", NOT_RECORDED),
+                "checkpoint_path": checkpoint.get("path", MISSING_EVIDENCE),
+                "size_bytes": checkpoint.get("size_bytes", MISSING_EVIDENCE),
+                "ignite_epoch": checkpoint.get("epoch", MISSING_EVIDENCE),
+                "global_iteration": checkpoint.get(
+                    "global_iteration", MISSING_EVIDENCE
+                ),
+                "sha256": checkpoint.get("sha256", MISSING_EVIDENCE),
+                "selected": checkpoint.get("selected", "False"),
+            })
+    return sorted(rows, key=lambda row: (
+        row.get("run_id", ""), str(row.get("ignite_epoch", "")),
+        row.get("checkpoint_path", ""),
+    ))
+
+
+def update_experiments_markdown(experiments_path, records_root):
+    """Atomically regenerate all recorder-owned Markdown sections."""
+    target = Path(experiments_path)
+    records_root = Path(records_root)
+    historical = (
+        target.read_text(encoding="utf-8")
+        if target.is_file() else "# Experiments\n"
+    )
+    # Reading this source is intentional: it is authoritative artifact evidence,
+    # while per-run manifests provide the denormalized display values.
+    _read_tsv_rows(records_root / "evidence_manifest.tsv")
+    run_rows = _authoritative_run_rows(records_root)
+    run_start = {
+        row.get("run_id"): row.get("start_time", "") for row in run_rows
+    }
+    formal_rows = sorted([
+        row for row in _read_csv(records_root / "tables" / "main_results.csv")
+        if row.get("run_kind") == "formal" and row.get("status") == "success"
+    ], key=lambda row: (
+        run_start.get(row.get("run_id"), ""), row.get("run_id", "")
+    ))
+    checkpoint_rows = _authoritative_checkpoint_rows(records_root, run_rows)
+    runs_section = _markdown_table_section(
+        AUTO_RUNS_START, AUTO_RUNS_END, "Run Registry / All Recorded Runs",
+        "Generated from `experiment_records/runs.csv`, per-run manifests, "
+        "statuses, and `evidence_manifest.tsv`.", RUN_FIELDS, run_rows,
+    )
+    formal_section = _markdown_table_section(
+        AUTO_RESULTS_START, AUTO_RESULTS_END, "Formal Results",
+        "Generated only from successful formal rows in "
+        "`experiment_records/tables/main_results.csv`.",
+        MAIN_FIELDS, formal_rows,
+    )
+    checkpoint_fields = (
+        "run_id", "experiment_id", "run_kind", "checkpoint_path",
+        "size_bytes", "ignite_epoch", "global_iteration", "sha256",
+        "selected",
+    )
+    checkpoint_section = _markdown_table_section(
+        AUTO_CHECKPOINTS_START, AUTO_CHECKPOINTS_END, "Checkpoint Evidence",
+        "Generated from each run's authoritative `checkpoint_manifest.tsv`; "
+        "epochs and iterations are Ignite evidence, never inferred.",
+        checkpoint_fields, checkpoint_rows,
+    )
+    content = _replace_generated_section(
+        historical, AUTO_RUNS_START, AUTO_RUNS_END, runs_section
+    )
+    content = _replace_generated_section(
+        content, AUTO_RESULTS_START, AUTO_RESULTS_END, formal_section
+    )
+    content = _replace_generated_section(
+        content, AUTO_CHECKPOINTS_START, AUTO_CHECKPOINTS_END,
+        checkpoint_section,
+    )
     atomic_write_text(target, content)
+    return {
+        "all_runs": len(run_rows), "formal_results": len(formal_rows),
+        "checkpoints": len(checkpoint_rows),
+    }
 
 
 def _prepare_table_rows(manifest, metrics, environment, efficiency,
@@ -1858,6 +2308,27 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "multigranular_feature_signature_sha256": manifest.get(
             "multigranular_feature_signature_sha256", NOT_RECORDED
         ),
+        "feature_reference_commit": manifest.get(
+            "feature_reference_commit", NOT_RECORDED
+        ),
+        "feature_reference_signature_sha256": manifest.get(
+            "feature_reference_signature_sha256", NOT_RECORDED
+        ),
+        "current_feature_signature_sha256": manifest.get(
+            "current_feature_signature_sha256", NOT_RECORDED
+        ),
+        "feature_compatibility_status": manifest.get(
+            "feature_compatibility_status", NOT_RECORDED
+        ),
+        "feature_compatibility_evidence_path": manifest.get(
+            "feature_compatibility_evidence_path", NOT_RECORDED
+        ),
+        "feature_compatibility_evidence_size_bytes": manifest.get(
+            "feature_compatibility_evidence_size_bytes", NOT_RECORDED
+        ),
+        "feature_compatibility_evidence_sha256": manifest.get(
+            "feature_compatibility_evidence_sha256", NOT_RECORDED
+        ),
         "baseline": manifest.get("baseline", NOT_RECORDED),
         "margin": manifest["margin"],
         "mode": manifest["mode"],
@@ -1872,8 +2343,41 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "runtime_seconds": metrics["runtime_seconds"],
         "gpu": _gpu_label(environment),
         "config": manifest["config_file"],
+        "source_config_path": normalized_path(
+            (Path(metrics["run_dir"]) / "config_source.yml").resolve()
+        ),
+        "source_config_sha256": manifest.get(
+            "config_source_sha256", NOT_RECORDED
+        ),
+        "resolved_config_path": normalized_path(
+            (Path(metrics["run_dir"]) / "config_resolved.yml").resolve()
+        ),
+        "resolved_config_sha256": manifest.get(
+            "config_resolved_sha256", NOT_RECORDED
+        ),
         "log_path": metrics["log_path"],
+        "training_log_size_bytes": Path(metrics["log_path"]).stat().st_size,
         "log_sha256": metrics["log_sha256"],
+        "console_log_path": manifest.get("console_log_path", NOT_RECORDED),
+        "console_log_size_bytes": manifest.get(
+            "console_log_size_bytes", NOT_RECORDED
+        ),
+        "console_log_sha256": manifest.get(
+            "console_log_sha256", NOT_RECORDED
+        ),
+        "artifact_manifest_path": manifest.get(
+            "artifact_manifest_path", NOT_RECORDED
+        ),
+        "artifact_manifest_size_bytes": (
+            Path(manifest["artifact_manifest_path"]).stat().st_size
+            if manifest.get("artifact_manifest_path") not in (
+                None, "", NOT_RECORDED, MISSING_EVIDENCE
+            ) and Path(manifest["artifact_manifest_path"]).is_file()
+            else NOT_RECORDED
+        ),
+        "artifact_manifest_sha256": manifest.get(
+            "artifact_manifest_sha256", NOT_RECORDED
+        ),
         "output_dir": manifest["output_dir"],
         "valid_pcc_pair_count": metrics["valid_pcc_pair_count"],
         "mean_fixed_index_part_distance": metrics["mean_fixed_index_part_distance"],
@@ -2131,6 +2635,57 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     manifest["parent_commit"],
                     child_commit=manifest["commit_id"],
                 )
+            if int(manifest.get("schema_version", 1)) >= 4:
+                feature_path = run_dir / "feature_compatibility.json"
+                if not feature_path.is_file():
+                    raise EvidenceError(
+                        "Parent-bound feature compatibility evidence is missing"
+                    )
+                feature_sha = sha256_file(feature_path)
+                if feature_sha != manifest.get(
+                        "feature_compatibility_evidence_sha256"):
+                    raise EvidenceError(
+                        "Feature compatibility evidence SHA256 differs"
+                    )
+                feature = read_json(feature_path)
+                required_feature = (
+                    "feature_reference_commit",
+                    "feature_reference_signature_sha256",
+                    "current_feature_signature_sha256",
+                    "feature_compatibility_status", "components",
+                    "mismatched_components",
+                )
+                missing_feature = [
+                    key for key in required_feature if key not in feature
+                ]
+                if missing_feature:
+                    raise EvidenceError(
+                        "Feature compatibility evidence lacks {}".format(
+                            missing_feature
+                        )
+                    )
+                if feature["feature_reference_commit"].lower() != str(
+                        manifest["parent_commit"]).lower():
+                    raise EvidenceError(
+                        "Feature reference is not the fixed Hard parent commit"
+                    )
+                if feature["feature_compatibility_status"] != "compatible":
+                    raise EvidenceError("Shared feature compatibility failed")
+                if feature["mismatched_components"]:
+                    raise EvidenceError(
+                        "Shared feature components differ: {}".format(
+                            feature["mismatched_components"]
+                        )
+                    )
+                for field in (
+                        "feature_reference_commit",
+                        "feature_reference_signature_sha256",
+                        "current_feature_signature_sha256",
+                        "feature_compatibility_status"):
+                    if feature[field] != manifest.get(field):
+                        raise EvidenceError(
+                            "Feature manifest conflict for {}".format(field)
+                        )
         seed_values = (
             source_cfg.get("SEED", NOT_RECORDED),
             resolved_cfg.get("SEED", NOT_RECORDED),
@@ -2208,6 +2763,13 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         dataset_manifest = read_json(run_dir / "dataset_manifest.json")
         if not dataset_manifest.get("dataset_manifest_sha256"):
             raise EvidenceError("Dataset manifest hash is missing")
+        if int(manifest.get("schema_version", 1)) >= 4:
+            console_path = run_dir / "console.log"
+            if not console_path.is_file() or console_path.stat().st_size <= 0:
+                raise EvidenceError("Console log is missing or empty")
+            console_sha = sha256_file(console_path)
+            if console_sha != manifest.get("console_log_sha256"):
+                raise EvidenceError("Console log SHA256 differs")
         log_info = parse_training_log(output_dir / "log.txt")
         required_iteration_source = manifest.get(
             "required_global_iteration_source", NOT_RECORDED
@@ -2390,6 +2952,19 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             if model_manifest.get("parent_commit") != manifest.get(
                     "parent_commit"):
                 raise EvidenceError("Model/run parent commit evidence differs")
+            if int(manifest.get("schema_version", 1)) >= 4:
+                for field in (
+                        "feature_reference_commit",
+                        "feature_reference_signature_sha256",
+                        "current_feature_signature_sha256",
+                        "feature_compatibility_status",
+                        "feature_compatibility_evidence_sha256"):
+                    if model_manifest.get(field) != manifest.get(field):
+                        raise EvidenceError(
+                            "Model/run feature evidence differs for {}".format(
+                                field
+                            )
+                        )
         model_manifest.update({
             "total_params": efficiency.get("total_params", NOT_RECORDED),
             "trainable_params": efficiency.get("trainable_params", NOT_RECORDED),
@@ -2397,6 +2972,17 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "MACs": efficiency.get("MACs", NOT_RECORDED),
             "selected_checkpoint_sha256": selected["sha256"],
             "efficiency_profile": "efficiency_profile.json",
+            "feature_compatibility_evidence_path": manifest.get(
+                "feature_compatibility_evidence_path", NOT_RECORDED
+            ),
+            "feature_compatibility_evidence_size_bytes": (
+                (run_dir / "feature_compatibility.json").stat().st_size
+                if (run_dir / "feature_compatibility.json").is_file()
+                else NOT_RECORDED
+            ),
+            "feature_compatibility_evidence_sha256": manifest.get(
+                "feature_compatibility_evidence_sha256", NOT_RECORDED
+            ),
         })
         atomic_write_json(run_dir / "model_manifest.json", model_manifest)
         runtime_seconds = float(status["training_runtime_seconds"])
@@ -2510,6 +3096,41 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             ("artifact_type", "path", "size_bytes", "sha256"),
             artifact_rows,
         )
+        artifact_manifest_path = run_dir / "artifact_hashes.tsv"
+        manifest.update({
+            "training_log_path": log_info["path"],
+            "training_log_size_bytes": log_info["size_bytes"],
+            "training_log_sha256": log_info["sha256"],
+            "artifact_manifest_path": normalized_path(
+                artifact_manifest_path.resolve()
+            ),
+            "artifact_manifest_sha256": sha256_file(
+                artifact_manifest_path
+            ),
+            "artifact_manifest_size_bytes": artifact_manifest_path.stat().st_size,
+        })
+        atomic_write_json(run_dir / "run_manifest.json", manifest)
+        artifact_rows.extend([
+            {
+                "artifact_type": "run_manifest",
+                "path": normalized_path(
+                    (run_dir / "run_manifest.json").resolve()
+                ),
+                "size_bytes": (run_dir / "run_manifest.json").stat().st_size,
+                "sha256": sha256_file(run_dir / "run_manifest.json"),
+            },
+            {
+                "artifact_type": "artifact_manifest",
+                "path": manifest["artifact_manifest_path"],
+                "size_bytes": artifact_manifest_path.stat().st_size,
+                "sha256": manifest["artifact_manifest_sha256"],
+            },
+        ])
+        rows = _prepare_table_rows(
+            manifest, metrics, environment, efficiency, distance, anchor
+        )
+        (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
+         pcc_row, alignment_row) = rows
         tables_dir = records_root / "tables"
         main_rows = _read_csv(tables_dir / "main_results.csv")
         if manifest["run_kind"] == "formal":
@@ -2615,6 +3236,10 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "mean_soft_path_cost": metrics["mean_soft_path_cost"],
             "notes": manifest["notes"],
         }
+        # Rebuild from the persisted schema-v4 manifests so the all-runs row
+        # cannot omit console/config/feature/artifact evidence fields.
+        atomic_write_json(run_dir / "run_status.json", final_status)
+        run_row = _run_row_from_manifest(run_dir, manifest, final_status)
         upsert_csv(records_root / "runs.csv", RUN_FIELDS, run_row)
         evidence_rows = []
         for row in artifact_rows:
@@ -2634,12 +3259,16 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 row,
                 key_fields=("run_id", "path"),
             )
-        if manifest["run_kind"] == "formal":
-            update_experiments_markdown(experiments_path, main_rows)
-        atomic_write_json(run_dir / "run_status.json", final_status)
+        update_experiments_markdown(experiments_path, records_root)
         return {"manifest": manifest, "metrics": metrics, "status": final_status}
     except BaseException as error:
         failure_status = "incomplete"
+        try:
+            _remove_run_from_formal_tables(
+                records_root, manifest.get("run_id", run_dir.name)
+            )
+        except Exception:
+            pass
         try:
             current_status = read_json(run_dir / "run_status.json")
             exit_code = current_status.get("training_exit_code")

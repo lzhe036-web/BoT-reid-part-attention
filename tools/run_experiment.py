@@ -5,8 +5,10 @@
 from __future__ import absolute_import
 
 import argparse
+import codecs
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -29,13 +31,19 @@ from utils.experiment_recording import (
     finalize_run,
     generate_run_id,
     initialize_run,
+    record_console_log_evidence,
     record_run_failure,
     record_training_exit,
     validate_git_preflight,
     validate_parent_lineage,
 )
 from utils.multigranular_signature import (
+    FEATURE_REFERENCE_CONFIG,
+    FIXED_HARD_FEATURE_REFERENCE_COMMIT,
+    build_feature_compatibility_evidence,
     canonical_multigranular_feature_signature,
+    git_show_source,
+    require_feature_compatibility,
 )
 from utils.reproducibility import (
     RUNNER_SEED_ENV,
@@ -61,6 +69,10 @@ def parse_args(argv=None):
     parser.add_argument("--baseline-commit", default=NOT_RECORDED)
     parser.add_argument("--parent-branch", default=NOT_RECORDED)
     parser.add_argument("--parent-commit", default=NOT_RECORDED)
+    parser.add_argument("--feature-reference-commit", default=NOT_RECORDED)
+    parser.add_argument(
+        "--feature-reference-config", default=FEATURE_REFERENCE_CONFIG
+    )
     parser.add_argument(
         "--records-root",
         default=str(REPO_ROOT / "experiment_records"),
@@ -122,6 +134,18 @@ def _load_source_output_dir(config_path):
     return source.get("OUTPUT_DIR", NOT_RECORDED)
 
 
+def _load_revision_config(repo_root, revision, repo_relative_path):
+    import yaml
+
+    source = git_show_source(repo_root, revision, repo_relative_path)
+    configuration = yaml.safe_load(source)
+    if not isinstance(configuration, dict):
+        raise RuntimeError(
+            "Feature reference config is not a YAML mapping"
+        )
+    return configuration
+
+
 def _validate_resolved_run_config(configuration, run_kind,
                                   source_output_dir):
     """Validate effective smoke isolation after every override is applied."""
@@ -161,13 +185,105 @@ def _build_training_environment(resolved_seed, base_environment=None):
     return training_env
 
 
-def _launch_training_subprocess(train_command, training_env):
-    return subprocess.run(
-        train_command,
-        cwd=str(REPO_ROOT),
-        check=False,
-        env=training_env,
+class TrainingInterrupted(KeyboardInterrupt):
+    """Raised after a child is terminated and its console tee is flushed."""
+
+    def __init__(self, message, returncode=None):
+        super(TrainingInterrupted, self).__init__(message)
+        self.returncode = returncode
+
+
+def _write_console_chunk(decoder, chunk, console_handle, terminal_stream,
+                         final=False):
+    text = decoder.decode(chunk, final=final)
+    if text:
+        console_handle.write(text)
+        console_handle.flush()
+        terminal_stream.write(text)
+        terminal_stream.flush()
+
+
+def _terminate_and_drain(process, decoder, console_handle, terminal_stream):
+    if process.poll() is None:
+        process.terminate()
+    try:
+        remaining, _ = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        remaining, _ = process.communicate()
+    if remaining:
+        _write_console_chunk(
+            decoder, remaining, console_handle, terminal_stream
+        )
+    _write_console_chunk(
+        decoder, b"", console_handle, terminal_stream, final=True
     )
+    return process.returncode
+
+
+def _launch_training_subprocess(train_command, training_env,
+                                console_log_path=None,
+                                terminal_stream=None):
+    # Retain the callable's legacy diagnostic behavior for old callers; every
+    # unified runner invocation below always supplies an independent log path.
+    if console_log_path is None:
+        return subprocess.run(
+            train_command, cwd=str(REPO_ROOT), check=False, env=training_env
+        )
+    console_path = Path(console_log_path)
+    console_path.parent.mkdir(parents=True, exist_ok=True)
+    terminal_stream = terminal_stream or sys.stdout
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    child_environment = dict(training_env)
+    child_environment["PYTHONIOENCODING"] = "utf-8:replace"
+    child_environment["PYTHONUTF8"] = "1"
+    process = subprocess.Popen(
+        train_command, cwd=str(REPO_ROOT), env=child_environment,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+    )
+    previous_sigterm = None
+    can_handle_sigterm = hasattr(signal, "SIGTERM")
+
+    def interrupt_handler(signum, frame):
+        raise TrainingInterrupted("Training interrupted by signal {}".format(signum))
+
+    if can_handle_sigterm:
+        try:
+            previous_sigterm = signal.signal(signal.SIGTERM, interrupt_handler)
+        except (ValueError, OSError):
+            can_handle_sigterm = False
+    try:
+        with console_path.open(
+                "w", encoding="utf-8", errors="replace", newline="") as handle:
+            try:
+                while True:
+                    chunk = process.stdout.read(4096)
+                    if not chunk:
+                        break
+                    _write_console_chunk(
+                        decoder, chunk, handle, terminal_stream
+                    )
+                _write_console_chunk(
+                    decoder, b"", handle, terminal_stream, final=True
+                )
+                returncode = process.wait()
+            except (KeyboardInterrupt, TrainingInterrupted):
+                _terminate_and_drain(
+                    process, decoder, handle, terminal_stream
+                )
+                raise TrainingInterrupted(
+                    "Training subprocess interrupted (return code {})".format(
+                        process.returncode
+                    ), returncode=process.returncode,
+                )
+            finally:
+                handle.flush()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if can_handle_sigterm:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    return subprocess.CompletedProcess(train_command, returncode)
 
 
 def _plain_config(local_cfg):
@@ -194,11 +310,13 @@ def _model_manifest(configuration, method=None,
                     baseline_method=NOT_RECORDED,
                     baseline_commit=NOT_RECORDED,
                     parent_branch=NOT_RECORDED,
-                    parent_commit=NOT_RECORDED):
+                    parent_commit=NOT_RECORDED,
+                    feature_compatibility=None):
     identity = experiment_identity(configuration)
     signature, signature_sha256 = (
         canonical_multigranular_feature_signature(configuration)
     )
+    feature_compatibility = feature_compatibility or {}
     return {
         "schema_version": SCHEMA_VERSION,
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
@@ -211,6 +329,22 @@ def _model_manifest(configuration, method=None,
         "baseline_commit": baseline_commit,
         "parent_branch": parent_branch,
         "parent_commit": parent_commit,
+        "feature_reference_commit": feature_compatibility.get(
+            "feature_reference_commit", NOT_RECORDED
+        ),
+        "feature_reference_signature_sha256": feature_compatibility.get(
+            "feature_reference_signature_sha256", NOT_RECORDED
+        ),
+        "current_feature_signature_sha256": feature_compatibility.get(
+            "current_feature_signature_sha256", NOT_RECORDED
+        ),
+        "feature_compatibility_status": feature_compatibility.get(
+            "feature_compatibility_status", NOT_RECORDED
+        ),
+        "feature_compatibility_evidence_path": (
+            "feature_compatibility.json" if feature_compatibility
+            else NOT_RECORDED
+        ),
         "multigranular_feature_signature": signature,
         "multigranular_feature_signature_sha256": signature_sha256,
         "modules": identity["modules"],
@@ -257,6 +391,36 @@ def run(args):
             REPO_ROOT, args.parent_branch, args.parent_commit,
             child_commit=git_info["commit"],
         )
+    feature_compatibility = None
+    alignment_mode = configuration.get("MODEL", {}).get("PCC_MODE")
+    if (alignment_mode == "soft_min"
+            and args.feature_reference_commit.lower()
+            != FIXED_HARD_FEATURE_REFERENCE_COMMIT):
+        raise RuntimeError(
+            "Soft-Min feature reference must be the fixed Hard commit {}"
+            .format(FIXED_HARD_FEATURE_REFERENCE_COMMIT)
+        )
+    if args.feature_reference_commit != NOT_RECORDED:
+        if args.parent_commit != NOT_RECORDED and (
+                args.feature_reference_commit.lower()
+                != args.parent_commit.lower()):
+            raise RuntimeError(
+                "Feature reference must be the exact recorded Hard parent commit"
+            )
+        reference_configuration = _load_revision_config(
+            REPO_ROOT, args.feature_reference_commit,
+            args.feature_reference_config,
+        )
+        feature_compatibility = require_feature_compatibility(
+            build_feature_compatibility_evidence(
+                REPO_ROOT, args.feature_reference_commit,
+                git_info["commit"], reference_configuration, configuration,
+            )
+        )
+    elif alignment_mode == "soft_min":
+        raise RuntimeError(
+            "Soft-Min requires --feature-reference-commit"
+        )
     source_seed = _load_explicit_source_seed(config_path)
     resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))
     validate_seed_evidence_chain(source_seed, resolved_seed, resolved_seed)
@@ -282,6 +446,8 @@ def run(args):
         run_kind=args.run_kind,
         parent_branch=args.parent_branch,
         parent_commit=args.parent_commit,
+        feature_compatibility=feature_compatibility,
+        experiments_path=REPO_ROOT / "EXPERIMENTS.md",
     )
     try:
         environment = collect_environment(
@@ -299,17 +465,29 @@ def run(args):
             dataset, configuration, local_cfg.DATASETS.ROOT_DIR
         )
         atomic_write_json(run_dir / "dataset_manifest.json", dataset_manifest)
-        atomic_write_json(
-            run_dir / "model_manifest.json",
-            _model_manifest(
+        model_manifest = _model_manifest(
                 configuration,
                 method=args.method,
                 baseline_method=args.baseline_method,
                 baseline_commit=args.baseline_commit,
                 parent_branch=args.parent_branch,
                 parent_commit=args.parent_commit,
+                feature_compatibility=feature_compatibility,
+            )
+        model_manifest.update({
+            "feature_compatibility_evidence_path": manifest.get(
+                "feature_compatibility_evidence_path", NOT_RECORDED
             ),
-        )
+            "feature_compatibility_evidence_size_bytes": (
+                (run_dir / "feature_compatibility.json").stat().st_size
+                if (run_dir / "feature_compatibility.json").is_file()
+                else NOT_RECORDED
+            ),
+            "feature_compatibility_evidence_sha256": manifest.get(
+                "feature_compatibility_evidence_sha256", NOT_RECORDED
+            ),
+        })
+        atomic_write_json(run_dir / "model_manifest.json", model_manifest)
         train_command = [
             sys.executable,
             "tools/train.py",
@@ -317,9 +495,12 @@ def run(args):
             str(config_path),
         ] + list(args.opts or [])
         started = time.monotonic()
-        completed = _launch_training_subprocess(train_command, training_env)
+        completed = _launch_training_subprocess(
+            train_command, training_env, run_dir / "console.log"
+        )
         runtime = time.monotonic() - started
         record_training_exit(run_dir, completed.returncode, runtime)
+        record_console_log_evidence(run_dir)
         if completed.returncode != 0:
             raise RuntimeError(
                 "Training exited with code {}".format(completed.returncode)
@@ -335,11 +516,28 @@ def run(args):
         print(json.dumps(result["metrics"], ensure_ascii=False, indent=2))
         return 0
     except BaseException as error:
-        current_status = "failed"
+        current_status = (
+            "interrupted" if isinstance(error, (KeyboardInterrupt, TrainingInterrupted))
+            else "failed"
+        )
+        try:
+            console_path = run_dir / "console.log"
+            if console_path.is_file() and console_path.stat().st_size > 0:
+                record_console_log_evidence(run_dir)
+        except Exception:
+            pass
+        if isinstance(error, TrainingInterrupted) and error.returncode is not None:
+            try:
+                record_training_exit(
+                    run_dir, error.returncode, time.monotonic() - started
+                )
+            except Exception:
+                pass
         try:
             status_path = run_dir / "run_status.json"
             status = json.loads(status_path.read_text(encoding="utf-8"))
-            if status.get("training_exit_code") == 0:
+            if (current_status != "interrupted"
+                    and status.get("training_exit_code") == 0):
                 current_status = "incomplete"
         except Exception:
             pass

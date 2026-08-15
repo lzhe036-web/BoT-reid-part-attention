@@ -36,7 +36,9 @@ from utils.experiment_recording import (
     validate_parent_lineage,
 )
 from utils.multigranular_signature import (
+    build_feature_compatibility_evidence,
     canonical_multigranular_feature_signature,
+    require_feature_compatibility,
 )
 
 
@@ -137,6 +139,18 @@ def main():
     require(
         hard_signature_sha == soft_signature_sha,
         "feature signature SHA256 differs",
+    )
+    current_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), text=True
+    ).strip()
+    feature_compatibility = require_feature_compatibility(
+        build_feature_compatibility_evidence(
+            REPO_ROOT, HARD_SHA, current_commit, hard, soft
+        )
+    )
+    require(
+        feature_compatibility["feature_reference_commit"] == HARD_SHA,
+        "feature signature is not bound to the fixed Hard commit",
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -253,6 +267,18 @@ def main():
         "finite_gradient": True,
         "inference_descriptor_shape": list(inference.shape),
         "feature_signature_sha256": soft_signature_sha,
+        "feature_reference_commit": feature_compatibility[
+            "feature_reference_commit"
+        ],
+        "feature_reference_signature_sha256": feature_compatibility[
+            "feature_reference_signature_sha256"
+        ],
+        "current_feature_signature_sha256": feature_compatibility[
+            "current_feature_signature_sha256"
+        ],
+        "feature_compatibility_status": feature_compatibility[
+            "feature_compatibility_status"
+        ],
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

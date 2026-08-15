@@ -39,6 +39,7 @@ python tools/run_experiment.py \
   --expected-commit "${CURRENT_COMMIT}" \
   --parent-branch "${PARENT_BRANCH}" \
   --parent-commit "${PARENT_COMMIT}" \
+  --feature-reference-commit "${PARENT_COMMIT}" \
   --notes "One-epoch Soft-Min tau=0.1 smoke; retained in run evidence and excluded from formal tables." \
   SOLVER.MAX_EPOCHS 1 \
   SOLVER.CHECKPOINT_PERIOD 1 \

@@ -337,6 +337,9 @@ class SoftMinAlignmentTest(unittest.TestCase):
                 self.assertIn(HARD_SHA, text)
                 self.assertIn('--parent-branch "${PARENT_BRANCH}"', text)
                 self.assertIn('--parent-commit "${PARENT_COMMIT}"', text)
+                self.assertIn(
+                    '--feature-reference-commit "${PARENT_COMMIT}"', text
+                )
         smoke_text = runners["smoke"].read_text(encoding="utf-8")
         self.assertIn("SOLVER.MAX_EPOCHS 1", smoke_text)
         self.assertIn(

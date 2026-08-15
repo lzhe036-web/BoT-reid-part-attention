@@ -853,7 +853,6 @@ class ExperimentRecordingTest(unittest.TestCase):
                 pcc_mode="hard_shortest_path",
                 run_kind="smoke",
             )
-            historical = experiments.read_text(encoding="utf-8")
             finalize_fixture(records, run_dir, experiments)
             self.assertEqual(
                 _read_csv(records / "tables" / "main_results.csv"), []
@@ -864,14 +863,37 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(
                 _read_csv(records / "tables" / "alignment_ablation.csv"), []
             )
-            self.assertEqual(
-                experiments.read_text(encoding="utf-8"), historical
-            )
+            markdown = experiments.read_text(encoding="utf-8")
+            self.assertIn("Run Registry / All Recorded Runs", markdown)
+            self.assertIn("C2-HARD-ALIGN-K6-S42-SMOKE", markdown)
+            formal_section = markdown.split(AUTO_RESULTS_START, 1)[1]
+            formal_section = formal_section.split(
+                "<!-- AUTO-EXPERIMENT-RESULTS:END -->", 1
+            )[0]
+            self.assertNotIn("C2-HARD-ALIGN-K6-S42-SMOKE", formal_section)
             registry = _read_csv(records / "runs.csv")
             evidence = _read_tsv(records / "evidence_manifest.tsv")
             self.assertEqual(registry[0]["run_kind"], "smoke")
             self.assertTrue(evidence)
             self.assertEqual({row["run_kind"] for row in evidence}, {"smoke"})
+
+    def test_markdown_failure_rolls_back_formal_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(directory)
+            original = experiments.read_bytes()
+            with mock.patch(
+                    "utils.experiment_recording.update_experiments_markdown",
+                    side_effect=EvidenceError("markdown write failed")):
+                with self.assertRaisesRegex(EvidenceError, "markdown write failed"):
+                    finalize_fixture(records, run_dir, experiments)
+            self.assertEqual(
+                _read_csv(records / "tables" / "main_results.csv"), []
+            )
+            status = json.loads(
+                (run_dir / "run_status.json").read_text(encoding="utf-8")
+            )
+            self.assertNotEqual(status["status"], "success")
+            self.assertEqual(experiments.read_bytes(), original)
 
     def test_legacy_schema_migration_preserves_rows_and_marks_v1(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -923,6 +945,25 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(
                 migrated["multigranular_feature_signature_sha256"],
                 NOT_RECORDED,
+            )
+
+    def test_v3_schema_migration_marks_new_evidence_not_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            from utils.experiment_recording import RUN_FIELDS
+
+            path = Path(directory) / "runs.csv"
+            path.write_text(
+                "schema_version,run_id,run_kind,status,notes\n"
+                "3,legacy-v3,formal,success,keep-v3\n",
+                encoding="utf-8",
+            )
+            migrate_delimited_schema(path, RUN_FIELDS)
+            migrated = _read_csv(path)[0]
+            self.assertEqual(migrated["schema_version"], "3")
+            self.assertEqual(migrated["notes"], "keep-v3")
+            self.assertEqual(migrated["console_log_sha256"], NOT_RECORDED)
+            self.assertEqual(
+                migrated["feature_reference_commit"], NOT_RECORDED
             )
 
     def test_legacy_fixed_index_json_manifest_remains_readable(self):

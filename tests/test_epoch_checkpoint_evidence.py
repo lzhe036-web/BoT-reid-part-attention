@@ -91,7 +91,7 @@ class EpochCheckpointEvidenceTest(unittest.TestCase):
             )
             self.assertEqual(rows[0]["epoch"], 1)
             self.assertEqual(rows[0]["global_iteration"], 186)
-            self.assertEqual(rows[0]["schema_version"], 3)
+            self.assertEqual(rows[0]["schema_version"], 4)
             self.assertEqual(Path(rows[0]["path"]).name, selected["filename"])
             self.assertEqual(
                 rows[0]["global_iteration_source"],
