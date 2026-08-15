@@ -32,6 +32,10 @@ from utils.experiment_recording import (
     record_run_failure,
     record_training_exit,
     validate_git_preflight,
+    validate_parent_lineage,
+)
+from utils.multigranular_signature import (
+    canonical_multigranular_feature_signature,
 )
 from utils.reproducibility import (
     RUNNER_SEED_ENV,
@@ -55,6 +59,8 @@ def parse_args(argv=None):
     parser.add_argument("--method")
     parser.add_argument("--baseline-method", default=NOT_RECORDED)
     parser.add_argument("--baseline-commit", default=NOT_RECORDED)
+    parser.add_argument("--parent-branch", default=NOT_RECORDED)
+    parser.add_argument("--parent-commit", default=NOT_RECORDED)
     parser.add_argument(
         "--records-root",
         default=str(REPO_ROOT / "experiment_records"),
@@ -108,6 +114,43 @@ def _load_explicit_source_seed(config_path):
     return validate_seed(source["SEED"])
 
 
+def _load_source_output_dir(config_path):
+    import yaml
+
+    with Path(config_path).open("r", encoding="utf-8") as handle:
+        source = yaml.safe_load(handle) or {}
+    return source.get("OUTPUT_DIR", NOT_RECORDED)
+
+
+def _validate_resolved_run_config(configuration, run_kind,
+                                  source_output_dir):
+    """Validate effective smoke isolation after every override is applied."""
+    solver = configuration.get("SOLVER", {})
+    output_dir = configuration.get("OUTPUT_DIR", NOT_RECORDED)
+    if output_dir in (None, "", NOT_RECORDED):
+        raise RuntimeError("Resolved OUTPUT_DIR is missing")
+    if run_kind == "smoke":
+        expected = {
+            "MAX_EPOCHS": 1,
+            "CHECKPOINT_PERIOD": 1,
+            "EVAL_PERIOD": 1,
+        }
+        conflicts = {
+            key: solver.get(key, NOT_RECORDED)
+            for key, value in expected.items()
+            if solver.get(key, NOT_RECORDED) != value
+        }
+        if conflicts:
+            raise RuntimeError(
+                "Resolved smoke config is not isolated: {}".format(conflicts)
+            )
+        if str(output_dir) == str(source_output_dir):
+            raise RuntimeError(
+                "Smoke OUTPUT_DIR must differ from the formal OUTPUT_DIR"
+            )
+    return configuration
+
+
 def _build_training_environment(resolved_seed, base_environment=None):
     seed = validate_seed(resolved_seed)
     training_env = dict(
@@ -149,8 +192,13 @@ def _require_new_output_dir(path):
 
 def _model_manifest(configuration, method=None,
                     baseline_method=NOT_RECORDED,
-                    baseline_commit=NOT_RECORDED):
+                    baseline_commit=NOT_RECORDED,
+                    parent_branch=NOT_RECORDED,
+                    parent_commit=NOT_RECORDED):
     identity = experiment_identity(configuration)
+    signature, signature_sha256 = (
+        canonical_multigranular_feature_signature(configuration)
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
@@ -161,6 +209,10 @@ def _model_manifest(configuration, method=None,
         "baseline": identity["baseline"],
         "baseline_method": baseline_method,
         "baseline_commit": baseline_commit,
+        "parent_branch": parent_branch,
+        "parent_commit": parent_commit,
+        "multigranular_feature_signature": signature,
+        "multigranular_feature_signature_sha256": signature_sha256,
         "modules": identity["modules"],
         "part_correspondence_consistency": {
             "enabled": identity["pcc_enabled"],
@@ -170,6 +222,7 @@ def _model_manifest(configuration, method=None,
             "alignment_mode": identity["alignment_mode"],
             "alignment_temperature": identity["alignment_temperature"],
             "gating_mode": identity["gating_mode"],
+            "gating_temperature": identity["gating_temperature"],
             "lambda": identity["pcc_lambda"],
         },
         "cross_camera_positive_lambda": identity[
@@ -191,6 +244,19 @@ def run(args):
     local_cfg = _load_config(config_path, args.opts)
     output_dir = _require_new_output_dir(local_cfg.OUTPUT_DIR)
     configuration = _plain_config(local_cfg)
+    _validate_resolved_run_config(
+        configuration, args.run_kind, _load_source_output_dir(config_path)
+    )
+    if ((args.parent_branch == NOT_RECORDED)
+            != (args.parent_commit == NOT_RECORDED)):
+        raise RuntimeError(
+            "Parent branch and parent commit must be recorded together"
+        )
+    if args.parent_branch != NOT_RECORDED:
+        validate_parent_lineage(
+            REPO_ROOT, args.parent_branch, args.parent_commit,
+            child_commit=git_info["commit"],
+        )
     source_seed = _load_explicit_source_seed(config_path)
     resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))
     validate_seed_evidence_chain(source_seed, resolved_seed, resolved_seed)
@@ -214,6 +280,8 @@ def run(args):
         baseline_method=args.baseline_method,
         baseline_commit=args.baseline_commit,
         run_kind=args.run_kind,
+        parent_branch=args.parent_branch,
+        parent_commit=args.parent_commit,
     )
     try:
         environment = collect_environment(
@@ -238,6 +306,8 @@ def run(args):
                 method=args.method,
                 baseline_method=args.baseline_method,
                 baseline_commit=args.baseline_commit,
+                parent_branch=args.parent_branch,
+                parent_commit=args.parent_commit,
             ),
         )
         train_command = [

@@ -21,6 +21,7 @@ from tools.run_experiment import (
     _build_training_environment,
     _launch_training_subprocess,
     _validate_run_overrides,
+    _validate_resolved_run_config,
 )
 from utils.reproducibility import (
     RUNNER_SEED_ENV,
@@ -159,6 +160,30 @@ class ReproducibilityProtocolTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-isolated"):
             _validate_run_overrides(
                 "smoke", ["MODEL.PCC_MODE", "fixed_index"]
+            )
+
+    def test_smoke_validates_effective_resolved_config(self):
+        resolved = {
+            "SOLVER": {
+                "MAX_EPOCHS": 1,
+                "CHECKPOINT_PERIOD": 1,
+                "EVAL_PERIOD": 1,
+            },
+            "OUTPUT_DIR": "/tmp/isolated-smoke",
+        }
+        self.assertIs(
+            _validate_resolved_run_config(
+                resolved, "smoke", "/tmp/formal"
+            ),
+            resolved,
+        )
+        bad = dict(resolved)
+        bad["SOLVER"] = dict(resolved["SOLVER"], MAX_EPOCHS=2)
+        with self.assertRaisesRegex(RuntimeError, "not isolated"):
+            _validate_resolved_run_config(bad, "smoke", "/tmp/formal")
+        with self.assertRaisesRegex(RuntimeError, "must differ"):
+            _validate_resolved_run_config(
+                resolved, "smoke", "/tmp/isolated-smoke"
             )
 
     def test_cudnn_protocol_is_deterministic_without_benchmark(self):

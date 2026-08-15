@@ -12,6 +12,7 @@ from config import cfg
 from layers.part_correspondence_consistency import (
     SUPPORTED_ALIGNMENT_MODES,
     build_local_part_descriptors,
+    validate_softmin_tau,
 )
 from .backbones.resnet import ResNet, BasicBlock, Bottleneck
 from .backbones.senet import SENet, SEResNetBottleneck, SEBottleneck, SEResNeXtBottleneck
@@ -72,7 +73,7 @@ class Baseline(nn.Module):
     def __init__(self, num_classes, last_stride, model_path, neck, neck_feat, model_name, pretrain_choice,
                  part_attention=None, part_attention_parts=None,
                  part_correspondence_consistency=None, pcc_parts=None,
-                 pcc_mode=None):
+                 pcc_mode=None, pcc_softmin_tau=None):
         super(Baseline, self).__init__()
         if model_name == 'resnet18':
             self.in_planes = 512
@@ -182,9 +183,12 @@ class Baseline(nn.Module):
             pcc_parts = cfg.MODEL.PCC_PARTS
         if pcc_mode is None:
             pcc_mode = cfg.MODEL.PCC_MODE
+        if pcc_softmin_tau is None:
+            pcc_softmin_tau = cfg.MODEL.PCC_SOFTMIN_TAU
         self.part_correspondence_consistency = part_correspondence_consistency
         self.pcc_parts = pcc_parts
         self.pcc_mode = pcc_mode
+        self.pcc_softmin_tau = pcc_softmin_tau
         if self.part_correspondence_consistency:
             if not self.part_attention or part_attention_parts != 6:
                 raise ValueError(
@@ -199,6 +203,8 @@ class Baseline(nn.Module):
                         self.pcc_mode, ", ".join(SUPPORTED_ALIGNMENT_MODES)
                     )
                 )
+            if self.pcc_mode == "soft_min":
+                validate_softmin_tau(self.pcc_softmin_tau)
 
         if self.part_attention:
             self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)

@@ -17,6 +17,7 @@ from .center_loss import CenterLoss
 from .part_correspondence_consistency import (
     SUPPORTED_ALIGNMENT_MODES,
     part_alignment_loss,
+    validate_softmin_tau,
 )
 
 
@@ -43,6 +44,8 @@ def make_loss(cfg, num_classes):    # modified by gu
                 cfg.MODEL.PCC_MODE, ", ".join(SUPPORTED_ALIGNMENT_MODES)
             )
         )
+    if pcc_enabled and cfg.MODEL.PCC_MODE == 'soft_min':
+        validate_softmin_tau(cfg.MODEL.PCC_SOFTMIN_TAU)
     if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
         if cfg.MODEL.CAMERA_AWARE_TRIPLET:
             print("CROSS_CAMERA_POSITIVE_ONLY is enabled; skip CAMERA_AWARE_TRIPLET auxiliary loss.")
@@ -99,6 +102,8 @@ def make_loss(cfg, num_classes):    # modified by gu
         valid_alignment_pair_count = 0
         mean_hard_path_cost = zero
         mean_path_absolute_offset = zero
+        soft_alignment_loss = zero
+        mean_soft_path_cost = zero
         if pcc_enabled:
             if pcc_local_features is None:
                 raise RuntimeError(
@@ -114,7 +119,11 @@ def make_loss(cfg, num_classes):    # modified by gu
             if camids is None:
                 raise RuntimeError("PCC is enabled but camera IDs are unavailable")
             alignment = part_alignment_loss(
-                pcc_local_features, target, camids, cfg.MODEL.PCC_MODE
+                pcc_local_features,
+                target,
+                camids,
+                cfg.MODEL.PCC_MODE,
+                softmin_tau=cfg.MODEL.PCC_SOFTMIN_TAU,
             )
             loss_pcc = alignment['loss_pcc']
             valid_pcc_pair_count = alignment['valid_pcc_pair_count']
@@ -129,6 +138,8 @@ def make_loss(cfg, num_classes):    # modified by gu
             mean_path_absolute_offset = alignment[
                 'mean_path_absolute_offset'
             ]
+            soft_alignment_loss = alignment['soft_alignment_loss']
+            mean_soft_path_cost = alignment['mean_soft_path_cost']
             total_loss = total_loss + cfg.MODEL.PCC_LAMBDA * loss_pcc
 
         return {
@@ -145,6 +156,12 @@ def make_loss(cfg, num_classes):    # modified by gu
             'valid_alignment_pair_count': valid_alignment_pair_count,
             'mean_hard_path_cost': mean_hard_path_cost,
             'mean_path_absolute_offset': mean_path_absolute_offset,
+            'soft_alignment_loss': soft_alignment_loss,
+            'mean_soft_path_cost': mean_soft_path_cost,
+            'alignment_temperature': (
+                cfg.MODEL.PCC_SOFTMIN_TAU
+                if cfg.MODEL.PCC_MODE == 'soft_min' else None
+            ),
         }
 
     if sampler == 'softmax':

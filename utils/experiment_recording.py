@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -23,13 +24,17 @@ from pathlib import Path
 import yaml
 
 from utils.reproducibility import (
+    derive_data_loader_seed,
     resolved_config_text,
     validate_seed,
     validate_seed_evidence_chain,
 )
+from utils.multigranular_signature import (
+    canonical_multigranular_feature_signature,
+)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 NOT_RECORDED = "not_recorded"
 MISSING_EVIDENCE = "missing_evidence"
 NOT_APPLICABLE = "not_applicable"
@@ -44,16 +49,21 @@ class EvidenceError(RuntimeError):
 MAIN_FIELDS = (
     "schema_version", "run_id", "experiment_id", "experiment_family",
     "run_kind", "method", "method_family", "method_variant", "dataset",
-    "branch", "commit", "seed", "lambda", "cross_camera_positive_lambda",
+    "branch", "commit", "parent_branch", "parent_commit", "seed", "lambda",
+    "cross_camera_positive_lambda",
     "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
     "alignment_strategy", "alignment_mode", "alignment_temperature",
-    "gating_mode", "baseline", "margin", "mode", "best_epoch",
+    "gating_mode", "gating_temperature",
+    "multigranular_feature_signature",
+    "multigranular_feature_signature_sha256",
+    "baseline", "margin", "mode", "best_epoch",
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
     "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
     "log_sha256", "output_dir", "valid_pcc_pair_count",
     "mean_fixed_index_part_distance", "hard_alignment_loss",
     "valid_alignment_pair_count", "mean_hard_path_cost",
-    "mean_path_absolute_offset", "status", "notes",
+    "mean_path_absolute_offset", "soft_alignment_loss",
+    "mean_soft_path_cost", "status", "notes",
 )
 LAMBDA_FIELDS = (
     "run_id", "experiment_id", "method", "dataset", "lambda", "seed",
@@ -85,35 +95,44 @@ ANCHOR_FIELDS = (
 PCC_FIELDS = (
     "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
     "method_family", "method_variant", "pcc_enabled",
-    "alignment_strategy", "pcc_parts", "cross_camera_positive_lambda",
+    "alignment_strategy", "alignment_temperature", "gating_mode",
+    "gating_temperature", "pcc_parts", "cross_camera_positive_lambda",
     "pcc_lambda", "valid_pcc_pair_count",
     "mean_fixed_index_part_distance", "hard_alignment_loss",
     "valid_alignment_pair_count", "mean_hard_path_cost",
-    "mean_path_absolute_offset", "best_epoch", "rank1", "map", "runtime",
+    "mean_path_absolute_offset", "soft_alignment_loss",
+    "mean_soft_path_cost", "best_epoch", "rank1", "map", "runtime",
     "seed", "commit",
 )
 ALIGNMENT_FIELDS = (
     "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
     "method_family", "method_variant", "alignment_mode",
-    "alignment_temperature", "gating_mode", "parts",
+    "alignment_temperature", "gating_mode", "gating_temperature",
+    "multigranular_feature_signature_sha256", "parent_branch",
+    "parent_commit", "parts",
     "cross_camera_positive_lambda", "alignment_lambda",
     "valid_alignment_pair_count", "hard_alignment_loss",
-    "mean_hard_path_cost", "mean_path_absolute_offset", "best_epoch",
+    "mean_hard_path_cost", "mean_path_absolute_offset",
+    "soft_alignment_loss", "mean_soft_path_cost", "best_epoch",
     "rank1", "map", "runtime", "seed", "commit",
 )
 RUN_FIELDS = (
     "schema_version", "run_id", "experiment_id", "experiment_family",
     "run_kind", "method", "method_family", "method_variant", "dataset",
-    "branch", "commit_id", "config_file", "seed", "lambda",
+    "branch", "commit_id", "parent_branch", "parent_commit", "config_file",
+    "seed", "lambda",
     "cross_camera_positive_lambda", "pcc_lambda", "pcc_enabled",
     "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode",
-    "alignment_temperature", "gating_mode", "baseline", "margin",
+    "alignment_temperature", "gating_mode", "gating_temperature",
+    "multigranular_feature_signature",
+    "multigranular_feature_signature_sha256", "baseline", "margin",
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
     "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
     "valid_pcc_pair_count", "mean_fixed_index_part_distance",
     "hard_alignment_loss", "valid_alignment_pair_count",
-    "mean_hard_path_cost", "mean_path_absolute_offset", "notes",
+    "mean_hard_path_cost", "mean_path_absolute_offset",
+    "soft_alignment_loss", "mean_soft_path_cost", "notes",
 )
 EVIDENCE_FIELDS = (
     "schema_version", "run_id", "run_kind", "artifact_type", "path",
@@ -220,7 +239,13 @@ def config_modules(configuration):
     """Infer ablation flags only from resolved configuration leaves."""
     def enabled(paths):
         value = _first_config_value(configuration, paths, False)
-        return bool(value) if value != NOT_RECORDED else False
+        if value in (
+                None, "", NOT_RECORDED, NOT_APPLICABLE, MISSING_EVIDENCE,
+                False, 0, "false", "False", "off", "no"):
+            return False
+        return value is True or value == 1 or value in (
+            "true", "True", "on", "yes"
+        )
 
     model_name = str(nested_value(configuration, "MODEL.NAME", ""))
     return {
@@ -293,20 +318,35 @@ def experiment_identity(configuration):
             variant = "hard_shortest_path"
             method_variant = "hard_shortest_path"
             relation = "same_pid_different_camera_monotonic_path"
+        elif pcc_mode == "soft_min":
+            method = "C2-L03 + Soft-Min Part Alignment"
+            variant = "soft_min"
+            method_variant = "soft_min"
+            relation = "same_pid_different_camera_soft_monotonic_paths"
         else:
             raise EvidenceError(
                 "Unsupported enabled PCC_MODE: {!r}".format(pcc_mode)
             )
         method_family = "part_alignment"
         alignment_mode = pcc_mode
-        alignment_temperature = NOT_APPLICABLE
+        if pcc_mode == "soft_min":
+            from layers.part_correspondence_consistency import (
+                validate_softmin_tau,
+            )
+            alignment_temperature = validate_softmin_tau(
+                nested_value(configuration, "MODEL.PCC_SOFTMIN_TAU")
+            )
+        else:
+            alignment_temperature = NOT_APPLICABLE
         gating_mode = NOT_APPLICABLE
+        gating_temperature = NOT_APPLICABLE
     else:
         method_family = variant
         method_variant = variant
         alignment_mode = NOT_APPLICABLE
         alignment_temperature = NOT_APPLICABLE
         gating_mode = NOT_APPLICABLE
+        gating_temperature = NOT_APPLICABLE
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
@@ -335,6 +375,7 @@ def experiment_identity(configuration):
         "alignment_mode": alignment_mode,
         "alignment_temperature": alignment_temperature,
         "gating_mode": gating_mode,
+        "gating_temperature": gating_temperature,
     }
 
 
@@ -403,6 +444,35 @@ def validate_git_preflight(repo_root, expected_branch, expected_commit=None):
             )
         )
     return metadata
+
+
+def validate_parent_lineage(repo_root, parent_branch, parent_commit,
+                            child_commit="HEAD"):
+    """Fail closed unless the named parent tip is the child's exact base."""
+    if parent_branch in (None, "", NOT_RECORDED, MISSING_EVIDENCE):
+        raise EvidenceError("Parent branch evidence is missing")
+    if not re.match(r"^[0-9a-fA-F]{40}$", str(parent_commit)):
+        raise EvidenceError("Parent commit must be a full SHA")
+    resolved_parent = _git_output(
+        repo_root, ["rev-parse", str(parent_branch)]
+    ).lower()
+    expected_parent = str(parent_commit).lower()
+    if resolved_parent != expected_parent:
+        raise EvidenceError(
+            "Parent branch tip differs from recorded parent commit"
+        )
+    merge_base = _git_output(
+        repo_root, ["merge-base", str(parent_branch), str(child_commit)]
+    ).lower()
+    if merge_base != expected_parent:
+        raise EvidenceError(
+            "Child is not directly based on the recorded parent commit"
+        )
+    return {
+        "parent_branch": str(parent_branch),
+        "parent_commit": expected_parent,
+        "merge_base": merge_base,
+    }
 
 
 def validate_git_runtime_state(repo_root, run_dir, expected_branch=None,
@@ -563,7 +633,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
                    config_file, resolved_cfg, output_dir, git_info, notes,
                    command, expected_branch, method=None,
                    baseline_method=NOT_RECORDED,
-                   baseline_commit=NOT_RECORDED, run_kind="formal"):
+                   baseline_commit=NOT_RECORDED, run_kind="formal",
+                   parent_branch=NOT_RECORDED,
+                   parent_commit=NOT_RECORDED):
     if run_kind not in ("formal", "smoke"):
         raise EvidenceError("run_kind must be 'formal' or 'smoke'")
     records_root = Path(records_root)
@@ -577,6 +649,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
     )
     configuration = load_yaml(resolved_copy)
     identity = experiment_identity(configuration)
+    feature_signature, feature_signature_sha256 = (
+        canonical_multigranular_feature_signature(configuration)
+    )
     seed_value = nested_value(configuration, "SEED")
     seed = validate_seed(seed_value) if seed_value != NOT_RECORDED else NOT_RECORDED
     manifest = {
@@ -593,6 +668,8 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "dataset": identity["dataset"],
         "branch": git_info["branch"],
         "commit_id": git_info["commit"],
+        "parent_branch": parent_branch,
+        "parent_commit": parent_commit,
         "expected_branch": expected_branch,
         "config_file": normalized_path(Path(config_file).resolve()),
         "config_source": "config_source.yml",
@@ -610,6 +687,11 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "alignment_mode": identity["alignment_mode"],
         "alignment_temperature": identity["alignment_temperature"],
         "gating_mode": identity["gating_mode"],
+        "gating_temperature": identity["gating_temperature"],
+        "multigranular_feature_signature": feature_signature,
+        "multigranular_feature_signature_sha256": (
+            feature_signature_sha256
+        ),
         "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
@@ -661,7 +743,116 @@ def record_run_failure(run_dir, error, status="incomplete"):
         "updated_at_utc": utc_now(),
     })
     atomic_write_json(path, payload)
+    _register_failed_or_incomplete_run(run_dir, payload)
     return payload
+
+
+def _register_failed_or_incomplete_run(run_dir, status_payload):
+    """Retain terminal non-success runs without touching formal tables."""
+    run_dir = Path(run_dir)
+    if run_dir.parent.name != "runs":
+        raise EvidenceError(
+            "Failed run evidence directory is outside the run registry"
+        )
+    records_root = ensure_record_layout(run_dir.parent.parent)
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        raise EvidenceError("Failed run manifest is missing")
+    manifest = read_json(manifest_path)
+    terminal_status = status_payload.get("status", "incomplete")
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": manifest.get("run_id", run_dir.name),
+        "experiment_id": manifest.get("experiment_id", NOT_RECORDED),
+        "experiment_family": manifest.get(
+            "experiment_family", NOT_RECORDED
+        ),
+        "run_kind": manifest.get("run_kind", NOT_RECORDED),
+        "method": manifest.get("method", NOT_RECORDED),
+        "method_family": manifest.get("method_family", NOT_RECORDED),
+        "method_variant": manifest.get("method_variant", NOT_RECORDED),
+        "dataset": manifest.get("dataset", NOT_RECORDED),
+        "branch": manifest.get("branch", NOT_RECORDED),
+        "commit_id": manifest.get("commit_id", NOT_RECORDED),
+        "parent_branch": manifest.get("parent_branch", NOT_RECORDED),
+        "parent_commit": manifest.get("parent_commit", NOT_RECORDED),
+        "config_file": manifest.get("config_file", NOT_RECORDED),
+        "seed": manifest.get("seed", NOT_RECORDED),
+        "lambda": manifest.get("lambda", NOT_RECORDED),
+        "cross_camera_positive_lambda": manifest.get(
+            "cross_camera_positive_lambda", NOT_RECORDED
+        ),
+        "pcc_lambda": manifest.get("pcc_lambda", NOT_RECORDED),
+        "pcc_enabled": manifest.get("pcc_enabled", NOT_RECORDED),
+        "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
+        "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
+        "alignment_strategy": manifest.get(
+            "alignment_strategy", NOT_RECORDED
+        ),
+        "alignment_mode": manifest.get("alignment_mode", NOT_RECORDED),
+        "alignment_temperature": manifest.get(
+            "alignment_temperature", NOT_RECORDED
+        ),
+        "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
+        "gating_temperature": manifest.get(
+            "gating_temperature", NOT_RECORDED
+        ),
+        "multigranular_feature_signature": manifest.get(
+            "multigranular_feature_signature", NOT_RECORDED
+        ),
+        "multigranular_feature_signature_sha256": manifest.get(
+            "multigranular_feature_signature_sha256", NOT_RECORDED
+        ),
+        "baseline": manifest.get("baseline", NOT_RECORDED),
+        "margin": manifest.get("margin", NOT_RECORDED),
+        "mode": manifest.get("mode", NOT_RECORDED),
+        "start_time": manifest.get("start_time", NOT_RECORDED),
+        "end_time": status_payload.get(
+            "training_end_time", status_payload.get(
+                "updated_at_utc", NOT_RECORDED
+            )
+        ),
+        "runtime": status_payload.get(
+            "training_runtime_seconds", NOT_RECORDED
+        ),
+        "output_dir": manifest.get("output_dir", NOT_RECORDED),
+        "status": terminal_status,
+        "notes": manifest.get("notes", NOT_RECORDED),
+    }
+    upsert_csv(records_root / "runs.csv", RUN_FIELDS, row)
+    evidence_paths = [
+        path for path in sorted(run_dir.iterdir()) if path.is_file()
+    ]
+    output_value = manifest.get("output_dir", NOT_RECORDED)
+    output_dir = Path(output_value) if output_value not in (
+        None, "", NOT_RECORDED, MISSING_EVIDENCE
+    ) else None
+    if output_dir is not None and output_dir.is_dir():
+        log_path = output_dir / "log.txt"
+        if log_path.is_file():
+            evidence_paths.append(log_path)
+        evidence_paths.extend(sorted(output_dir.glob("*.pt")))
+    seen = set()
+    for evidence_path in evidence_paths:
+        resolved = str(evidence_path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        evidence_row = {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": row["run_id"],
+            "run_kind": row["run_kind"],
+            "artifact_type": evidence_path.stem,
+            "path": normalized_path(evidence_path.resolve()),
+            "size_bytes": evidence_path.stat().st_size,
+            "sha256": sha256_file(evidence_path),
+        }
+        upsert_tsv(
+            records_root / "evidence_manifest.tsv",
+            EVIDENCE_FIELDS,
+            evidence_row,
+            key_fields=("run_id", "path"),
+        )
 
 
 def parse_training_log(log_path):
@@ -674,6 +865,7 @@ def parse_training_log(log_path):
     iterations_per_epoch_values = set()
     pcc_epoch_summaries = []
     hard_alignment_epoch_summaries = []
+    soft_alignment_epoch_summaries = []
     epoch_evidence = {}
     required_training_fields = {
         "loss_total": False,
@@ -723,6 +915,27 @@ def parse_training_log(log_path):
                 "mean_hard_path_cost": float(hard_summary.group(4)),
                 "mean_path_absolute_offset": float(hard_summary.group(5)),
             })
+        soft_summary = re.search(
+            r"Soft Alignment Epoch Summary - Epoch:\s*(\d+)\s+"
+            r"soft_alignment_loss:\s*([0-9.eE+-]+)\s+"
+            r"valid_alignment_pair_count:\s*(\d+)\s+"
+            r"mean_soft_path_cost:\s*([0-9.eE+-]+)\s+"
+            r"alignment_temperature:\s*([0-9.eE+-]+)",
+            line,
+        )
+        if soft_summary:
+            values = {
+                "epoch": int(soft_summary.group(1)),
+                "soft_alignment_loss": float(soft_summary.group(2)),
+                "valid_alignment_pair_count": int(soft_summary.group(3)),
+                "mean_soft_path_cost": float(soft_summary.group(4)),
+                "alignment_temperature": float(soft_summary.group(5)),
+            }
+            if not all(math.isfinite(values[field]) for field in (
+                    "soft_alignment_loss", "mean_soft_path_cost",
+                    "alignment_temperature")):
+                raise EvidenceError("Soft alignment summary is non-finite")
+            soft_alignment_epoch_summaries.append(values)
         iteration_match = re.search(
             r"Epoch\[(\d+)\]\s+Iteration\[(\d+)/(\d+)\]", line
         )
@@ -855,6 +1068,33 @@ def parse_training_log(log_path):
             return 0.0
         return NOT_RECORDED
 
+    total_soft_alignment_pairs = sum(
+        row["valid_alignment_pair_count"]
+        for row in soft_alignment_epoch_summaries
+    )
+
+    def pair_weighted_soft_value(field):
+        if total_soft_alignment_pairs:
+            return sum(
+                row["valid_alignment_pair_count"] * row[field]
+                for row in soft_alignment_epoch_summaries
+            ) / float(total_soft_alignment_pairs)
+        if soft_alignment_epoch_summaries:
+            return 0.0
+        return NOT_RECORDED
+
+    soft_temperatures = {
+        row["alignment_temperature"]
+        for row in soft_alignment_epoch_summaries
+    }
+    if len(soft_temperatures) > 1:
+        raise EvidenceError(
+            "Soft alignment temperature changed across epoch summaries"
+        )
+    soft_temperature = (
+        next(iter(soft_temperatures)) if soft_temperatures else NOT_RECORDED
+    )
+
     return {
         "path": normalized_path(path.resolve()),
         "sha256": sha256_file(path),
@@ -867,25 +1107,38 @@ def parse_training_log(log_path):
         ),
         "has_pcc_loss": "loss_pcc:" in raw_text,
         "has_hard_alignment_loss": "hard_alignment_loss:" in raw_text,
+        "has_soft_alignment_loss": "soft_alignment_loss:" in raw_text,
         "pcc_epoch_summaries": pcc_epoch_summaries,
         "hard_alignment_epoch_summaries": hard_alignment_epoch_summaries,
+        "soft_alignment_epoch_summaries": soft_alignment_epoch_summaries,
         "valid_pcc_pair_count": (
             total_pcc_pairs if pcc_epoch_summaries
             else total_alignment_pairs if hard_alignment_epoch_summaries
+            else total_soft_alignment_pairs if soft_alignment_epoch_summaries
             else NOT_RECORDED
         ),
         "mean_fixed_index_part_distance": mean_pcc_distance,
         "hard_alignment_loss": pair_weighted_hard_value(
             "hard_alignment_loss"
         ),
-        "valid_alignment_pair_count": total_alignment_pairs
-        if hard_alignment_epoch_summaries else NOT_RECORDED,
+        "valid_alignment_pair_count": (
+            total_alignment_pairs if hard_alignment_epoch_summaries
+            else total_soft_alignment_pairs
+            if soft_alignment_epoch_summaries else NOT_RECORDED
+        ),
         "mean_hard_path_cost": pair_weighted_hard_value(
             "mean_hard_path_cost"
         ),
         "mean_path_absolute_offset": pair_weighted_hard_value(
             "mean_path_absolute_offset"
         ),
+        "soft_alignment_loss": pair_weighted_soft_value(
+            "soft_alignment_loss"
+        ),
+        "mean_soft_path_cost": pair_weighted_soft_value(
+            "mean_soft_path_cost"
+        ),
+        "alignment_temperature": soft_temperature,
         "epoch_evidence": [
             epoch_evidence[epoch] for epoch in sorted(epoch_evidence)
         ],
@@ -1164,12 +1417,20 @@ def _legacy_field_value(row, field):
         return pcc_mode or NOT_RECORDED
     if field == "alignment_mode":
         return pcc_mode or NOT_APPLICABLE
-    if field in ("alignment_temperature", "gating_mode"):
+    if field in (
+            "alignment_temperature", "gating_mode", "gating_temperature"):
         return NOT_APPLICABLE if pcc_enabled or pcc_mode else NOT_RECORDED
     if field in (
             "hard_alignment_loss", "valid_alignment_pair_count",
             "mean_hard_path_cost", "mean_path_absolute_offset"):
         return NOT_APPLICABLE if pcc_mode == "fixed_index" else NOT_RECORDED
+    if field in ("soft_alignment_loss", "mean_soft_path_cost"):
+        return NOT_RECORDED if pcc_mode == "soft_min" else NOT_APPLICABLE
+    if field in (
+            "parent_branch", "parent_commit",
+            "multigranular_feature_signature",
+            "multigranular_feature_signature_sha256"):
+        return NOT_RECORDED
     return NOT_RECORDED
 
 
@@ -1447,15 +1708,18 @@ def update_experiments_markdown(experiments_path, main_rows):
     historical = target.read_text(encoding="utf-8") if target.is_file() else "# Experiments\n"
     fields = (
         "experiment_id", "run_id", "run_kind", "date", "commit", "branch",
+        "parent_branch", "parent_commit",
         "method", "method_family", "method_variant",
         "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
         "seed", "lambda", "cross_camera_positive_lambda", "pcc_lambda",
         "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy",
         "alignment_mode", "alignment_temperature", "gating_mode",
+        "gating_temperature", "multigranular_feature_signature_sha256",
         "baseline", "valid_pcc_pair_count",
         "mean_fixed_index_part_distance", "hard_alignment_loss",
         "valid_alignment_pair_count", "mean_hard_path_cost",
-        "mean_path_absolute_offset", "runtime_seconds", "best_epoch", "Rank-1",
+        "mean_path_absolute_offset", "soft_alignment_loss",
+        "mean_soft_path_cost", "runtime_seconds", "best_epoch", "Rank-1",
         "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
         "status", "notes",
     )
@@ -1482,6 +1746,8 @@ def update_experiments_markdown(experiments_path, main_rows):
             "date": run_date,
             "commit": row["commit"],
             "branch": row["branch"],
+            "parent_branch": row["parent_branch"],
+            "parent_commit": row["parent_commit"],
             "method": row["method"],
             "method_family": row["method_family"],
             "method_variant": row["method_variant"],
@@ -1502,6 +1768,10 @@ def update_experiments_markdown(experiments_path, main_rows):
             "alignment_mode": row["alignment_mode"],
             "alignment_temperature": row["alignment_temperature"],
             "gating_mode": row["gating_mode"],
+            "gating_temperature": row["gating_temperature"],
+            "multigranular_feature_signature_sha256": row[
+                "multigranular_feature_signature_sha256"
+            ],
             "baseline": row["baseline"],
             "valid_pcc_pair_count": row["valid_pcc_pair_count"],
             "mean_fixed_index_part_distance": row[
@@ -1515,6 +1785,8 @@ def update_experiments_markdown(experiments_path, main_rows):
             "mean_path_absolute_offset": row[
                 "mean_path_absolute_offset"
             ],
+            "soft_alignment_loss": row["soft_alignment_loss"],
+            "mean_soft_path_cost": row["mean_soft_path_cost"],
             "runtime_seconds": row["runtime_seconds"],
             "best_epoch": row["best_epoch"],
             "Rank-1": row["rank1"],
@@ -1558,6 +1830,8 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "dataset": manifest["dataset"],
         "branch": manifest["branch"],
         "commit": manifest["commit_id"],
+        "parent_branch": manifest.get("parent_branch", NOT_RECORDED),
+        "parent_commit": manifest.get("parent_commit", NOT_RECORDED),
         "seed": manifest["seed"],
         "lambda": manifest["lambda"],
         "cross_camera_positive_lambda": manifest.get(
@@ -1575,6 +1849,15 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
             "alignment_temperature", NOT_RECORDED
         ),
         "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
+        "gating_temperature": manifest.get(
+            "gating_temperature", NOT_RECORDED
+        ),
+        "multigranular_feature_signature": manifest.get(
+            "multigranular_feature_signature", NOT_RECORDED
+        ),
+        "multigranular_feature_signature_sha256": manifest.get(
+            "multigranular_feature_signature_sha256", NOT_RECORDED
+        ),
         "baseline": manifest.get("baseline", NOT_RECORDED),
         "margin": manifest["margin"],
         "mode": manifest["mode"],
@@ -1598,6 +1881,8 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "valid_alignment_pair_count": metrics["valid_alignment_pair_count"],
         "mean_hard_path_cost": metrics["mean_hard_path_cost"],
         "mean_path_absolute_offset": metrics["mean_path_absolute_offset"],
+        "soft_alignment_loss": metrics["soft_alignment_loss"],
+        "mean_soft_path_cost": metrics["mean_soft_path_cost"],
         "status": "success",
         "notes": manifest["notes"],
     }
@@ -1668,6 +1953,9 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "method_variant": common["method_variant"],
         "pcc_enabled": common["pcc_enabled"],
         "alignment_strategy": common["alignment_strategy"],
+        "alignment_temperature": common["alignment_temperature"],
+        "gating_mode": common["gating_mode"],
+        "gating_temperature": common["gating_temperature"],
         "pcc_parts": common["pcc_parts"],
         "cross_camera_positive_lambda": common["cross_camera_positive_lambda"],
         "pcc_lambda": common["pcc_lambda"],
@@ -1677,6 +1965,8 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "valid_alignment_pair_count": common["valid_alignment_pair_count"],
         "mean_hard_path_cost": common["mean_hard_path_cost"],
         "mean_path_absolute_offset": common["mean_path_absolute_offset"],
+        "soft_alignment_loss": common["soft_alignment_loss"],
+        "mean_soft_path_cost": common["mean_soft_path_cost"],
         "best_epoch": common["best_epoch"],
         "rank1": common["rank1"],
         "map": common["map"],
@@ -1695,6 +1985,12 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "alignment_mode": common["alignment_mode"],
         "alignment_temperature": common["alignment_temperature"],
         "gating_mode": common["gating_mode"],
+        "gating_temperature": common["gating_temperature"],
+        "multigranular_feature_signature_sha256": common[
+            "multigranular_feature_signature_sha256"
+        ],
+        "parent_branch": common["parent_branch"],
+        "parent_commit": common["parent_commit"],
         "parts": common["pcc_parts"],
         "cross_camera_positive_lambda": common[
             "cross_camera_positive_lambda"
@@ -1708,6 +2004,8 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "mean_path_absolute_offset": common[
             "mean_path_absolute_offset"
         ],
+        "soft_alignment_loss": common["soft_alignment_loss"],
+        "mean_soft_path_cost": common["mean_soft_path_cost"],
         "best_epoch": common["best_epoch"],
         "rank1": common["rank1"],
         "map": common["map"],
@@ -1752,9 +2050,12 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         reproducibility = read_json(run_dir / "reproducibility.json")
         required_reproducibility = (
             "source_seed", "resolved_seed", "applied_seed", "seed",
+            "runner_seed",
             "PYTHONHASHSEED", "python_random_seed", "numpy_seed",
             "torch_cpu_seed", "torch_cuda_seed",
             "dataloader_worker_seed_base",
+            "dataloader_train_generator_seed",
+            "dataloader_validation_generator_seed",
             "dataloader_worker_seed_strategy", "sampler_seed",
             "sampler_seed_strategy", "cudnn_deterministic",
             "cudnn_benchmark", "status",
@@ -1777,7 +2078,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             raise EvidenceError("Manifest run_kind is invalid")
         for field in (
                 "method_family", "method_variant", "alignment_mode",
-                "alignment_temperature", "gating_mode"):
+                "alignment_temperature", "gating_mode",
+                "gating_temperature"):
             manifest.setdefault(field, identity[field])
             if manifest[field] != identity[field]:
                 raise EvidenceError(
@@ -1792,6 +2094,43 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     "Manifest/config PCC conflict for {}".format(field)
                 )
             manifest.setdefault(field, expected)
+        signature, signature_sha256 = (
+            canonical_multigranular_feature_signature(resolved_cfg)
+        )
+        recorded_signature = manifest.get(
+            "multigranular_feature_signature", NOT_RECORDED
+        )
+        recorded_signature_sha256 = manifest.get(
+            "multigranular_feature_signature_sha256", NOT_RECORDED
+        )
+        if recorded_signature not in (NOT_RECORDED, MISSING_EVIDENCE, ""):
+            if recorded_signature != signature:
+                raise EvidenceError(
+                    "Multigranular feature signature/config conflict"
+                )
+            if recorded_signature_sha256 != signature_sha256:
+                raise EvidenceError(
+                    "Multigranular feature signature SHA256 conflict"
+                )
+        if identity["alignment_mode"] == "soft_min":
+            if recorded_signature in (
+                    NOT_RECORDED, MISSING_EVIDENCE, "", None):
+                raise EvidenceError(
+                    "Soft alignment feature signature is missing"
+                )
+            for parent_field in ("parent_branch", "parent_commit"):
+                if manifest.get(parent_field) in (
+                        None, "", NOT_RECORDED, MISSING_EVIDENCE):
+                    raise EvidenceError(
+                        "Soft alignment {} is missing".format(parent_field)
+                    )
+            if verify_git:
+                validate_parent_lineage(
+                    repo_root,
+                    manifest["parent_branch"],
+                    manifest["parent_commit"],
+                    child_commit=manifest["commit_id"],
+                )
         seed_values = (
             source_cfg.get("SEED", NOT_RECORDED),
             resolved_cfg.get("SEED", NOT_RECORDED),
@@ -1813,7 +2152,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             expected_seed=seed_values[4],
         )
         applied_seed_fields = (
-            "python_random_seed", "numpy_seed", "torch_cpu_seed",
+            "runner_seed", "python_random_seed", "numpy_seed",
+            "torch_cpu_seed",
             "torch_cuda_seed", "dataloader_worker_seed_base",
             "sampler_seed",
         )
@@ -1822,6 +2162,19 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 raise EvidenceError(
                     "Seed evidence conflict: {} differs from resolved seed"
                     .format(key)
+                )
+        expected_generator_seeds = {
+            "dataloader_train_generator_seed": derive_data_loader_seed(
+                resolved_seed, "train"
+            ),
+            "dataloader_validation_generator_seed": derive_data_loader_seed(
+                resolved_seed, "validation"
+            ),
+        }
+        for key, expected in expected_generator_seeds.items():
+            if validate_seed(reproducibility[key]) != expected:
+                raise EvidenceError(
+                    "DataLoader seed evidence conflict for {}".format(key)
                 )
         if validate_seed(int(reproducibility["PYTHONHASHSEED"])) != resolved_seed:
             raise EvidenceError("PYTHONHASHSEED differs from resolved seed")
@@ -1932,10 +2285,70 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     raise EvidenceError(
                         "Hard alignment path offset is outside valid bounds"
                     )
+            elif alignment_mode == "soft_min":
+                if log_info["hard_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Soft alignment must not record a unique Hard path"
+                    )
+                if not log_info["has_soft_alignment_loss"]:
+                    raise EvidenceError(
+                        "Soft alignment loss evidence is absent from log"
+                    )
+                if not log_info["soft_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Soft alignment has no epoch pair statistics"
+                    )
+                required_soft = (
+                    "soft_alignment_loss", "valid_alignment_pair_count",
+                    "mean_soft_path_cost", "alignment_temperature",
+                )
+                missing_soft = [
+                    field for field in required_soft
+                    if log_info[field] in (
+                        NOT_RECORDED, MISSING_EVIDENCE, None, ""
+                    )
+                ]
+                if missing_soft:
+                    raise EvidenceError(
+                        "Soft alignment evidence lacks {}".format(
+                            missing_soft
+                        )
+                    )
+                parts = int(manifest.get("pcc_parts", 0))
+                if parts != 6:
+                    raise EvidenceError("Soft alignment evidence requires K=6")
+                if int(log_info["valid_alignment_pair_count"]) <= 0:
+                    raise EvidenceError(
+                        "Soft alignment cannot succeed with zero valid pairs"
+                    )
+                soft_loss = float(log_info["soft_alignment_loss"])
+                soft_cost = float(log_info["mean_soft_path_cost"])
+                logged_tau = float(log_info["alignment_temperature"])
+                configured_tau = float(manifest["alignment_temperature"])
+                if not all(math.isfinite(value) for value in (
+                        soft_loss, soft_cost, logged_tau, configured_tau)):
+                    raise EvidenceError("Soft alignment evidence is non-finite")
+                if logged_tau <= 0 or configured_tau <= 0:
+                    raise EvidenceError(
+                        "Soft alignment temperature must be positive"
+                    )
+                if abs(logged_tau - configured_tau) > 1e-12:
+                    raise EvidenceError(
+                        "Logged/configured alignment temperatures differ"
+                    )
+                expected_loss = soft_cost / float(2 * parts - 1)
+                if abs(soft_loss - expected_loss) > 2e-5:
+                    raise EvidenceError(
+                        "Soft alignment loss is inconsistent with raw cost"
+                    )
             else:
                 raise EvidenceError(
                     "Unsupported alignment mode in run manifest: {!r}"
                     .format(alignment_mode)
+                )
+            if int(log_info["valid_pcc_pair_count"]) <= 0:
+                raise EvidenceError(
+                    "Alignment cannot be registered success with zero pairs"
                 )
         validation_source = output_dir / "validation_history.jsonl"
         if validation_source.is_file():
@@ -1964,6 +2377,19 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if not efficiency_path.is_file():
             atomic_write_json(efficiency_path, efficiency)
         model_manifest = read_json(run_dir / "model_manifest.json")
+        if identity["alignment_mode"] == "soft_min":
+            if model_manifest.get(
+                    "multigranular_feature_signature_sha256"
+            ) != manifest["multigranular_feature_signature_sha256"]:
+                raise EvidenceError(
+                    "Model/run feature signature SHA256 evidence differs"
+                )
+            if model_manifest.get("parent_branch") != manifest.get(
+                    "parent_branch"):
+                raise EvidenceError("Model/run parent branch evidence differs")
+            if model_manifest.get("parent_commit") != manifest.get(
+                    "parent_commit"):
+                raise EvidenceError("Model/run parent commit evidence differs")
         model_manifest.update({
             "total_params": efficiency.get("total_params", NOT_RECORDED),
             "trainable_params": efficiency.get("trainable_params", NOT_RECORDED),
@@ -1985,6 +2411,18 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             mean_path_absolute_offset = log_info[
                 "mean_path_absolute_offset"
             ]
+            soft_alignment_loss = NOT_APPLICABLE
+            mean_soft_path_cost = NOT_APPLICABLE
+        elif alignment_mode == "soft_min":
+            mean_fixed_index_part_distance = NOT_APPLICABLE
+            hard_alignment_loss = NOT_APPLICABLE
+            valid_alignment_pair_count = log_info[
+                "valid_alignment_pair_count"
+            ]
+            mean_hard_path_cost = NOT_APPLICABLE
+            mean_path_absolute_offset = NOT_APPLICABLE
+            soft_alignment_loss = log_info["soft_alignment_loss"]
+            mean_soft_path_cost = log_info["mean_soft_path_cost"]
         elif alignment_mode == "fixed_index":
             mean_fixed_index_part_distance = log_info[
                 "mean_fixed_index_part_distance"
@@ -1993,6 +2431,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             valid_alignment_pair_count = log_info["valid_pcc_pair_count"]
             mean_hard_path_cost = NOT_APPLICABLE
             mean_path_absolute_offset = NOT_APPLICABLE
+            soft_alignment_loss = NOT_APPLICABLE
+            mean_soft_path_cost = NOT_APPLICABLE
         else:
             mean_fixed_index_part_distance = log_info[
                 "mean_fixed_index_part_distance"
@@ -2001,6 +2441,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             valid_alignment_pair_count = NOT_APPLICABLE
             mean_hard_path_cost = NOT_APPLICABLE
             mean_path_absolute_offset = NOT_APPLICABLE
+            soft_alignment_loss = NOT_APPLICABLE
+            mean_soft_path_cost = NOT_APPLICABLE
         metrics = {
             "schema_version": SCHEMA_VERSION,
             "selection_rule": "highest Rank-1, then highest mAP, then latest epoch",
@@ -2025,6 +2467,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "valid_alignment_pair_count": valid_alignment_pair_count,
             "mean_hard_path_cost": mean_hard_path_cost,
             "mean_path_absolute_offset": mean_path_absolute_offset,
+            "soft_alignment_loss": soft_alignment_loss,
+            "mean_soft_path_cost": mean_soft_path_cost,
             "run_dir": str(run_dir),
         }
         atomic_write_json(run_dir / "metrics_summary.json", metrics)
@@ -2115,6 +2559,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "method_family": manifest.get("method_family", NOT_RECORDED),
             "method_variant": manifest.get("method_variant", NOT_RECORDED),
             "branch": manifest["branch"], "commit_id": manifest["commit_id"],
+            "parent_branch": manifest.get("parent_branch", NOT_RECORDED),
+            "parent_commit": manifest.get("parent_commit", NOT_RECORDED),
             "config_file": manifest["config_file"], "seed": manifest["seed"],
             "lambda": manifest["lambda"],
             "cross_camera_positive_lambda": manifest.get(
@@ -2132,6 +2578,15 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 "alignment_temperature", NOT_RECORDED
             ),
             "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
+            "gating_temperature": manifest.get(
+                "gating_temperature", NOT_RECORDED
+            ),
+            "multigranular_feature_signature": manifest.get(
+                "multigranular_feature_signature", NOT_RECORDED
+            ),
+            "multigranular_feature_signature_sha256": manifest.get(
+                "multigranular_feature_signature_sha256", NOT_RECORDED
+            ),
             "baseline": manifest.get("baseline", NOT_RECORDED),
             "margin": manifest["margin"],
             "mode": manifest["mode"], "GPU": _gpu_label(environment),
@@ -2156,6 +2611,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "mean_path_absolute_offset": metrics[
                 "mean_path_absolute_offset"
             ],
+            "soft_alignment_loss": metrics["soft_alignment_loss"],
+            "mean_soft_path_cost": metrics["mean_soft_path_cost"],
             "notes": manifest["notes"],
         }
         upsert_csv(records_root / "runs.csv", RUN_FIELDS, run_row)

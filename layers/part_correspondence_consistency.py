@@ -3,11 +3,26 @@
 
 from __future__ import absolute_import
 
+import math
+
 import torch
 import torch.nn.functional as F
 
 
-SUPPORTED_ALIGNMENT_MODES = ("fixed_index", "hard_shortest_path")
+SUPPORTED_ALIGNMENT_MODES = ("fixed_index", "hard_shortest_path", "soft_min")
+
+
+def validate_softmin_tau(tau):
+    """Return a finite positive Soft-Min temperature or fail closed."""
+    if isinstance(tau, bool):
+        raise ValueError("PCC_SOFTMIN_TAU must be a finite positive number")
+    try:
+        value = float(tau)
+    except (TypeError, ValueError):
+        raise ValueError("PCC_SOFTMIN_TAU must be a finite positive number")
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError("PCC_SOFTMIN_TAU must be finite and greater than zero")
+    return value
 
 
 def horizontal_part_bounds(height, num_parts):
@@ -202,6 +217,48 @@ def hard_shortest_path_costs_and_offsets(distance_matrix):
     return costs, offsets
 
 
+def softmin_two_predecessors(up, left, tau):
+    """Numerically stable differentiable minimum of two predecessor costs."""
+    tau_value = validate_softmin_tau(tau)
+    tau_tensor = up.new_tensor(tau_value)
+    scaled = torch.stack((-up / tau_tensor, -left / tau_tensor), dim=0)
+    return -tau_tensor * torch.logsumexp(scaled, dim=0)
+
+
+def soft_min_path_costs(distance_matrix, tau):
+    """Return Soft-Min right/down path costs shaped ``[N]``."""
+    _validate_square_distance_matrix(distance_matrix)
+    tau_value = validate_softmin_tau(tau)
+    num_parts = int(distance_matrix.size(1))
+    accumulated = [[None for _ in range(num_parts)] for _ in range(num_parts)]
+    accumulated[0][0] = distance_matrix[:, 0, 0]
+    for row in range(1, num_parts):
+        accumulated[row][0] = (
+            distance_matrix[:, row, 0] + accumulated[row - 1][0]
+        )
+    for column in range(1, num_parts):
+        accumulated[0][column] = (
+            distance_matrix[:, 0, column] + accumulated[0][column - 1]
+        )
+    for row in range(1, num_parts):
+        for column in range(1, num_parts):
+            accumulated[row][column] = distance_matrix[:, row, column] + (
+                softmin_two_predecessors(
+                    accumulated[row - 1][column],
+                    accumulated[row][column - 1],
+                    tau_value,
+                )
+            )
+    return accumulated[-1][-1]
+
+
+def soft_min_path_cost(distance_matrix, tau):
+    """Return the Soft-Min cost for one ``[K, K]`` distance matrix."""
+    if distance_matrix.dim() != 2:
+        raise ValueError("distance_matrix must have shape [K, K]")
+    return soft_min_path_costs(distance_matrix.unsqueeze(0), tau)[0]
+
+
 def fixed_index_pcc_loss(local_features, pids, camids):
     """Compute PCC over unique same-PID, different-camera pairs."""
     pair_indices = build_cross_camera_positive_pairs(pids, camids)
@@ -238,7 +295,24 @@ def hard_shortest_path_alignment_loss(local_features, pids, camids):
     )
 
 
-def part_alignment_loss(local_features, pids, camids, mode):
+def soft_min_alignment_loss(local_features, pids, camids, tau):
+    """Compute normalized Soft-Min alignment over valid camera pairs."""
+    tau_value = validate_softmin_tau(tau)
+    pair_indices = build_cross_camera_positive_pairs(pids, camids)
+    pair_count = int(pair_indices.size(0))
+    if pair_count == 0:
+        zero = local_features.sum() * 0.0
+        return zero, pair_count, zero
+    local_a, local_b = select_pair_local_features(local_features, pair_indices)
+    distance_matrix = pairwise_local_distance_matrix(local_a, local_b)
+    raw_costs = soft_min_path_costs(distance_matrix, tau_value)
+    path_length = 2 * int(distance_matrix.size(1)) - 1
+    soft_alignment_loss = (raw_costs / float(path_length)).mean()
+    return soft_alignment_loss, pair_count, raw_costs.detach().mean()
+
+
+def part_alignment_loss(local_features, pids, camids, mode,
+                        softmin_tau=None):
     """Dispatch a supported alignment mode and expose compatible statistics."""
     zero = local_features.sum() * 0.0
     if mode == "fixed_index":
@@ -253,6 +327,8 @@ def part_alignment_loss(local_features, pids, camids, mode):
             "valid_alignment_pair_count": 0,
             "mean_hard_path_cost": zero,
             "mean_path_absolute_offset": zero,
+            "soft_alignment_loss": zero,
+            "mean_soft_path_cost": zero,
         }
     if mode == "hard_shortest_path":
         loss, pair_count, mean_cost, mean_offset = (
@@ -266,6 +342,23 @@ def part_alignment_loss(local_features, pids, camids, mode):
             "valid_alignment_pair_count": pair_count,
             "mean_hard_path_cost": mean_cost,
             "mean_path_absolute_offset": mean_offset,
+            "soft_alignment_loss": zero,
+            "mean_soft_path_cost": zero,
+        }
+    if mode == "soft_min":
+        loss, pair_count, mean_cost = soft_min_alignment_loss(
+            local_features, pids, camids, softmin_tau
+        )
+        return {
+            "loss_pcc": loss,
+            "valid_pcc_pair_count": pair_count,
+            "mean_fixed_index_part_distance": zero,
+            "hard_alignment_loss": zero,
+            "valid_alignment_pair_count": pair_count,
+            "mean_hard_path_cost": zero,
+            "mean_path_absolute_offset": zero,
+            "soft_alignment_loss": loss,
+            "mean_soft_path_cost": mean_cost,
         }
     raise ValueError(
         "Unsupported PCC_MODE {!r}; expected one of {}".format(

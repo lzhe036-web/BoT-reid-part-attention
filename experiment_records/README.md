@@ -10,19 +10,22 @@ This directory is maintained by `tools/run_experiment.py` and
 - `tables/*.md` files are generated from the corresponding CSV files.
 - `tables/pcc_ablation.csv` records explicit cross-camera-positive and PCC
   weights separately while retaining fixed-index-compatible fields.
-- `tables/alignment_ablation.csv` compares formal fixed-index and hard-alignment
-  runs. Its Markdown view is always generated from the CSV source.
+- `tables/alignment_ablation.csv` compares formal fixed-index, hard, and
+  Soft-Min alignment runs. Its Markdown view is always generated from CSV.
 
-Registry schema version 2 adds `run_kind`, method/alignment identity fields,
-and hard-alignment evidence. Existing version-1 CSV/TSV rows are migrated
-losslessly: historical fields and rows are retained, legacy runs default to
-`run_kind=formal`, and unavailable evidence remains explicitly marked.
+Registry schema version 3 adds Soft-Min cost/temperature evidence, parent Hard
+lineage, future-compatible gating temperature fields, and a canonical
+multigranular feature signature with SHA256. Existing version-1/version-2
+CSV/TSV rows are migrated losslessly: historical fields and rows are retained,
+legacy runs default to `run_kind=formal`, and unavailable evidence remains
+explicitly marked as `not_recorded` or `not_applicable` by semantics.
 
-Failed or incomplete runs remain under `runs/`, but they are not written to
-successful result tables. Successful smoke runs are indexed in `runs.csv` and
-`evidence_manifest.tsv`, while all formal result tables and the generated
-section of `EXPERIMENTS.md` exclude them. Historical rows outside that section
-are never rewritten.
+Failed or incomplete runs remain under `runs/` and are indexed with their
+available hashes in `runs.csv` and `evidence_manifest.tsv`, but they are never
+written to successful result tables. Successful smoke runs use those same
+registries, while all formal result tables and the generated section of
+`EXPERIMENTS.md` exclude them. Historical rows outside that section are never
+rewritten.
 
 Formal training applies the shared protocol in `utils/reproducibility.py` before
 constructing DataLoaders, models, or optimizers, then writes the actual receipt

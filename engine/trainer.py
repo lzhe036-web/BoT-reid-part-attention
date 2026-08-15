@@ -43,6 +43,9 @@ def _loss_output_to_dict(loss_output):
         'valid_alignment_pair_count': 0,
         'mean_hard_path_cost': loss_output.new_tensor(0.0),
         'mean_path_absolute_offset': loss_output.new_tensor(0.0),
+        'soft_alignment_loss': loss_output.new_tensor(0.0),
+        'mean_soft_path_cost': loss_output.new_tensor(0.0),
+        'alignment_temperature': None,
     }
 
 
@@ -164,6 +167,15 @@ def create_supervised_trainer(model, optimizer, loss_fn,
             ),
             'mean_path_absolute_offset': _item(
                 loss_dict.get('mean_path_absolute_offset', 0.0)
+            ),
+            'soft_alignment_loss': _item(
+                loss_dict.get('soft_alignment_loss', 0.0)
+            ),
+            'mean_soft_path_cost': _item(
+                loss_dict.get('mean_soft_path_cost', 0.0)
+            ),
+            'alignment_temperature': loss_dict.get(
+                'alignment_temperature'
             ),
             'acc': acc.item(),
         }
@@ -336,6 +348,9 @@ def do_train(
                 engine.state.hard_epoch_loss_sum = 0.0
                 engine.state.hard_epoch_cost_sum = 0.0
                 engine.state.hard_epoch_offset_sum = 0.0
+            elif cfg.MODEL.PCC_MODE == 'soft_min':
+                engine.state.soft_epoch_loss_sum = 0.0
+                engine.state.soft_epoch_cost_sum = 0.0
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
@@ -361,6 +376,15 @@ def do_train(
                 engine.state.hard_epoch_offset_sum += (
                     pair_count
                     * float(engine.state.output['mean_path_absolute_offset'])
+                )
+            elif cfg.MODEL.PCC_MODE == 'soft_min':
+                engine.state.soft_epoch_loss_sum += (
+                    pair_count
+                    * float(engine.state.output['soft_alignment_loss'])
+                )
+                engine.state.soft_epoch_cost_sum += (
+                    pair_count
+                    * float(engine.state.output['mean_soft_path_cost'])
                 )
 
         if iteration_in_epoch % log_period == 0:
@@ -419,6 +443,42 @@ def do_train(
                         float(engine.state.output['mean_path_absolute_offset']),
                     )
                 )
+            elif (cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+                    and cfg.MODEL.PCC_MODE == 'soft_min'):
+                logger.info(
+                    "Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                    "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                    "loss_cross_camera_positive: {:.3f}, loss_pcc: {:.3f}, "
+                    "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                    .format(
+                        engine.state.epoch, iteration_in_epoch,
+                        _engine_epoch_length(engine),
+                        engine.state.metrics['avg_loss'],
+                        engine.state.metrics['avg_loss_id'],
+                        engine.state.metrics['avg_loss_triplet'],
+                        engine.state.metrics['avg_loss_camera_triplet'],
+                        engine.state.metrics['avg_loss_cross_camera_positive'],
+                        engine.state.metrics['avg_loss_pcc'],
+                        engine.state.metrics['avg_cross_camera_positive_count'],
+                        engine.state.metrics['avg_acc'],
+                        scheduler.get_lr()[0],
+                    )
+                )
+                logger.info(
+                    "Soft Alignment Batch - Epoch: {} Iteration: {} "
+                    "soft_alignment_loss: {:.6f} "
+                    "valid_alignment_pair_count: {} "
+                    "mean_soft_path_cost: {:.6f} "
+                    "alignment_temperature: {:.12g}"
+                    .format(
+                        engine.state.epoch,
+                        iteration_in_epoch,
+                        float(engine.state.output['soft_alignment_loss']),
+                        int(engine.state.output['valid_alignment_pair_count']),
+                        float(engine.state.output['mean_soft_path_cost']),
+                        float(engine.state.output['alignment_temperature']),
+                    )
+                )
             else:
                 logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                             "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
@@ -464,6 +524,22 @@ def do_train(
                         pair_count,
                         engine.state.hard_epoch_cost_sum / denominator,
                         engine.state.hard_epoch_offset_sum / denominator,
+                    )
+                )
+            elif cfg.MODEL.PCC_MODE == 'soft_min':
+                denominator = float(pair_count) if pair_count else 1.0
+                logger.info(
+                    "Soft Alignment Epoch Summary - Epoch: {} "
+                    "soft_alignment_loss: {:.6f} "
+                    "valid_alignment_pair_count: {} "
+                    "mean_soft_path_cost: {:.6f} "
+                    "alignment_temperature: {:.12g}"
+                    .format(
+                        engine.state.epoch,
+                        engine.state.soft_epoch_loss_sum / denominator,
+                        pair_count,
+                        engine.state.soft_epoch_cost_sum / denominator,
+                        float(cfg.MODEL.PCC_SOFTMIN_TAU),
                     )
                 )
 

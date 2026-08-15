@@ -37,6 +37,9 @@ from utils.experiment_recording import (
     validate_git_preflight,
     validate_git_runtime_state,
 )
+from utils.multigranular_signature import (
+    canonical_multigranular_feature_signature,
+)
 
 
 FULL_COMMIT = "a" * 40
@@ -67,6 +70,7 @@ def _base_config(output_dir, variant="cross", seed=42,
         "PCC_PARTS": 6,
         "PCC_LAMBDA": 0.1,
         "PCC_MODE": pcc_mode,
+        "PCC_SOFTMIN_TAU": 0.1,
     }
     if variant == "cross":
         model["CROSS_CAMERA_POSITIVE_ONLY"] = True
@@ -100,11 +104,12 @@ def _base_config(output_dir, variant="cross", seed=42,
 def _training_log(config_text):
     pcc_enabled = "PART_CORRESPONDENCE_CONSISTENCY: true" in config_text
     hard_enabled = pcc_enabled and "PCC_MODE: hard_shortest_path" in config_text
+    soft_enabled = pcc_enabled and "PCC_MODE: soft_min" in config_text
     first_pcc = ""
     second_pcc = ""
     first_summary = []
     second_summary = []
-    if pcc_enabled and not hard_enabled:
+    if pcc_enabled and not hard_enabled and not soft_enabled:
         first_pcc = ", loss_pcc: 0.2, valid_pcc_pair_count: 12.0, mean_fixed_index_part_distance: 0.2"
         second_pcc = ", loss_pcc: 0.1, valid_pcc_pair_count: 14.0, mean_fixed_index_part_distance: 0.1"
         first_summary = [
@@ -123,6 +128,17 @@ def _training_log(config_text):
         second_summary = [
             "2026-08-07 10:59:59 reid_baseline.train INFO: Hard Alignment Batch - Epoch: 2 Iteration: 100 hard_alignment_loss: 0.100000 valid_alignment_pair_count: 14 mean_hard_path_cost: 1.100000 mean_path_absolute_offset: 0.200000",
             "2026-08-07 11:00:00 reid_baseline.train INFO: Hard Alignment Epoch Summary - Epoch: 2 hard_alignment_loss: 0.100000 valid_alignment_pair_count: 1400 mean_hard_path_cost: 1.100000 mean_path_absolute_offset: 0.200000",
+        ]
+    elif soft_enabled:
+        first_pcc = ", loss_pcc: -0.1"
+        second_pcc = ", loss_pcc: 0.2"
+        first_summary = [
+            "2026-08-07 10:09:59 reid_baseline.train INFO: Soft Alignment Batch - Epoch: 1 Iteration: 100 soft_alignment_loss: -0.100000 valid_alignment_pair_count: 12 mean_soft_path_cost: -1.100000 alignment_temperature: 0.1",
+            "2026-08-07 10:10:00 reid_baseline.train INFO: Soft Alignment Epoch Summary - Epoch: 1 soft_alignment_loss: -0.100000 valid_alignment_pair_count: 1200 mean_soft_path_cost: -1.100000 alignment_temperature: 0.1",
+        ]
+        second_summary = [
+            "2026-08-07 10:59:59 reid_baseline.train INFO: Soft Alignment Batch - Epoch: 2 Iteration: 100 soft_alignment_loss: 0.200000 valid_alignment_pair_count: 14 mean_soft_path_cost: 2.200000 alignment_temperature: 0.1",
+            "2026-08-07 11:00:00 reid_baseline.train INFO: Soft Alignment Epoch Summary - Epoch: 2 soft_alignment_loss: 0.200000 valid_alignment_pair_count: 1400 mean_soft_path_cost: 2.200000 alignment_temperature: 0.1",
         ]
     return "\n".join([
         "2026-08-07 10:00:00 reid_baseline.train INFO: Start training",
@@ -168,6 +184,9 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
     atomic_write_text(source, config_text)
     atomic_write_text(resolved, config_text)
     identity = experiment_identity(config)
+    feature_signature, feature_signature_sha256 = (
+        canonical_multigranular_feature_signature(config)
+    )
     manifest = {
         "schema_version": 1,
         "experiment_id": experiment_id,
@@ -195,6 +214,15 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "alignment_mode": identity["alignment_mode"],
         "alignment_temperature": identity["alignment_temperature"],
         "gating_mode": identity["gating_mode"],
+        "gating_temperature": identity["gating_temperature"],
+        "parent_branch": "exp/c2l03-hard-shortest-path-alignment",
+        "parent_commit": (
+            "6b46f2c3747124b97d59ed5cf987f33efb82282b"
+        ),
+        "multigranular_feature_signature": feature_signature,
+        "multigranular_feature_signature_sha256": (
+            feature_signature_sha256
+        ),
         "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
@@ -227,6 +255,12 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
     })
     atomic_write_json(run_dir / "model_manifest.json", {
         "backbone": "resnet50", "modules": config_modules(config),
+        "parent_branch": manifest["parent_branch"],
+        "parent_commit": manifest["parent_commit"],
+        "multigranular_feature_signature": feature_signature,
+        "multigranular_feature_signature_sha256": (
+            feature_signature_sha256
+        ),
     })
     evidence_seed = seed if applied_seed is None else applied_seed
     atomic_write_json(output / "reproducibility.json", {
@@ -234,12 +268,18 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "resolved_seed": seed,
         "applied_seed": evidence_seed,
         "seed": evidence_seed,
+        "runner_seed": evidence_seed,
         "PYTHONHASHSEED": str(evidence_seed),
         "python_random_seed": evidence_seed,
         "numpy_seed": evidence_seed,
         "torch_cpu_seed": evidence_seed,
         "torch_cuda_seed": evidence_seed,
         "dataloader_worker_seed_base": evidence_seed,
+        "dataloader_train_generator_seed": evidence_seed,
+        "dataloader_validation_generator_seed": (
+            evidence_seed + 1 if isinstance(evidence_seed, int)
+            else evidence_seed
+        ),
         "dataloader_worker_seed_strategy": "synthetic worker fixture",
         "sampler_seed": evidence_seed,
         "sampler_seed_strategy": "synthetic sampler fixture",
@@ -484,6 +524,10 @@ class ExperimentRecordingTest(unittest.TestCase):
             )
             self.assertEqual(status["status"], "incomplete")
             self.assertEqual(_read_csv(records / "tables" / "main_results.csv"), [])
+            self.assertEqual(
+                _read_csv(records / "runs.csv")[0]["status"], "incomplete"
+            )
+            self.assertTrue(_read_tsv(records / "evidence_manifest.tsv"))
 
     def test_dirty_git_preflight_rejects_formal_training(self):
         with mock.patch(
@@ -609,6 +653,10 @@ class ExperimentRecordingTest(unittest.TestCase):
             )
             self.assertEqual(status["status"], "failed")
             self.assertEqual(_read_csv(records / "tables" / "main_results.csv"), [])
+            self.assertEqual(
+                _read_csv(records / "runs.csv")[0]["status"], "failed"
+            )
+            self.assertTrue(_read_tsv(records / "evidence_manifest.tsv"))
 
     def test_historical_experiments_are_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -673,6 +721,93 @@ class ExperimentRecordingTest(unittest.TestCase):
         self.assertEqual(hard["alignment_temperature"], NOT_APPLICABLE)
         self.assertEqual(hard["gating_mode"], NOT_APPLICABLE)
         self.assertNotEqual(fixed["method"], hard["method"])
+
+    def test_soft_identity_and_sentinel_flags_are_mode_aware(self):
+        soft = experiment_identity(_base_config(
+            "soft", variant="pcc", pcc_mode="soft_min"
+        ))
+        self.assertEqual(soft["method_variant"], "soft_min")
+        self.assertEqual(soft["alignment_temperature"], 0.1)
+        self.assertEqual(soft["gating_mode"], NOT_APPLICABLE)
+        self.assertEqual(soft["gating_temperature"], NOT_APPLICABLE)
+        for sentinel in (
+                NOT_RECORDED, NOT_APPLICABLE, "missing_evidence", ""):
+            config = _base_config("sentinel")
+            config["MODEL"]["PART_CORRESPONDENCE_CONSISTENCY"] = sentinel
+            self.assertFalse(
+                config_modules(config)["part_correspondence_consistency"]
+            )
+
+    def test_soft_statistics_allow_negative_cost_and_are_pair_weighted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory,
+                variant="pcc",
+                family="c2l03_soft_min_alignment",
+                experiment_id="C2-L03-SOFTMIN-T0P1-S42",
+                pcc_mode="soft_min",
+            )
+            result = finalize_fixture(records, run_dir, experiments)
+            expected_loss = (1200 * -0.1 + 1400 * 0.2) / 2600.0
+            expected_cost = (1200 * -1.1 + 1400 * 2.2) / 2600.0
+            self.assertAlmostEqual(
+                float(result["metrics"]["soft_alignment_loss"]),
+                expected_loss,
+            )
+            self.assertAlmostEqual(
+                float(result["metrics"]["mean_soft_path_cost"]),
+                expected_cost,
+            )
+            row = _read_csv(
+                records / "tables" / "alignment_ablation.csv"
+            )[0]
+            self.assertEqual(row["alignment_temperature"], "0.1")
+            self.assertEqual(row["mean_hard_path_cost"], NOT_APPLICABLE)
+            self.assertEqual(
+                row["mean_path_absolute_offset"], NOT_APPLICABLE
+            )
+            self.assertEqual(row["gating_temperature"], NOT_APPLICABLE)
+            self.assertEqual(len(
+                row["multigranular_feature_signature_sha256"]
+            ), 64)
+
+    def test_soft_zero_pair_and_missing_signature_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, output, experiments = make_fixture(
+                directory, variant="pcc", pcc_mode="soft_min"
+            )
+            log_path = output / "log.txt"
+            text = log_path.read_text(encoding="utf-8")
+            text = text.replace(
+                "valid_alignment_pair_count: 1200",
+                "valid_alignment_pair_count: 0",
+            ).replace(
+                "valid_alignment_pair_count: 1400",
+                "valid_alignment_pair_count: 0",
+            )
+            atomic_write_text(log_path, text)
+            with self.assertRaisesRegex(EvidenceError, "zero valid pairs"):
+                finalize_fixture(records, run_dir, experiments)
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory, variant="pcc", pcc_mode="soft_min"
+            )
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["multigranular_feature_signature"] = NOT_RECORDED
+            atomic_write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(EvidenceError, "signature is missing"):
+                finalize_fixture(records, run_dir, experiments)
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory, variant="pcc", pcc_mode="soft_min"
+            )
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["parent_commit"] = NOT_RECORDED
+            atomic_write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(EvidenceError, "parent_commit is missing"):
+                finalize_fixture(records, run_dir, experiments)
 
     def test_hard_statistics_are_pair_weighted_and_written_to_alignment_table(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -769,6 +904,26 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(evidence["schema_version"], "1")
             self.assertEqual(evidence["run_kind"], "formal")
             self.assertEqual(evidence["sha256"], "deadbeef")
+
+    def test_v2_schema_migration_preserves_rows_without_soft_fabrication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "main_results.csv"
+            path.write_text(
+                "schema_version,run_id,experiment_id,pcc_enabled,pcc_mode,"
+                "hard_alignment_loss,notes\n"
+                "2,hard-v2,HARD-V2,True,hard_shortest_path,0.2,keep-v2\n",
+                encoding="utf-8",
+            )
+            migrate_delimited_schema(path, MAIN_FIELDS)
+            migrated = _read_csv(path)[0]
+            self.assertEqual(migrated["schema_version"], "2")
+            self.assertEqual(migrated["notes"], "keep-v2")
+            self.assertEqual(migrated["hard_alignment_loss"], "0.2")
+            self.assertEqual(migrated["soft_alignment_loss"], NOT_APPLICABLE)
+            self.assertEqual(
+                migrated["multigranular_feature_signature_sha256"],
+                NOT_RECORDED,
+            )
 
     def test_legacy_fixed_index_json_manifest_remains_readable(self):
         with tempfile.TemporaryDirectory() as directory:
