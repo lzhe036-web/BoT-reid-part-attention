@@ -29,8 +29,10 @@ from utils.experiment_recording import (
     DynamicExperimentEvidenceError,
     atomic_write_json,
     build_dynamic_checkpoint_manifest,
+    candidate_protocol_signature,
     collect_environment,
     initialize_dynamic_run,
+    implementation_signature,
     model_state_dict_schema,
     read_validation_history,
     seal_dynamic_run_evidence,
@@ -39,6 +41,7 @@ from utils.experiment_recording import (
     transition_dynamic_run,
     validate_dynamic_configuration,
     validate_dynamic_lineage,
+    validate_recorded_smoke_for_formal,
     validate_dynamic_runtime_worktree,
 )
 from utils.multigranularity_signatures import (
@@ -246,31 +249,25 @@ def _require_runtime_inputs(configuration):
     return data_root, pretrained
 
 
-def _require_successful_smoke_before_formal(records_root):
-    registry_path = Path(records_root) / "runs.csv"
-    if not registry_path.is_file():
+def _require_successful_smoke_before_formal(
+        records_root, lineage=None, config_path=None, resolved_config=None,
+        feature_evidence=None, protocol_signature_sha256=None,
+        implementation_signature_sha256=None, repo_root=REPO_ROOT,
+        selection_resolver=None, dataset_validator=None):
+    if any(value is None for value in (
+            lineage, config_path, resolved_config, feature_evidence,
+            protocol_signature_sha256, implementation_signature_sha256)):
         raise DynamicExperimentEvidenceError(
-            "Formal training requires a successfully recorded 1-epoch smoke first"
+            "Formal smoke binding requires the complete current candidate evidence"
         )
-    with registry_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    eligible = [
-        row for row in rows
-        if row.get("experiment_id") == SMOKE_EXPERIMENT_ID
-        and row.get("run_kind") == "smoke"
-        and row.get("status") == "success"
-        and row.get("feature_compatibility_status") == "compatible"
-        and row.get("gating_temperature") in ("1", "1.0")
-        and row.get("gating_sample_count") not in (
-            None, "", "0", "not_recorded", "missing_evidence"
-        )
-    ]
-    if not eligible:
-        raise DynamicExperimentEvidenceError(
-            "Formal training is blocked until a successful, compatible tau=1.0 "
-            "smoke with nonzero gating samples is committed to runs.csv"
-        )
-    return eligible[-1]
+    return validate_recorded_smoke_for_formal(
+        records_root, repo_root, SMOKE_EXPERIMENT_ID, lineage,
+        config_path, resolved_config, feature_evidence,
+        current_protocol_signature_sha256=protocol_signature_sha256,
+        current_implementation_signature_sha256=implementation_signature_sha256,
+        selection_resolver=selection_resolver,
+        dataset_validator=dataset_validator,
+    )
 
 
 def _metrics(selected_validation):
@@ -300,8 +297,6 @@ def run(args):
     static_source = yaml.safe_load(STATIC_CONFIG.read_text(encoding="utf-8"))
     dynamic_source = _source_protocol(config_path, args.run_kind, output_dir)
     validate_dynamic_configuration(dynamic_source, static_source, args.run_kind)
-    if args.run_kind == "formal":
-        _require_successful_smoke_before_formal(RECORDS_ROOT)
     _require_runtime_inputs(local_cfg)
     feature = require_feature_compatibility(
         build_feature_compatibility_evidence(
@@ -309,6 +304,17 @@ def run(args):
             python_executable=sys.executable,
         )
     )
+    protocol_signature_sha = candidate_protocol_signature(local_cfg)
+    implementation_signature_sha = implementation_signature(
+        REPO_ROOT, lineage["commit"]
+    )
+    if args.run_kind == "formal":
+        _require_successful_smoke_before_formal(
+            RECORDS_ROOT, lineage=lineage, config_path=config_path,
+            resolved_config=local_cfg, feature_evidence=feature,
+            protocol_signature_sha256=protocol_signature_sha,
+            implementation_signature_sha256=implementation_signature_sha,
+        )
     experiment_id = FORMAL_EXPERIMENT_ID if args.run_kind == "formal" else SMOKE_EXPERIMENT_ID
     train_command = [sys.executable, "tools/train.py", "--config_file", str(config_path)] + overrides
     run_dir, _manifest = initialize_dynamic_run(
@@ -316,6 +322,8 @@ def run(args):
         config_path, serialize_cfg_node_yaml(local_cfg), output_dir, lineage,
         feature, train_command,
         started_at_utc=started_at_utc,
+        candidate_protocol_signature_sha256=protocol_signature_sha,
+        implementation_signature_sha256=implementation_signature_sha,
     )
     environment = None
     dataset_manifest = None
@@ -357,6 +365,10 @@ def run(args):
             run_dir, "training_complete", return_code=0,
             runtime_seconds=runtime,
         )
+        transition_dynamic_run(
+            run_dir, "finalizing", return_code=0,
+            runtime_seconds=runtime,
+        )
         validate_dynamic_runtime_worktree(REPO_ROOT, run_dir, output_dir)
         validation_records = read_validation_history(
             output_dir / "validation_history.jsonl"
@@ -395,6 +407,7 @@ def run(args):
             checkpoints, selected_checkpoint, _metrics(selected_validation),
             summary_path, samples_path, gating_statistics,
             runtime_seconds=time.monotonic() - started, return_code=0,
+            resolved_configuration=local_cfg,
         )
         validate_dynamic_runtime_worktree(REPO_ROOT, run_dir, output_dir)
         print(json.dumps({"run_id": manifest["run_id"], "status": "success"}, indent=2))

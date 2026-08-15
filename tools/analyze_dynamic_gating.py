@@ -25,16 +25,18 @@ from data.collate_batch import val_collate_fn
 from data.datasets import ImageDataset, init_dataset
 from data.transforms import build_transforms
 from modeling import build_model
-from utils.dynamic_gating_evidence import GatingEpochAccumulator
+from utils.dynamic_gating_evidence import (
+    DYNAMIC_GATING_SAMPLE_FIELDS,
+    DYNAMIC_GATING_SELECTION_RULE,
+    GatingEpochAccumulator,
+)
+from utils.experiment_schema import SCHEMA_VERSION
 from utils.experiment_recording import sha256_file
 from utils.reproducibility import make_data_loader_generator, seed_worker
 
 
-SELECTION_RULE = "sha256(stable_sample_key) ascending; first 256 query+gallery samples"
-SAMPLE_FIELDS = (
-    "stable_sample_key", "dataset_split", "pid", "camid", "p2", "p4", "p6",
-    "w2", "w4", "w6", "entropy", "dominant_k", "checkpoint_sha256",
-)
+SELECTION_RULE = DYNAMIC_GATING_SELECTION_RULE
+SAMPLE_FIELDS = DYNAMIC_GATING_SAMPLE_FIELDS
 
 
 def _atomic_text(path, text):
@@ -87,7 +89,9 @@ def select_samples(configuration, limit=256):
                 split, image_path, pid, camid, configuration.DATASETS.ROOT_DIR
             )
             candidates.append((key, split, image_path, int(pid), int(camid)))
-    candidates.sort(key=lambda item: item[0])
+    candidates.sort(
+        key=lambda item: hashlib.sha256(item[0].encode("utf-8")).hexdigest()
+    )
     return candidates[:min(int(limit), len(candidates))], dataset.num_train_pids
 
 
@@ -173,7 +177,7 @@ def generate_dynamic_gating_evidence(configuration, checkpoint_path, output_dir,
         "selection_rule": SELECTION_RULE,
     }
     summary = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "source_checkpoint_path": str(checkpoint_path),
         "source_checkpoint_sha256": checkpoint_sha,
         "selection_rule": SELECTION_RULE,

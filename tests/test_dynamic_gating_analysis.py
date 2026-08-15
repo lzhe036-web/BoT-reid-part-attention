@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import tempfile
 import unittest
@@ -10,7 +11,10 @@ from torch.utils.data import Dataset
 
 from config import cfg
 from tools.analyze_dynamic_gating import generate_dynamic_gating_evidence
-from utils.dynamic_gating_evidence import GatingEpochAccumulator
+from utils.dynamic_gating_evidence import (
+    GatingEpochAccumulator,
+    validate_dynamic_gating_evidence,
+)
 from utils.experiment_recording import sha256_file
 
 
@@ -69,6 +73,9 @@ class DynamicGatingAnalysisTest(unittest.TestCase):
              "image{}.jpg".format(index), index, index % 2)
             for index in range(4)
         ]
+        selected.sort(
+            key=lambda item: hashlib.sha256(item[0].encode("utf-8")).hexdigest()
+        )
         accumulator = GatingEpochAccumulator(1.0)
         accumulator.update([[1.0 / 3.0] * 3] * 4)
         epoch_statistics = accumulator.summary()
@@ -98,6 +105,13 @@ class DynamicGatingAnalysisTest(unittest.TestCase):
                 self.assertAlmostEqual(sum(float(row[key]) for key in ("p2", "p4", "p6")), 1.0)
                 self.assertAlmostEqual(sum(float(row[key]) for key in ("w2", "w4", "w6")), 3.0)
                 self.assertEqual(row["checkpoint_sha256"], sha256_file(checkpoint))
+            validated = validate_dynamic_gating_evidence(
+                summary_path, samples_path, sha256_file(checkpoint),
+                configuration, epoch_statistics, {},
+                selection_resolver=lambda _cfg: selected,
+                dataset_validator=lambda _cfg, _manifest: None,
+            )
+            self.assertEqual(validated["sample_count"], 4)
 
 
 if __name__ == "__main__":

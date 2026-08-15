@@ -1,6 +1,7 @@
 {
-  "schema_version": 2,
-  "compatible_read_versions": [1, 2],
+  "schema_version": 5,
+  "legacy_static_schema_version": 1,
+  "compatible_read_versions": [1, 2, 3, 4, 5],
   "sentinels": {
     "not_applicable": "The field does not apply to this method or run state.",
     "not_recorded": "The evidence has not yet been produced.",
@@ -11,11 +12,20 @@
     "formal_results": "experiment_records/tables/main_results.csv",
     "evidence": "experiment_records/evidence_manifest.tsv"
   },
+  "generated_markers": {
+    "all_runs": "AUTO-EXPERIMENT-RUNS",
+    "formal_results": "AUTO-EXPERIMENT-RESULTS",
+    "checkpoints": "AUTO-CHECKPOINT-EVIDENCE"
+  },
   "dynamic_gating": {
     "method_family": "multi_granularity_feature",
     "method_variant": "per_sample_dynamic_gating",
     "scalar_statistics": "all columns named p2/p4/p6, applied_w, entropy, dominant ratio, temperature and sample count",
     "detailed_artifacts": ["dynamic_gating_summary.json", "gating_samples.tsv"]
   },
-  "migration": "v1 columns and rows are retained; new unrecoverable fields become not_recorded; unknown historical columns are preserved."
+  "candidate_binding": {
+    "protocol_signature": "canonical resolved configuration excluding only smoke epochs/periods/output_dir",
+    "implementation_signature": "Git tree excluding only recorder-managed evidence products"
+  },
+  "migration": "v1-v4 schema identities, rows and unknown columns are retained; new unrecoverable fields become not_recorded and are never fabricated as v5."
 }

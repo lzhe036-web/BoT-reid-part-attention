@@ -3,6 +3,8 @@
 
 from __future__ import absolute_import
 
+import csv
+import hashlib
 import json
 import math
 import os
@@ -10,18 +12,18 @@ from pathlib import Path
 
 import torch
 
+from utils.experiment_schema import GATING_STAT_FIELDS, SCHEMA_VERSION
 
-GATING_STAT_FIELDS = (
-    "gating_temperature", "gating_sample_count",
-    "p2_mean", "p2_std", "p2_min", "p2_max",
-    "p4_mean", "p4_std", "p4_min", "p4_max",
-    "p6_mean", "p6_std", "p6_min", "p6_max",
-    "applied_w2_mean", "applied_w2_std",
-    "applied_w4_mean", "applied_w4_std",
-    "applied_w6_mean", "applied_w6_std",
-    "mean_gate_entropy", "dominant_k2_ratio", "dominant_k4_ratio",
-    "dominant_k6_ratio",
+
+DYNAMIC_GATING_SELECTION_RULE = (
+    "sha256(stable_sample_key) ascending; first 256 query+gallery samples"
 )
+DYNAMIC_GATING_SAMPLE_FIELDS = (
+    "stable_sample_key", "dataset_split", "pid", "camid", "p2", "p4", "p6",
+    "w2", "w4", "w6", "entropy", "dominant_k", "checkpoint_sha256",
+)
+GATING_VALUE_RTOL = 1e-6
+GATING_VALUE_ATOL = 1e-9
 
 
 class DynamicGatingEvidenceError(RuntimeError):
@@ -188,3 +190,191 @@ def read_gating_epoch_records(path):
             ) from error
         rows.append(row)
     return rows
+
+
+def _close(actual, expected, label):
+    try:
+        matches = math.isclose(
+            float(actual), float(expected), rel_tol=GATING_VALUE_RTOL,
+            abs_tol=GATING_VALUE_ATOL,
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise DynamicGatingEvidenceError(
+            "{} is missing or non-numeric".format(label)
+        ) from error
+    if not matches:
+        raise DynamicGatingEvidenceError(
+            "{} mismatch: {!r} != {!r}".format(label, actual, expected)
+        )
+
+
+def _config_value(configuration, dotted):
+    value = configuration
+    for part in dotted.split("."):
+        if isinstance(value, dict):
+            value = value[part]
+        else:
+            value = getattr(value, part)
+    return value
+
+
+def _validate_dataset_manifest(configuration, recorded_manifest):
+    from data.build import collect_dataset_protocol
+    current, _num_classes = collect_dataset_protocol(configuration)
+    fields = (
+        "dataset_name", "data_root", "train_image_count", "query_image_count",
+        "gallery_image_count", "train_pid_count", "query_pid_count",
+        "gallery_pid_count", "train_camera_count", "query_camera_count",
+        "gallery_camera_count", "split_manifest_sha256",
+        "combined_manifest_sha256",
+    )
+    for field in fields:
+        if current.get(field) != recorded_manifest.get(field):
+            raise DynamicGatingEvidenceError(
+                "Dataset manifest changed for gating selection: {}".format(field)
+            )
+
+
+def _default_selection_resolver(configuration):
+    from tools.analyze_dynamic_gating import select_samples
+    return select_samples(configuration, limit=256)[0]
+
+
+def validate_dynamic_gating_evidence(
+        summary_path, samples_path, selected_checkpoint_sha256,
+        resolved_config, gating_epoch_statistics, dataset_manifest,
+        selection_resolver=None, dataset_validator=None):
+    """Strictly validate bounded Dynamic Gating evidence before success."""
+    summary_path = Path(summary_path).resolve()
+    samples_path = Path(samples_path).resolve()
+    if not summary_path.is_file() or not samples_path.is_file():
+        raise DynamicGatingEvidenceError("Dynamic Gating summary/TSV is missing")
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (UnicodeError, ValueError) as error:
+        raise DynamicGatingEvidenceError("Invalid Dynamic Gating summary JSON") from error
+    if summary.get("schema_version") != SCHEMA_VERSION:
+        raise DynamicGatingEvidenceError("Dynamic Gating summary schema is not v5")
+    if summary.get("source_checkpoint_sha256") != selected_checkpoint_sha256:
+        raise DynamicGatingEvidenceError("Gating summary checkpoint SHA mismatch")
+    if summary.get("selection_rule") != DYNAMIC_GATING_SELECTION_RULE:
+        raise DynamicGatingEvidenceError("Gating selection rule mismatch")
+    selected_count = summary.get("selected_sample_count")
+    if isinstance(selected_count, bool) or not isinstance(selected_count, int) \
+            or selected_count <= 0 or selected_count > 256:
+        raise DynamicGatingEvidenceError("Invalid selected gating sample count")
+
+    samples_evidence = summary.get("gating_samples")
+    if not isinstance(samples_evidence, dict):
+        raise DynamicGatingEvidenceError("Summary lacks gating_samples evidence")
+    actual_sha = hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    if Path(str(samples_evidence.get("path", ""))).resolve() != samples_path:
+        raise DynamicGatingEvidenceError("Summary gating TSV path mismatch")
+    if samples_evidence.get("size_bytes") != samples_path.stat().st_size:
+        raise DynamicGatingEvidenceError("Summary gating TSV size mismatch")
+    if samples_evidence.get("sha256") != actual_sha:
+        raise DynamicGatingEvidenceError("Summary gating TSV SHA256 mismatch")
+    if samples_evidence.get("source_checkpoint_sha256") != selected_checkpoint_sha256:
+        raise DynamicGatingEvidenceError("Summary TSV checkpoint SHA mismatch")
+    if samples_evidence.get("selection_rule") != DYNAMIC_GATING_SELECTION_RULE:
+        raise DynamicGatingEvidenceError("Summary TSV selection rule mismatch")
+
+    text = samples_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or any(not line.strip() for line in lines):
+        raise DynamicGatingEvidenceError("Gating TSV contains an empty line")
+    reader = csv.DictReader(lines, delimiter="\t")
+    if tuple(reader.fieldnames or ()) != DYNAMIC_GATING_SAMPLE_FIELDS:
+        raise DynamicGatingEvidenceError("Gating TSV header mismatch")
+    rows = list(reader)
+    if len(rows) != selected_count:
+        raise DynamicGatingEvidenceError("Gating TSV/sample-count mismatch")
+
+    probabilities = []
+    keys = []
+    parsed_rows = []
+    for line_number, row in enumerate(rows, 2):
+        if None in row or set(row) != set(DYNAMIC_GATING_SAMPLE_FIELDS):
+            raise DynamicGatingEvidenceError(
+                "Gating TSV has extra/missing columns at line {}".format(line_number)
+            )
+        key = row["stable_sample_key"].strip()
+        if not key:
+            raise DynamicGatingEvidenceError("Gating sample key is empty")
+        if key in keys:
+            raise DynamicGatingEvidenceError("Duplicate gating sample key")
+        keys.append(key)
+        if row["dataset_split"] not in ("query", "gallery"):
+            raise DynamicGatingEvidenceError("Invalid gating dataset split")
+        try:
+            pid, camid = int(row["pid"]), int(row["camid"])
+            p = [float(row[name]) for name in ("p2", "p4", "p6")]
+            w = [float(row[name]) for name in ("w2", "w4", "w6")]
+            entropy = float(row["entropy"])
+            dominant = int(row["dominant_k"])
+        except (TypeError, ValueError) as error:
+            raise DynamicGatingEvidenceError(
+                "Unparseable gating TSV value at line {}".format(line_number)
+            ) from error
+        if not all(math.isfinite(value) and value >= 0.0 for value in p):
+            raise DynamicGatingEvidenceError("Gating probabilities must be finite/non-negative")
+        if not all(math.isfinite(value) for value in w + [entropy]):
+            raise DynamicGatingEvidenceError("Gating weights/entropy must be finite")
+        _close(sum(p), 1.0, "probability sum")
+        for index in range(3):
+            _close(w[index], 3.0 * p[index], "applied gating weight")
+        recomputed_entropy = -sum(
+            value * math.log(max(value, float.fromhex("0x1.0p-1022")))
+            for value in p
+        )
+        _close(entropy, recomputed_entropy, "gating entropy")
+        expected_dominant = (2, 4, 6)[max(range(3), key=lambda index: p[index])]
+        if dominant not in (2, 4, 6) or dominant != expected_dominant:
+            raise DynamicGatingEvidenceError("Dominant K mismatch")
+        if row["checkpoint_sha256"] != selected_checkpoint_sha256:
+            raise DynamicGatingEvidenceError("Per-sample checkpoint SHA mismatch")
+        probabilities.append(p)
+        parsed_rows.append((key, row["dataset_split"], pid, camid))
+
+    if dataset_validator is None:
+        _validate_dataset_manifest(resolved_config, dataset_manifest)
+    else:
+        dataset_validator(resolved_config, dataset_manifest)
+    resolver = selection_resolver or _default_selection_resolver
+    expected = resolver(resolved_config)
+    if isinstance(expected, tuple) and len(expected) == 2 \
+            and isinstance(expected[1], int):
+        expected = expected[0]
+    expected_rows = [
+        (str(item[0]), str(item[1]), int(item[3]), int(item[4]))
+        for item in expected
+    ]
+    if parsed_rows != expected_rows:
+        raise DynamicGatingEvidenceError(
+            "Gating sample selection/order does not match the dataset"
+        )
+    expected_key_order = sorted(
+        keys, key=lambda key: hashlib.sha256(key.encode("utf-8")).hexdigest()
+    )
+    if keys != expected_key_order:
+        raise DynamicGatingEvidenceError("Gating sample selection order mismatch")
+
+    temperature = float(_config_value(
+        resolved_config, "MODEL.MULTI_GRANULARITY_GATING_TAU"
+    ))
+    accumulator = GatingEpochAccumulator(temperature)
+    accumulator.update(probabilities)
+    recomputed = accumulator.summary()
+    deterministic = summary.get("deterministic_sample_statistics")
+    training = summary.get("training_epoch_statistics")
+    if not isinstance(deterministic, dict) or not isinstance(training, dict):
+        raise DynamicGatingEvidenceError("Summary statistics are missing")
+    for field in GATING_STAT_FIELDS:
+        _close(deterministic.get(field), recomputed[field], "deterministic {}".format(field))
+        _close(training.get(field), gating_epoch_statistics.get(field), "training {}".format(field))
+    return {
+        "summary": summary,
+        "sample_count": selected_count,
+        "statistics": recomputed,
+        "samples_sha256": actual_sha,
+    }

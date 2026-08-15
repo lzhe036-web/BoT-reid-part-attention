@@ -24,80 +24,41 @@ from pathlib import Path
 
 import yaml
 
-from utils.dynamic_gating_evidence import GATING_STAT_FIELDS, read_gating_epoch_records
+from utils.dynamic_gating_evidence import (
+    DYNAMIC_GATING_SELECTION_RULE,
+    read_gating_epoch_records,
+    validate_dynamic_gating_evidence,
+)
+from utils.experiment_schema import (
+    AUTO_CHECKPOINTS_END,
+    AUTO_CHECKPOINTS_START,
+    AUTO_RESULTS_END,
+    AUTO_RESULTS_START,
+    AUTO_RUNS_END,
+    AUTO_RUNS_START,
+    CHECKPOINT_FIELDS,
+    EVIDENCE_FIELDS,
+    FORMAL_FIELDS,
+    GATING_STAT_FIELDS,
+    LEGACY_DYNAMIC_MARKERS,
+    MISSING_EVIDENCE,
+    NOT_APPLICABLE,
+    NOT_RECORDED,
+    RUN_FIELDS,
+    SCHEMA_VERSION,
+    migrate_row,
+)
 from utils.multigranularity_signatures import (
     STATIC_BASELINE_BRANCH,
     STATIC_BASELINE_SHA,
 )
 
 
-UNIFIED_SCHEMA_VERSION = 2
-NOT_RECORDED = "not_recorded"
-NOT_APPLICABLE = "not_applicable"
-MISSING_EVIDENCE = "missing_evidence"
-AUTO_RUNS_START = "<!-- AUTO-DYNAMIC-GATING-RUNS:START -->"
-AUTO_RUNS_END = "<!-- AUTO-DYNAMIC-GATING-RUNS:END -->"
-AUTO_FORMAL_START = "<!-- AUTO-DYNAMIC-GATING-FORMAL:START -->"
-AUTO_FORMAL_END = "<!-- AUTO-DYNAMIC-GATING-FORMAL:END -->"
-AUTO_CHECKPOINTS_START = "<!-- AUTO-DYNAMIC-GATING-CHECKPOINTS:START -->"
-AUTO_CHECKPOINTS_END = "<!-- AUTO-DYNAMIC-GATING-CHECKPOINTS:END -->"
+UNIFIED_SCHEMA_VERSION = SCHEMA_VERSION
 
 
 class DynamicExperimentEvidenceError(RuntimeError):
     pass
-
-
-BASE_RUN_FIELDS = (
-    "schema_version", "experiment_id", "experiment_family", "evidence_id",
-    "run_id", "run_kind", "status", "method_family", "method_variant",
-    "branch", "commit", "parent_branch", "parent_commit", "merge_base",
-    "feature_reference_commit", "feature_reference_signature_sha256",
-    "current_feature_signature_sha256", "feature_compatibility_status",
-    "feature_compatibility_evidence_path",
-    "feature_compatibility_evidence_size_bytes",
-    "feature_compatibility_evidence_sha256", "gating_signature_sha256",
-    "gating_signature_path", "gating_signature_size_bytes",
-    "gating_signature_evidence_sha256",
-    "seed", "source_config_origin_path", "source_config_origin_size_bytes",
-    "source_config_origin_sha256", "source_config_path", "source_config_size_bytes",
-    "source_config_sha256", "resolved_config_path",
-    "resolved_config_size_bytes", "resolved_config_sha256",
-    "training_log_path", "training_log_size_bytes", "training_log_sha256",
-    "console_log_path", "console_log_size_bytes", "console_log_sha256",
-    "output_dir", "selected_checkpoint_path", "selected_checkpoint_size_bytes",
-    "selected_checkpoint_sha256", "checkpoint_manifest_path",
-    "checkpoint_manifest_size_bytes", "checkpoint_manifest_sha256",
-    "artifact_manifest_path", "artifact_manifest_size_bytes",
-    "artifact_manifest_sha256", "run_evidence_manifest_path",
-    "run_evidence_manifest_size_bytes", "run_evidence_manifest_sha256",
-    "reproducibility_path",
-    "reproducibility_size_bytes", "reproducibility_sha256",
-    "dataset_manifest_path", "dataset_manifest_sha256", "model_manifest_path",
-    "model_manifest_sha256", "environment_path", "environment_sha256", "gpu",
-    "start_time", "end_time", "runtime_seconds", "return_code",
-    "alignment_mode", "alignment_temperature", "gating_mode",
-    "gating_input", "gating_temperature", "gating_normalization", "scale_order",
-    "dynamic_gating_summary_path", "dynamic_gating_summary_size_bytes",
-    "dynamic_gating_summary_sha256", "dynamic_gating_summary_source_checkpoint_sha256",
-    "gating_samples_path", "gating_samples_size_bytes", "gating_samples_sha256",
-    "gating_samples_source_checkpoint_sha256", "gating_sample_selection_rule",
-)
-GATING_RUN_STAT_FIELDS = tuple(
-    field for field in GATING_STAT_FIELDS if field not in BASE_RUN_FIELDS
-)
-RUN_FIELDS = BASE_RUN_FIELDS + GATING_RUN_STAT_FIELDS + (
-    "rank1_percent", "rank5_percent", "rank10_percent", "map_percent",
-    "best_epoch", "selected_epoch", "notes",
-)
-EVIDENCE_FIELDS = (
-    "schema_version", "run_id", "experiment_id", "run_kind", "status",
-    "artifact_type", "path", "size_bytes", "sha256",
-    "source_checkpoint_sha256", "selection_rule",
-)
-CHECKPOINT_FIELDS = (
-    "run_id", "experiment_id", "run_kind", "checkpoint_path", "size_bytes",
-    "ignite_epoch", "global_iteration", "sha256", "selected",
-)
 
 
 def utc_now():
@@ -146,6 +107,108 @@ def _git(repo_root, args):
             "Git evidence command failed: {}".format(" ".join(args))
         ) from error
     return output.decode("utf-8", errors="replace").strip()
+
+
+_PROTOCOL_IGNORED_PATHS = (
+    "SOLVER.MAX_EPOCHS", "SOLVER.CHECKPOINT_PERIOD",
+    "SOLVER.EVAL_PERIOD", "OUTPUT_DIR",
+)
+
+
+def _plain_value(value):
+    if isinstance(value, dict) or hasattr(value, "items"):
+        return {
+            str(key): _plain_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_plain_value(child) for child in value]
+    return value
+
+
+def _remove_dotted(mapping, dotted):
+    parts = dotted.split(".")
+    parent = mapping
+    for part in parts[:-1]:
+        if not isinstance(parent, dict) or part not in parent:
+            return
+        parent = parent[part]
+    if isinstance(parent, dict):
+        parent.pop(parts[-1], None)
+
+
+def candidate_protocol_payload(configuration):
+    """Canonical formal/smoke protocol with only declared smoke fields removed."""
+    payload = _plain_value(configuration)
+    if not isinstance(payload, dict):
+        raise DynamicExperimentEvidenceError("Resolved configuration must be a mapping")
+    for dotted in _PROTOCOL_IGNORED_PATHS:
+        _remove_dotted(payload, dotted)
+    return payload
+
+
+def candidate_protocol_signature(configuration):
+    canonical = json.dumps(
+        candidate_protocol_payload(configuration), ensure_ascii=False,
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _evidence_only_git_path(path):
+    normalized = str(path).replace("\\", "/")
+    if normalized == "EXPERIMENTS.md":
+        return True
+    if normalized in (
+            "experiment_records/runs.csv",
+            "experiment_records/evidence_manifest.tsv"):
+        return True
+    if normalized.startswith("experiment_records/runs/"):
+        return True
+    if normalized.startswith("experiment_records/tables/") and (
+            normalized.endswith(".csv") or normalized.endswith(".md")):
+        return True
+    return False
+
+
+def implementation_signature(repo_root, revision):
+    """Hash every tracked implementation blob except recorder result products."""
+    listing = _git(
+        repo_root, ["ls-tree", "-r", "--full-tree", str(revision)]
+    )
+    rows = []
+    for line in listing.splitlines():
+        metadata, separator, path = line.partition("\t")
+        if not separator or _evidence_only_git_path(path):
+            continue
+        rows.append("{}\t{}".format(metadata, path.replace("\\", "/")))
+    if not rows:
+        raise DynamicExperimentEvidenceError("Implementation signature has no tracked inputs")
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def validate_smoke_commit_lineage(repo_root, smoke_commit, current_commit):
+    if smoke_commit == current_commit:
+        return []
+    try:
+        subprocess.check_call(
+            ["git", "-C", str(Path(repo_root).resolve()), "merge-base",
+             "--is-ancestor", smoke_commit, current_commit],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise DynamicExperimentEvidenceError(
+            "Smoke commit is not an ancestor of the formal candidate"
+        ) from error
+    changed = _git(
+        repo_root, ["diff", "--name-only", smoke_commit, current_commit]
+    ).splitlines()
+    forbidden = sorted(path for path in changed if not _evidence_only_git_path(path))
+    if forbidden:
+        raise DynamicExperimentEvidenceError(
+            "Smoke/formal commits differ outside recorded evidence: {}".format(forbidden)
+        )
+    return sorted(changed)
 
 
 def validate_dynamic_lineage(repo_root, expected_commit=None):
@@ -386,6 +449,7 @@ def _refresh_partial_artifact_manifest(run_dir, manifest):
     atomic_write_json(artifact_path, {
         "schema_version": UNIFIED_SCHEMA_VERSION,
         "run_id": manifest["run_id"], "status": manifest["status"],
+        "externally_sealed_artifacts": ["run_manifest", "run_status"],
         "artifacts": indexed,
     })
     evidence = _file_evidence(artifact_path)
@@ -403,7 +467,9 @@ def _refresh_partial_artifact_manifest(run_dir, manifest):
 def initialize_dynamic_run(records_root, experiments_path, experiment_id,
                            run_kind, source_config, resolved_config_text,
                            output_dir, lineage, feature_evidence, command,
-                           started_at_utc=None):
+                           started_at_utc=None,
+                           candidate_protocol_signature_sha256=None,
+                           implementation_signature_sha256=None):
     records_root = Path(records_root)
     records_root.mkdir(parents=True, exist_ok=True)
     run_id = generate_run_id(experiment_id, lineage["commit"])
@@ -420,6 +486,15 @@ def initialize_dynamic_run(records_root, experiments_path, experiment_id,
     gating_payload = feature_evidence["fusion_gating_signature"]
     atomic_write_json(run_dir / "fusion_gating_signature.json", gating_payload)
     started = started_at_utc or utc_now()
+    resolved_mapping = yaml.safe_load(resolved_config_text)
+    protocol_signature = (
+        candidate_protocol_signature_sha256
+        or candidate_protocol_signature(resolved_mapping)
+    )
+    implementation_sha = (
+        implementation_signature_sha256
+        or lineage.get("implementation_signature_sha256", NOT_RECORDED)
+    )
     manifest = {
         "schema_version": UNIFIED_SCHEMA_VERSION,
         "experiment_id": experiment_id,
@@ -444,6 +519,8 @@ def initialize_dynamic_run(records_root, experiments_path, experiment_id,
             "parent_remote_actual_commit", lineage["parent_commit"]
         ),
         "merge_base": lineage["merge_base"], "seed": 42,
+        "candidate_protocol_signature_sha256": protocol_signature,
+        "implementation_signature_sha256": implementation_sha,
         "feature_reference_commit": feature_evidence["feature_reference_commit"],
         "feature_reference_signature_sha256": feature_evidence["feature_reference_signature_sha256"],
         "current_feature_signature_sha256": feature_evidence["current_feature_signature_sha256"],
@@ -503,7 +580,7 @@ def transition_dynamic_run(run_dir, status, return_code=NOT_RECORDED,
     if runtime_seconds != NOT_RECORDED:
         manifest["runtime_seconds"] = float(runtime_seconds)
         status_payload["runtime_seconds"] = float(runtime_seconds)
-    if status in ("success", "failed", "incomplete", "interrupted", "training_complete"):
+    if status in ("success", "failed", "incomplete", "interrupted"):
         manifest["ended_at_utc"] = timestamp
         status_payload["ended_at_utc"] = timestamp
     if error is not None:
@@ -575,9 +652,11 @@ def _upsert(rows, row, key="run_id"):
     return sorted(result, key=lambda item: (str(item.get("start_time", "")), str(item.get(key, ""))))
 
 
-def _artifact_rows(manifest):
+def _artifact_rows(manifest, control_evidence=None):
     rows = []
-    for artifact_type, evidence in manifest.get("artifacts", {}).items():
+    indexed = dict(manifest.get("artifacts", {}))
+    indexed.update(control_evidence or {})
+    for artifact_type, evidence in indexed.items():
         if not isinstance(evidence, dict) or evidence.get("path") in (None, NOT_RECORDED, MISSING_EVIDENCE):
             continue
         rows.append({
@@ -593,7 +672,7 @@ def _artifact_rows(manifest):
     return rows
 
 
-def _manifest_run_row(manifest):
+def _manifest_run_row(manifest, control_evidence=None):
     def evidence(name):
         return manifest.get(name, {}) if isinstance(manifest.get(name), dict) else {}
     source = evidence("source_config")
@@ -613,6 +692,9 @@ def _manifest_run_row(manifest):
     environment = evidence("environment")
     summary = evidence("dynamic_gating_summary")
     samples = evidence("gating_samples")
+    control_evidence = control_evidence or {}
+    run_manifest = control_evidence.get("run_manifest", {})
+    run_status = control_evidence.get("run_status", {})
     metrics = manifest.get("metrics", {})
     statistics = manifest.get("gating_statistics", {})
     row = {
@@ -625,6 +707,12 @@ def _manifest_run_row(manifest):
         "method_variant": manifest["method_variant"], "branch": manifest["branch"],
         "commit": manifest["commit"], "parent_branch": manifest["parent_branch"],
         "parent_commit": manifest["parent_commit"], "merge_base": manifest["merge_base"],
+        "candidate_protocol_signature_sha256": manifest.get(
+            "candidate_protocol_signature_sha256", NOT_RECORDED
+        ),
+        "implementation_signature_sha256": manifest.get(
+            "implementation_signature_sha256", NOT_RECORDED
+        ),
         "feature_reference_commit": manifest["feature_reference_commit"],
         "feature_reference_signature_sha256": manifest["feature_reference_signature_sha256"],
         "current_feature_signature_sha256": manifest["current_feature_signature_sha256"],
@@ -665,6 +753,7 @@ def _manifest_run_row(manifest):
             ("selected_checkpoint", checkpoint), ("checkpoint_manifest", checkpoint_manifest),
             ("artifact_manifest", artifact_manifest), ("reproducibility", reproducibility),
             ("run_evidence_manifest", run_evidence_manifest),
+            ("run_manifest", run_manifest), ("run_status", run_status),
             ("dynamic_gating_summary", summary), ("gating_samples", samples)):
         row["{}_path".format(prefix)] = item.get("path", NOT_RECORDED)
         row["{}_size_bytes".format(prefix)] = item.get("size_bytes", NOT_RECORDED)
@@ -704,6 +793,49 @@ def _replace_section(content, start, end, replacement):
     return content.rstrip() + "\n\n" + replacement
 
 
+def _markdown_run_ids(section):
+    table_lines = [
+        line for line in section.splitlines() if line.lstrip().startswith("|")
+    ]
+    if len(table_lines) <= 2:
+        return set()
+    headers = [cell.strip() for cell in table_lines[0].strip().strip("|").split("|")]
+    if "run_id" not in headers:
+        raise DynamicExperimentEvidenceError(
+            "Legacy generated section has data but no run_id column"
+        )
+    index = headers.index("run_id")
+    values = set()
+    for line in table_lines[2:]:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != len(headers):
+            raise DynamicExperimentEvidenceError("Malformed legacy generated row")
+        if cells[index] not in ("", NOT_RECORDED):
+            values.add(cells[index])
+    return values
+
+
+def _remove_legacy_dynamic_sections(content, authoritative_run_ids):
+    migrated = content
+    for start, end in LEGACY_DYNAMIC_MARKERS:
+        if start not in migrated and end not in migrated:
+            continue
+        if migrated.count(start) != 1 or migrated.count(end) != 1:
+            raise DynamicExperimentEvidenceError(
+                "Legacy Dynamic Gating markers are malformed"
+            )
+        before, rest = migrated.split(start, 1)
+        section, after = rest.split(end, 1)
+        legacy_ids = _markdown_run_ids(section)
+        missing = sorted(legacy_ids - set(authoritative_run_ids))
+        if missing:
+            raise DynamicExperimentEvidenceError(
+                "Legacy Dynamic Gating rows are not migrated to v5: {}".format(missing)
+            )
+        migrated = before.rstrip() + "\n\n" + after.lstrip("\r\n")
+    return migrated
+
+
 def _checkpoint_rows(records_root, run_rows):
     rows = []
     for run in run_rows:
@@ -729,9 +861,14 @@ def _checkpoint_rows(records_root, run_rows):
 def _markdown_content(experiments_path, run_rows, formal_rows, checkpoint_rows):
     path = Path(experiments_path)
     content = path.read_text(encoding="utf-8") if path.is_file() else "# Experiments\n"
+    authoritative_ids = {
+        str(row.get("run_id")) for row in list(run_rows) + list(checkpoint_rows)
+        if row.get("run_id") not in (None, "", NOT_RECORDED)
+    }
+    content = _remove_legacy_dynamic_sections(content, authoritative_ids)
     sections = (
         (AUTO_RUNS_START, AUTO_RUNS_END, "Run Registry / All Recorded Runs", RUN_FIELDS, run_rows),
-        (AUTO_FORMAL_START, AUTO_FORMAL_END, "Formal Results", RUN_FIELDS, formal_rows),
+        (AUTO_RESULTS_START, AUTO_RESULTS_END, "Formal Results", FORMAL_FIELDS, formal_rows),
         (AUTO_CHECKPOINTS_START, AUTO_CHECKPOINTS_END, "Checkpoint Evidence", CHECKPOINT_FIELDS, checkpoint_rows),
     )
     for start, end, title, fields, rows in sections:
@@ -776,6 +913,16 @@ def _transactional_write(targets):
 def register_dynamic_run_state(run_dir):
     run_dir = Path(run_dir)
     manifest = read_json(run_dir / "run_manifest.json")
+    status_payload = read_json(run_dir / "run_status.json")
+    if status_payload.get("run_id") != manifest.get("run_id") \
+            or status_payload.get("status") != manifest.get("status"):
+        raise DynamicExperimentEvidenceError(
+            "run_manifest.json and run_status.json disagree"
+        )
+    control_evidence = {
+        "run_manifest": _file_evidence(run_dir / "run_manifest.json"),
+        "run_status": _file_evidence(run_dir / "run_status.json"),
+    }
     records_root = Path(manifest["records_root"])
     experiments_path = Path(manifest["experiments_path"])
     runs_path = records_root / "runs.csv"
@@ -793,13 +940,16 @@ def register_dynamic_run_state(run_dir):
     persisted_evidence_fields = tuple(EVIDENCE_FIELDS) + tuple(
         field for field in old_evidence_fields if field not in EVIDENCE_FIELDS
     )
-    row = _manifest_run_row(manifest)
+    run_rows = [migrate_row(item, RUN_FIELDS) for item in run_rows]
+    formal_rows = [migrate_row(item, FORMAL_FIELDS) for item in formal_rows]
+    evidence_rows = [migrate_row(item, EVIDENCE_FIELDS) for item in evidence_rows]
+    row = _manifest_run_row(manifest, control_evidence)
     run_rows = _upsert(run_rows, row)
     formal_rows = [item for item in formal_rows if item.get("run_id") != row["run_id"]]
     if row["run_kind"] == "formal" and row["status"] == "success":
         formal_rows = _upsert(formal_rows, row)
     evidence_rows = [item for item in evidence_rows if item.get("run_id") != row["run_id"]]
-    evidence_rows.extend(_artifact_rows(manifest))
+    evidence_rows.extend(_artifact_rows(manifest, control_evidence))
     evidence_rows = sorted(evidence_rows, key=lambda item: (str(item.get("run_id", "")), str(item.get("artifact_type", "")), str(item.get("path", ""))))
     checkpoints = _checkpoint_rows(records_root, run_rows)
     markdown = _markdown_content(experiments_path, run_rows, formal_rows, checkpoints)
@@ -818,6 +968,8 @@ def refresh_experiments_markdown(experiments_path, records_root):
     records_root = Path(records_root)
     run_rows, _ = _read_table(records_root / "runs.csv", ",")
     formal_rows, _ = _read_table(records_root / "tables" / "main_results.csv", ",")
+    run_rows = [migrate_row(item, RUN_FIELDS) for item in run_rows]
+    formal_rows = [migrate_row(item, FORMAL_FIELDS) for item in formal_rows]
     checkpoints = _checkpoint_rows(records_root, run_rows)
     content = _markdown_content(experiments_path, run_rows, formal_rows, checkpoints)
     _atomic_write(experiments_path, content)
@@ -829,8 +981,9 @@ def migrate_unified_schema(path, fields, delimiter=","):
     # Unknown historical columns are retained after the current schema rather
     # than discarded. Missing new evidence remains explicitly not_recorded.
     merged_fields = list(fields) + [field for field in old_fields if field not in fields]
-    _atomic_write(path, _render_table(rows, merged_fields, delimiter))
-    return merged_fields, rows
+    migrated = [migrate_row(row, fields) for row in rows]
+    _atomic_write(path, _render_table(migrated, merged_fields, delimiter))
+    return merged_fields, migrated
 
 
 def record_file_artifact(manifest, artifact_type, path,
@@ -849,6 +1002,294 @@ def record_file_artifact(manifest, artifact_type, path,
     evidence["selection_rule"] = selection_rule
     manifest.setdefault("artifacts", {})[artifact_type] = evidence
     return evidence
+
+
+def _require_file_evidence(evidence, label):
+    if not isinstance(evidence, dict):
+        raise DynamicExperimentEvidenceError("{} evidence is missing".format(label))
+    path = Path(str(evidence.get("path", "")))
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise DynamicExperimentEvidenceError("{} artifact is missing/empty".format(label))
+    try:
+        recorded_size = int(evidence.get("size_bytes"))
+    except (TypeError, ValueError) as error:
+        raise DynamicExperimentEvidenceError(
+            "{} size is not recorded".format(label)
+        ) from error
+    if recorded_size != path.stat().st_size:
+        raise DynamicExperimentEvidenceError("{} size mismatch".format(label))
+    if evidence.get("sha256") != sha256_file(path):
+        raise DynamicExperimentEvidenceError("{} SHA256 mismatch".format(label))
+    return path
+
+
+def _global_evidence_for_run(records_root, run_id):
+    rows, _fields = _read_table(Path(records_root) / "evidence_manifest.tsv", "\t")
+    selected = [row for row in rows if row.get("run_id") == run_id]
+    if not selected:
+        raise DynamicExperimentEvidenceError("Smoke is absent from global evidence manifest")
+    return selected
+
+
+def _validate_smoke_artifacts(records_root, run_dir, manifest, status_payload):
+    run_id = manifest["run_id"]
+    global_rows = _global_evidence_for_run(records_root, run_id)
+    by_type = {}
+    for row in global_rows:
+        artifact_type = row.get("artifact_type")
+        if artifact_type in by_type:
+            raise DynamicExperimentEvidenceError(
+                "Duplicate global artifact evidence {}".format(artifact_type)
+            )
+        by_type[artifact_type] = row
+        _require_file_evidence(row, "global {}".format(artifact_type))
+        if row.get("status") != "success":
+            raise DynamicExperimentEvidenceError("Smoke artifact status is not success")
+
+    control = {
+        "run_manifest": _file_evidence(run_dir / "run_manifest.json"),
+        "run_status": _file_evidence(run_dir / "run_status.json"),
+    }
+    required = {
+        "console_log", "training_log", "source_config", "source_config_origin",
+        "resolved_config", "feature_compatibility", "fusion_gating_signature",
+        "reproducibility", "environment", "dataset_manifest", "model_manifest",
+        "checkpoint_manifest", "selected_checkpoint", "dynamic_gating_summary",
+        "gating_samples", "artifact_manifest", "run_evidence_manifest",
+        "run_manifest", "run_status",
+    }
+    missing = sorted(required - set(by_type))
+    if missing:
+        raise DynamicExperimentEvidenceError(
+            "Smoke global evidence is incomplete: {}".format(missing)
+        )
+    for artifact_type, evidence in control.items():
+        row = by_type[artifact_type]
+        for field in ("path", "size_bytes", "sha256"):
+            if str(row.get(field)) != str(evidence.get(field)):
+                raise DynamicExperimentEvidenceError(
+                    "{} global sealing mismatch".format(artifact_type)
+                )
+    for artifact_type, evidence in manifest.get("artifacts", {}).items():
+        if artifact_type not in by_type:
+            raise DynamicExperimentEvidenceError(
+                "Manifest artifact is absent globally: {}".format(artifact_type)
+            )
+        _require_file_evidence(evidence, artifact_type)
+        for field in ("path", "size_bytes", "sha256"):
+            if str(by_type[artifact_type].get(field)) != str(evidence.get(field)):
+                raise DynamicExperimentEvidenceError(
+                    "Artifact/global evidence mismatch: {}".format(artifact_type)
+                )
+    artifact_path = _require_file_evidence(
+        manifest.get("artifact_manifest"), "artifact_manifest"
+    )
+    artifact_payload = read_json(artifact_path)
+    if artifact_payload.get("run_id") != run_id \
+            or artifact_payload.get("status") != "success":
+        raise DynamicExperimentEvidenceError("Artifact manifest identity/status mismatch")
+    if artifact_payload.get("externally_sealed_artifacts") != [
+            "run_manifest", "run_status"]:
+        raise DynamicExperimentEvidenceError("Control artifact sealing declaration is missing")
+    for artifact_type, evidence in artifact_payload.get("artifacts", {}).items():
+        _require_file_evidence(evidence, "artifact manifest {}".format(artifact_type))
+        if artifact_type not in by_type:
+            raise DynamicExperimentEvidenceError(
+                "Artifact manifest entry is absent globally"
+            )
+    run_evidence_path = _require_file_evidence(
+        manifest.get("run_evidence_manifest"), "run evidence manifest"
+    )
+    run_evidence_rows, _run_evidence_fields = _read_table(
+        run_evidence_path, "\t"
+    )
+    run_evidence_types = {
+        row.get("artifact_type") for row in run_evidence_rows
+    }
+    expected_run_evidence_types = set(artifact_payload.get("artifacts", {})) - {
+        "run_evidence_manifest"
+    }
+    if run_evidence_types != expected_run_evidence_types:
+        raise DynamicExperimentEvidenceError(
+            "Per-run evidence manifest is incomplete"
+        )
+    for row in run_evidence_rows:
+        artifact_type = row["artifact_type"]
+        evidence = artifact_payload["artifacts"][artifact_type]
+        for field in ("path", "size_bytes", "sha256"):
+            if str(row.get(field)) != str(evidence.get(field)):
+                raise DynamicExperimentEvidenceError(
+                    "Per-run artifact evidence mismatch: {}".format(artifact_type)
+                )
+    return by_type
+
+
+def validate_recorded_smoke_for_formal(
+        records_root, repo_root, smoke_experiment_id, current_lineage,
+        current_source_config, current_resolved_config, current_feature_evidence,
+        current_protocol_signature_sha256=None,
+        current_implementation_signature_sha256=None,
+        selection_resolver=None, dataset_validator=None):
+    """Return a fully verified smoke bound to the exact formal candidate."""
+    records_root = Path(records_root)
+    rows, _fields = _read_table(records_root / "runs.csv", ",")
+    candidates = [
+        row for row in rows
+        if row.get("experiment_id") == smoke_experiment_id
+        and row.get("run_kind") == "smoke"
+        and row.get("status") == "success"
+    ]
+    if not candidates:
+        raise DynamicExperimentEvidenceError(
+            "Formal training requires a fully recorded successful smoke"
+        )
+    current_protocol_sha = (
+        current_protocol_signature_sha256
+        or candidate_protocol_signature(current_resolved_config)
+    )
+    current_implementation_sha = (
+        current_implementation_signature_sha256
+        or implementation_signature(repo_root, current_lineage["commit"])
+    )
+    current_source_sha = sha256_file(current_source_config)
+    errors = []
+    for row in sorted(candidates, key=lambda item: (
+            str(item.get("start_time", "")), str(item.get("run_id", ""))), reverse=True):
+        try:
+            run_id = row.get("run_id", "")
+            if not run_id or Path(run_id).name != run_id:
+                raise DynamicExperimentEvidenceError("Unsafe/missing smoke run_id")
+            run_dir = records_root / "runs" / run_id
+            manifest = read_json(run_dir / "run_manifest.json")
+            status = read_json(run_dir / "run_status.json")
+            if manifest.get("schema_version") != SCHEMA_VERSION \
+                    or status.get("schema_version") != SCHEMA_VERSION:
+                raise DynamicExperimentEvidenceError("Formal requires a schema-v5 smoke")
+            if manifest.get("run_id") != run_id or status.get("run_id") != run_id:
+                raise DynamicExperimentEvidenceError("Smoke control identity mismatch")
+            if manifest.get("run_kind") != "smoke" \
+                    or manifest.get("status") != "success" \
+                    or status.get("status") != "success":
+                raise DynamicExperimentEvidenceError("Smoke control status mismatch")
+            if manifest.get("branch") != current_lineage["branch"]:
+                raise DynamicExperimentEvidenceError("Smoke branch mismatch")
+            if manifest.get("parent_branch") != current_lineage["parent_branch"] \
+                    or manifest.get("parent_commit") != current_lineage["parent_commit"] \
+                    or manifest.get("merge_base") != current_lineage["merge_base"]:
+                raise DynamicExperimentEvidenceError("Smoke Static parent mismatch")
+            if manifest.get("seed") != 42:
+                raise DynamicExperimentEvidenceError("Smoke seed mismatch")
+            if manifest.get("gating_mode") != "per_sample_dynamic_gating" \
+                    or manifest.get("gating_input") != "global" \
+                    or float(manifest.get("gating_temperature")) != 1.0 \
+                    or manifest.get("gating_normalization") != "scaled_softmax" \
+                    or manifest.get("scale_order") != "2,4,6":
+                raise DynamicExperimentEvidenceError("Smoke gating protocol mismatch")
+            if manifest.get("feature_compatibility_status") != "compatible":
+                raise DynamicExperimentEvidenceError("Smoke feature compatibility failed")
+
+            _validate_smoke_artifacts(records_root, run_dir, manifest, status)
+            source_path = _require_file_evidence(
+                manifest.get("source_config"), "smoke source config"
+            )
+            if sha256_file(source_path) != current_source_sha:
+                raise DynamicExperimentEvidenceError("Smoke source config SHA mismatch")
+            resolved_path = _require_file_evidence(
+                manifest.get("resolved_config"), "smoke resolved config"
+            )
+            resolved_mapping = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
+            for dotted, expected in (
+                    ("SOLVER.MAX_EPOCHS", 1),
+                    ("SOLVER.CHECKPOINT_PERIOD", 1),
+                    ("SOLVER.EVAL_PERIOD", 1)):
+                if _nested(resolved_mapping, dotted) != expected:
+                    raise DynamicExperimentEvidenceError("Smoke is not a strict 1-epoch run")
+            for dotted, expected in (
+                    ("SEED", 42),
+                    ("MODEL.MULTI_GRANULARITY_PART_SCALES", [2, 4, 6]),
+                    ("MODEL.MULTI_GRANULARITY_GATING_TAU", 1.0),
+                    ("MODEL.MULTI_GRANULARITY_GATING_INPUT", "global"),
+                    ("MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION", "scaled_softmax")):
+                if _nested(resolved_mapping, dotted) != expected:
+                    raise DynamicExperimentEvidenceError(
+                        "Smoke resolved gating protocol mismatch: {}".format(dotted)
+                    )
+            smoke_protocol_sha = candidate_protocol_signature(resolved_mapping)
+            if manifest.get("candidate_protocol_signature_sha256") != smoke_protocol_sha \
+                    or smoke_protocol_sha != current_protocol_sha:
+                raise DynamicExperimentEvidenceError("Smoke protocol signature mismatch")
+
+            smoke_commit = manifest.get("commit")
+            validate_smoke_commit_lineage(repo_root, smoke_commit, current_lineage["commit"])
+            smoke_impl = implementation_signature(repo_root, smoke_commit)
+            if manifest.get("implementation_signature_sha256") != smoke_impl \
+                    or smoke_impl != current_implementation_sha:
+                raise DynamicExperimentEvidenceError("Smoke implementation signature mismatch")
+            feature_path = _require_file_evidence(
+                manifest.get("feature_compatibility"), "feature compatibility"
+            )
+            feature = read_json(feature_path)
+            if feature.get("current_commit") != smoke_commit \
+                    or current_feature_evidence.get("current_commit") != current_lineage["commit"]:
+                raise DynamicExperimentEvidenceError(
+                    "Feature compatibility evidence is not commit-bound"
+                )
+            for field in (
+                    "feature_reference_commit", "feature_reference_signature_sha256",
+                    "current_feature_signature_sha256", "feature_compatibility_status"):
+                if feature.get(field) != current_feature_evidence.get(field):
+                    raise DynamicExperimentEvidenceError(
+                        "Smoke shared feature signature mismatch: {}".format(field)
+                    )
+            fusion_path = _require_file_evidence(
+                manifest.get("fusion_gating_signature"), "gating signature"
+            )
+            fusion = read_json(fusion_path)
+            current_gating_sha = current_feature_evidence[
+                "fusion_gating_signature"
+            ]["current_sha256"]
+            if fusion.get("current_sha256") != current_gating_sha \
+                    or manifest.get("gating_signature_sha256") != current_gating_sha:
+                raise DynamicExperimentEvidenceError("Smoke gating signature mismatch")
+            statistics = manifest.get("gating_statistics", {})
+            if int(statistics.get("gating_sample_count", 0)) <= 0:
+                raise DynamicExperimentEvidenceError("Smoke gating sample count is zero")
+            metrics = manifest.get("metrics", {})
+            if int(metrics.get("selected_epoch", 0)) != 1:
+                raise DynamicExperimentEvidenceError("Smoke selected epoch is not 1")
+            checkpoint_manifest_path = _require_file_evidence(
+                manifest.get("checkpoint_manifest"), "checkpoint manifest"
+            )
+            checkpoint_rows, _checkpoint_fields = _read_table(
+                checkpoint_manifest_path, "\t"
+            )
+            if not checkpoint_rows or any(
+                    int(checkpoint.get("epoch", 0)) != 1
+                    for checkpoint in checkpoint_rows):
+                raise DynamicExperimentEvidenceError(
+                    "Smoke checkpoint evidence is not strictly epoch 1"
+                )
+            dataset_path = _require_file_evidence(
+                manifest.get("dataset_manifest"), "dataset manifest"
+            )
+            validate_dynamic_gating_evidence(
+                _require_file_evidence(
+                    manifest.get("dynamic_gating_summary"), "gating summary"
+                ),
+                _require_file_evidence(
+                    manifest.get("gating_samples"), "gating samples"
+                ),
+                manifest["selected_checkpoint"]["sha256"],
+                current_resolved_config, statistics, read_json(dataset_path),
+                selection_resolver=selection_resolver,
+                dataset_validator=dataset_validator,
+            )
+            return {"row": row, "manifest": manifest, "status": status}
+        except (DynamicExperimentEvidenceError, OSError, ValueError, KeyError) as error:
+            errors.append("{}: {}".format(row.get("run_id", NOT_RECORDED), error))
+    raise DynamicExperimentEvidenceError(
+        "No recorded smoke matches the current formal candidate: {}".format(errors)
+    )
 
 
 def validate_seed42_reproducibility(reproducibility, environment,
@@ -1011,7 +1452,9 @@ def seal_dynamic_run_evidence(run_dir, environment, dataset_manifest,
                               model_manifest, checkpoint_rows,
                               selected_checkpoint, metrics,
                               dynamic_summary_path, gating_samples_path,
-                              gating_statistics, runtime_seconds, return_code=0):
+                              gating_statistics, runtime_seconds, return_code=0,
+                              resolved_configuration=None,
+                              selection_resolver=None, dataset_validator=None):
     """Validate and transactionally publish a successful run."""
     run_dir = Path(run_dir)
     manifest = read_json(run_dir / "run_manifest.json")
@@ -1053,8 +1496,17 @@ def seal_dynamic_run_evidence(run_dir, environment, dataset_manifest,
     selected = record_file_artifact(manifest, "selected_checkpoint", selected_path, required=True)
     if selected["sha256"] != selected_checkpoint["sha256"]:
         raise DynamicExperimentEvidenceError("Selected checkpoint SHA256 mismatch")
-    selection_rule = (
-        "sha256(stable_sample_key) ascending; first 256 query+gallery samples"
+    selection_rule = DYNAMIC_GATING_SELECTION_RULE
+    validation_configuration = resolved_configuration
+    if validation_configuration is None:
+        validation_configuration = yaml.safe_load(
+            resolved_output.read_text(encoding="utf-8")
+        )
+    validate_dynamic_gating_evidence(
+        dynamic_summary_path, gating_samples_path, selected["sha256"],
+        validation_configuration, gating_statistics, dataset_manifest,
+        selection_resolver=selection_resolver,
+        dataset_validator=dataset_validator,
     )
     summary = record_file_artifact(
         manifest, "dynamic_gating_summary", dynamic_summary_path,

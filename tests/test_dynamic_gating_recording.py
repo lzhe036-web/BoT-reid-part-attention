@@ -191,18 +191,70 @@ class RegistryTest(unittest.TestCase):
         }
         manifest["status"] = "success"
         manifest["notes"] = "pipe | newline\nkept"
+        status = read_json(run_dir / "run_status.json")
+        status["status"] = "success"
+        registry.atomic_write_json(run_dir / "run_status.json", status)
         return manifest
 
     def test_initialized_failed_incomplete_and_interrupted_enter_all_runs(self):
         run_dir, _ = self.make_run("smoke")
-        for status in ("running", "failed", "incomplete", "interrupted"):
+        for status in (
+                "running", "training_complete", "finalizing", "failed",
+                "incomplete", "interrupted"):
             transition_dynamic_run(run_dir, status, error=status)
             markdown = self.experiments.read_text(encoding="utf-8")
             self.assertIn(status, markdown)
         formal_section = self.experiments.read_text(encoding="utf-8").split(
             "## Formal Results", 1
-        )[1].split("<!-- AUTO-DYNAMIC-GATING-FORMAL:END -->", 1)[0]
+        )[1].split("<!-- AUTO-EXPERIMENT-RESULTS:END -->", 1)[0]
         self.assertNotIn("EXP-SMOKE", formal_section)
+
+    def test_control_file_hashes_refresh_for_every_state(self):
+        run_dir, _ = self.make_run("smoke")
+        states = (
+            "initialized", "running", "training_complete", "finalizing",
+            "failed", "incomplete", "interrupted",
+        )
+        observed = []
+        for state in states:
+            if state != "initialized":
+                transition_dynamic_run(run_dir, state, error=state)
+            with (self.records / "runs.csv").open(
+                    encoding="utf-8", newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(
+                row["run_manifest_sha256"],
+                registry.sha256_file(run_dir / "run_manifest.json"),
+            )
+            self.assertEqual(
+                row["run_status_sha256"],
+                registry.sha256_file(run_dir / "run_status.json"),
+            )
+            observed.append(row["run_manifest_sha256"])
+            with (self.records / "evidence_manifest.tsv").open(
+                    encoding="utf-8", newline="") as handle:
+                evidence = list(csv.DictReader(handle, delimiter="\t"))
+            controls = {
+                item["artifact_type"]: item for item in evidence
+                if item["artifact_type"] in ("run_manifest", "run_status")
+            }
+            self.assertEqual(set(controls), {"run_manifest", "run_status"})
+            self.assertEqual(controls["run_manifest"]["sha256"],
+                             row["run_manifest_sha256"])
+            self.assertEqual(controls["run_status"]["sha256"],
+                             row["run_status_sha256"])
+        self.assertEqual(len(set(observed)), len(observed))
+
+    def test_required_state_history_includes_real_finalizing_phase(self):
+        run_dir, _ = self.make_run("smoke")
+        for state in ("running", "training_complete", "finalizing"):
+            transition_dynamic_run(run_dir, state)
+        manifest = read_json(run_dir / "run_manifest.json")
+        self.assertEqual(
+            [item["status"] for item in manifest["state_history"]],
+            ["initialized", "running", "training_complete", "finalizing"],
+        )
+        self.assertEqual(manifest["ended_at_utc"], "not_recorded")
 
     def test_formal_success_enters_both_sections_smoke_success_only_all_runs(self):
         smoke_dir, _ = self.make_run("smoke")
@@ -215,7 +267,7 @@ class RegistryTest(unittest.TestCase):
         register_dynamic_run_state(formal_dir)
         markdown = self.experiments.read_text(encoding="utf-8")
         formal_section = markdown.split("## Formal Results", 1)[1].split(
-            "<!-- AUTO-DYNAMIC-GATING-FORMAL:END -->", 1
+            "<!-- AUTO-EXPERIMENT-RESULTS:END -->", 1
         )[0]
         self.assertIn("EXP-FORMAL", formal_section)
         self.assertNotIn("EXP-SMOKE", formal_section)
@@ -287,6 +339,9 @@ class RegistryTest(unittest.TestCase):
         manifest = read_json(run_dir / "run_manifest.json")
         manifest["status"] = "failed"
         registry.atomic_write_json(run_dir / "run_manifest.json", manifest)
+        status = read_json(run_dir / "run_status.json")
+        status["status"] = "failed"
+        registry.atomic_write_json(run_dir / "run_status.json", status)
         real_replace = registry.os.replace
         calls = {"count": 0}
 
@@ -452,7 +507,7 @@ class CheckpointEvidenceTest(unittest.TestCase):
 
 
 class FormalReadinessTest(unittest.TestCase):
-    def test_formal_requires_successful_nonzero_compatible_smoke(self):
+    def test_csv_success_without_manifests_cannot_unlock_formal(self):
         with tempfile.TemporaryDirectory() as directory:
             records = Path(directory)
             path = records / "runs.csv"
@@ -469,8 +524,9 @@ class FormalReadinessTest(unittest.TestCase):
                 + "C2-L03-MGDG-T1-S42-SMOKE,smoke,success,compatible,1.0,64\n",
                 encoding="utf-8",
             )
-            row = _require_successful_smoke_before_formal(records)
-            self.assertEqual(row["gating_sample_count"], "64")
+            with self.assertRaisesRegex(
+                    DynamicExperimentEvidenceError, "complete current candidate"):
+                _require_successful_smoke_before_formal(records)
 
 
 if __name__ == "__main__":

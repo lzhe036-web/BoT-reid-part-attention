@@ -37,6 +37,12 @@ from utils.reproducibility import (
     read_explicit_config_seed,
     validate_seed_evidence_chain,
 )
+from utils.experiment_schema import (
+    LEGACY_STATIC_SCHEMA_VERSION,
+    NOT_APPLICABLE,
+    NOT_RECORDED,
+    SCHEMA_VERSION,
+)
 
 
 EXPECTED_BRANCH = "exp/c2-l03-multi-granularity-local-feature"
@@ -49,7 +55,6 @@ FORMAL_CONFIG_RELATIVE_PATH = (
 )
 INDEPENDENT_RUNS = 1
 ANALYSIS_SEED = "not_applicable"
-SCHEMA_VERSION = 1
 EFFICIENCY_SCHEMA_VERSION = 2
 CHECKPOINT_SELECTION_RULE = (
     "highest Rank-1; if tied, highest mAP; every metric comes from the same "
@@ -58,9 +63,7 @@ CHECKPOINT_SELECTION_RULE = (
 SAMPLER_EPOCH_SEED_RULE = (
     "(base_seed + zero_based_epoch_index) modulo 2**32"
 )
-NOT_RECORDED = "not_recorded"
 NOT_ARCHIVED = "not_archived"
-NOT_APPLICABLE = "not_applicable"
 TRAINING_COMPLETE = "training_complete"
 LOCAL_EVIDENCE_PENDING = "local_complete_pending_commit_and_archive"
 DATA_LOADER_WORKER_SEED_SCHEME = (
@@ -164,7 +167,7 @@ FORMAL_RESOLVED_DEFAULTS = {
     "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION": "scaled_softmax",
 }
 
-RUN_FIELDS = (
+LEGACY_STATIC_RUN_FIELDS = (
     "experiment_family", "run_id", "evidence_id", "dataset", "method_variant",
     "aux_lambda", "mode", "selected_epoch", "rank1_percent", "rank5_percent",
     "rank10_percent", "map_percent", "re_ranking", "independent_runs",
@@ -1748,7 +1751,7 @@ def _reconcile_training_exit_code(output, manifest, status, log_path):
         )
 
     audit = {
-        "schema_version": 1,
+        "schema_version": LEGACY_STATIC_SCHEMA_VERSION,
         "source": "log.txt experiment recorder completion",
         "log_path": os.path.relpath(str(log_path), str(output)).replace("\\", "/"),
         "log_sha256": sha256_file(log_path),
@@ -2128,7 +2131,7 @@ def _write_artifact_hashes(output, manifest, checkpoints):
     return artifacts
 
 
-EVIDENCE_FIELDS = (
+LEGACY_STATIC_EVIDENCE_FIELDS = (
     "run_id", "evidence_id", "artifact_type", "path", "file_size", "sha256"
 )
 
@@ -2193,7 +2196,7 @@ def _missing_evidence_text(run_id):
 
 def _registry_candidate_contents(record_dir, run_row, evidence_rows):
     existing_runs = _read_delimited(record_dir / "runs.csv", ",")
-    normalized_run = _normalized_registry_row(run_row, RUN_FIELDS)
+    normalized_run = _normalized_registry_row(run_row, LEGACY_STATIC_RUN_FIELDS)
     matching_runs = [
         row for row in existing_runs if row.get("run_id") == run_row["run_id"]
     ]
@@ -2204,7 +2207,8 @@ def _registry_candidate_contents(record_dir, run_row, evidence_rows):
                 and row.get("run_id") != run_row["run_id"]):
             raise EvidenceIncompleteError("Registry evidence_id conflicts with another run")
     if matching_runs:
-        if _normalized_registry_row(matching_runs[0], RUN_FIELDS) != normalized_run:
+        if _normalized_registry_row(
+                matching_runs[0], LEGACY_STATIC_RUN_FIELDS) != normalized_run:
             raise EvidenceIncompleteError(
                 "Idempotent finalization conflict: runs.csv content changed"
             )
@@ -2217,11 +2221,12 @@ def _registry_candidate_contents(record_dir, run_row, evidence_rows):
         record_dir / "evidence_manifest.tsv", "\t"
     )
     current_evidence = [
-        _normalized_registry_row(row, EVIDENCE_FIELDS)
+        _normalized_registry_row(row, LEGACY_STATIC_EVIDENCE_FIELDS)
         for row in existing_evidence if row.get("run_id") == run_row["run_id"]
     ]
     normalized_evidence = [
-        _normalized_registry_row(row, EVIDENCE_FIELDS) for row in evidence_rows
+        _normalized_registry_row(row, LEGACY_STATIC_EVIDENCE_FIELDS)
+        for row in evidence_rows
     ]
 
     def evidence_key(item):
@@ -2241,10 +2246,12 @@ def _registry_candidate_contents(record_dir, run_row, evidence_rows):
     candidate_evidence.sort(key=evidence_key)
     return {
         "evidence_manifest.tsv": _render_delimited(
-            candidate_evidence, EVIDENCE_FIELDS, "\t"
+            candidate_evidence, LEGACY_STATIC_EVIDENCE_FIELDS, "\t"
         ),
         "missing_evidence.md": _missing_evidence_text(run_row["run_id"]),
-        "runs.csv": _render_delimited(candidate_runs, RUN_FIELDS, ","),
+        "runs.csv": _render_delimited(
+            candidate_runs, LEGACY_STATIC_RUN_FIELDS, ","
+        ),
     }
 
 
@@ -3186,7 +3193,7 @@ def recover_existing_run(output_dir, record_dir, repo_root,
         _replace_profile_resolved_hash(efficiency, new_hash)
 
         repair = {
-            "schema_version": 1,
+            "schema_version": LEGACY_STATIC_SCHEMA_VERSION,
             "mode": "finalization_only",
             "repair_reason": CONFIG_TYPE_REPAIR_REASON,
             "repaired_at_utc": utc_now(),
@@ -3245,23 +3252,26 @@ def recover_existing_run(output_dir, record_dir, repo_root,
     )
 
 
-# Unified schema-v2 Dynamic Gating APIs. They are implemented in a focused
-# module to keep the historical C2-MGP schema-v1 reader stable, but are exposed
+# Unified schema-v5 Dynamic Gating APIs. They are implemented in a focused
+# module while the historical C2-MGP schema-v1 reader remains compatible, and
+# are exposed
 # here so every experiment runner continues to use one recorder namespace.
 from utils.dynamic_experiment_registry import (  # noqa: E402,F401
-    AUTO_CHECKPOINTS_END as DYNAMIC_AUTO_CHECKPOINTS_END,
-    AUTO_CHECKPOINTS_START as DYNAMIC_AUTO_CHECKPOINTS_START,
-    AUTO_FORMAL_END as DYNAMIC_AUTO_FORMAL_END,
-    AUTO_FORMAL_START as DYNAMIC_AUTO_FORMAL_START,
-    AUTO_RUNS_END as DYNAMIC_AUTO_RUNS_END,
-    AUTO_RUNS_START as DYNAMIC_AUTO_RUNS_START,
-    CHECKPOINT_FIELDS as DYNAMIC_CHECKPOINT_FIELDS,
+    AUTO_CHECKPOINTS_END,
+    AUTO_CHECKPOINTS_START,
+    AUTO_RESULTS_END,
+    AUTO_RESULTS_START,
+    AUTO_RUNS_END,
+    AUTO_RUNS_START,
+    CHECKPOINT_FIELDS,
     DynamicExperimentEvidenceError,
-    EVIDENCE_FIELDS as DYNAMIC_EVIDENCE_FIELDS,
-    RUN_FIELDS as DYNAMIC_RUN_FIELDS,
+    EVIDENCE_FIELDS,
+    RUN_FIELDS,
     UNIFIED_SCHEMA_VERSION,
     build_dynamic_checkpoint_manifest,
+    candidate_protocol_signature,
     generate_run_id as generate_unique_run_id,
+    implementation_signature,
     initialize_dynamic_run,
     migrate_unified_schema,
     refresh_experiments_markdown,
@@ -3271,5 +3281,6 @@ from utils.dynamic_experiment_registry import (  # noqa: E402,F401
     transition_dynamic_run,
     validate_dynamic_configuration,
     validate_dynamic_lineage,
+    validate_recorded_smoke_for_formal,
     validate_dynamic_runtime_worktree,
 )
