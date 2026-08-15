@@ -414,3 +414,59 @@ python tools/profile_multi_granularity_part.py \
   --device auto --batch-size 64 \
   --input-height 256 --input-width 128 --dtype float32
 ```
+
+## C2-L03 Dynamic Granularity Gating
+
+Use the single reviewed Dynamic Gating source version for local VS Code,
+GitHub, and AutoDL. The required order is:
+
+```text
+fetch Dynamic branch
+-> checkout Dynamic branch
+-> prepare Git/evidence environment
+-> new 1-epoch smoke with a unique output directory
+-> successful sealed smoke evidence
+-> 120-epoch formal run
+```
+
+On AutoDL:
+
+```bash
+cd /root/autodl-tmp/BoT-reid
+git fetch origin
+git switch exp/c2-l03-multi-granularity-dynamic-gating
+git pull --ff-only origin exp/c2-l03-multi-granularity-dynamic-gating
+bash scripts/prepare_c2_l03_dynamic_gating_autodl.sh
+```
+
+The preparation script does not train or change the Dynamic HEAD. It sets the
+repository-local Git transport options to HTTP/1.1, compression 0, low-speed
+limit 1 and low-speed time 30; restores the canonical GitHub origin URL; and
+independently verifies the real Static branch on GitHub before creating local
+compatibility refs. Remote actual SHA, local Static ref, origin/Static tracking
+ref, and merge-base must all equal
+`9cd7dbcee07b255803c8c21f4d9c5ee67a30930e`, otherwise it stops.
+
+Run a fresh smoke with an explicit unused output directory:
+
+```bash
+SMOKE_OUTPUT_DIR=/root/autodl-tmp/experiments/BoT/c2_l03_multi_granularity_dynamic_gating_tau1_seed42_market1501_smoke_r2 \
+  bash scripts/test_c2_l03_multi_granularity_dynamic_gating_1epoch.sh
+```
+
+The smoke runner refuses a path that is a file or an existing non-empty
+directory. It never deletes, overwrites, resumes, or assigns a random retry
+path. Preserve every earlier attempt. A smoke whose training and validation
+finished but whose final evidence sealing failed remains `incomplete` or
+`failed`; it does not unlock formal training and its runtime-generated registry
+files must not be copied into a later source commit.
+
+Only after a new smoke reaches successfully sealed `status=success` may the
+formal runner be started:
+
+```bash
+bash scripts/train_c2_l03_multi_granularity_dynamic_gating_autodl.sh
+```
+
+When using `nohup`, the diagnostic `nohup: ignoring input` is expected and is
+not a training or evidence error.
