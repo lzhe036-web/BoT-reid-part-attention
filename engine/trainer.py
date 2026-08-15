@@ -19,10 +19,6 @@ from utils.dynamic_gating_evidence import (
     append_gating_epoch_record,
 )
 
-global ITER
-ITER = 0
-
-
 def _unpack_train_batch(batch):
     if len(batch) == 3:
         img, target, camids = batch
@@ -71,6 +67,16 @@ def _engine_epoch_length(engine):
             'Ignite engine.state.epoch_length must be a positive integer'
         )
     return int(epoch_length)
+
+
+def _iteration_in_epoch(engine):
+    epoch_length = _engine_epoch_length(engine)
+    global_iteration = int(engine.state.iteration)
+    if global_iteration <= 0:
+        raise RuntimeError(
+            'Ignite engine.state.iteration must be a positive integer'
+        )
+    return ((global_iteration - 1) % epoch_length) + 1
 
 
 def _attach_epoch_evidence_logging(trainer, logger):
@@ -286,8 +292,8 @@ def do_train(
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
-        global ITER
-        ITER += 1
+        iteration_in_epoch = _iteration_in_epoch(engine)
+        epoch_length = _engine_epoch_length(engine)
 
         if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
             probabilities = engine.state.output.get('gating_probabilities')
@@ -297,12 +303,12 @@ def do_train(
                 )
             engine.state.dynamic_gating_accumulator.update(probabilities)
 
-        if ITER % log_period == 0:
+        if iteration_in_epoch % log_period == 0:
             logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                         "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
                         "loss_cross_camera_positive: {:.3f}, "
                         "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                        .format(engine.state.epoch, ITER, len(train_loader),
+                        .format(engine.state.epoch, iteration_in_epoch, epoch_length,
                                 engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
                                 engine.state.metrics['avg_loss_triplet'],
                                 engine.state.metrics['avg_loss_camera_triplet'],
@@ -312,8 +318,6 @@ def do_train(
                                 scheduler.get_lr()[0]))
             if (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY) and engine.state.output['cross_camera_positive_count'] == 0:
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
-        if len(train_loader) == ITER:
-            ITER = 0
 
     if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
         @trainer.on(Events.EPOCH_COMPLETED)
@@ -436,15 +440,15 @@ def do_train_with_center(
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
-        global ITER
-        ITER += 1
+        iteration_in_epoch = _iteration_in_epoch(engine)
+        epoch_length = _engine_epoch_length(engine)
 
-        if ITER % log_period == 0:
+        if iteration_in_epoch % log_period == 0:
             logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                         "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
                         "loss_cross_camera_positive: {:.3f}, "
                         "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                        .format(engine.state.epoch, ITER, len(train_loader),
+                        .format(engine.state.epoch, iteration_in_epoch, epoch_length,
                                 engine.state.metrics['avg_loss'], engine.state.metrics['avg_loss_id'],
                                 engine.state.metrics['avg_loss_triplet'],
                                 engine.state.metrics['avg_loss_camera_triplet'],
@@ -454,8 +458,6 @@ def do_train_with_center(
                                 scheduler.get_lr()[0]))
             if (cfg.MODEL.CAMERA_AWARE_TRIPLET or cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY) and engine.state.output['cross_camera_positive_count'] == 0:
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
-        if len(train_loader) == ITER:
-            ITER = 0
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)
