@@ -23,6 +23,27 @@
     "scalar_statistics": "all columns named p2/p4/p6, applied_w, entropy, dominant ratio, temperature and sample count",
     "detailed_artifacts": ["dynamic_gating_summary.json", "gating_samples.tsv"]
   },
+  "unified_method_fields": {
+    "common_protocol": ["method", "method_family", "method_variant", "dataset", "baseline", "margin", "mode", "lambda", "cross_camera_positive_lambda"],
+    "alignment_pcc": ["pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode", "alignment_temperature", "valid_pcc_pair_count", "mean_fixed_index_part_distance", "hard_alignment_loss", "valid_alignment_pair_count", "mean_hard_path_cost", "mean_path_absolute_offset", "soft_alignment_loss", "mean_soft_path_cost"],
+    "feature_signatures": ["multigranular_feature_signature", "multigranular_feature_signature_sha256", "feature_reference_signature_sha256", "current_feature_signature_sha256"],
+    "dynamic_gating": ["gating_mode", "gating_input", "gating_temperature", "gating_normalization", "scale_order", "gating_sample_count", "p2/p4/p6 statistics", "applied weight statistics", "entropy", "dominant ratios"]
+  },
+  "historical_aliases": {
+    "commit_id": "commit",
+    "GPU": "gpu",
+    "runtime": "runtime_seconds",
+    "Rank-1": "rank1_percent",
+    "Rank-5": "rank5_percent",
+    "Rank-10": "rank10_percent",
+    "mAP": "map_percent",
+    "checkpoint": "selected_checkpoint_path",
+    "checkpoint_sha256": "selected_checkpoint_sha256",
+    "config_file": "source_config_path",
+    "log_path": "training_log_path",
+    "log_sha256": "training_log_sha256"
+  },
+  "markdown_columns": "Fixed v5 fields are followed by every non-empty authoritative CSV field in deterministic lexical order; unknown historical and future fields are never silently omitted.",
   "candidate_binding": {
     "protocol_signature": "canonical resolved configuration excluding only smoke epochs/periods/output_dir",
     "implementation_signature": "Git tree excluding only recorder-managed evidence products"

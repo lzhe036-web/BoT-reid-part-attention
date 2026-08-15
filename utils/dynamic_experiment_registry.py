@@ -36,6 +36,7 @@ from utils.experiment_schema import (
     AUTO_RESULTS_START,
     AUTO_RUNS_END,
     AUTO_RUNS_START,
+    ALIGNMENT_PCC_FIELDS,
     CHECKPOINT_FIELDS,
     EVIDENCE_FIELDS,
     FORMAL_FIELDS,
@@ -645,6 +646,35 @@ def _render_table(rows, fields, delimiter):
     return output.getvalue()
 
 
+def _valid_authority_field(field):
+    return (
+        isinstance(field, str)
+        and bool(field.strip())
+        and "\r" not in field
+        and "\n" not in field
+    )
+
+
+def _authority_fields(base_fields, declared_fields=(), rows=()):
+    """Return fixed v5 fields followed by every authoritative extra field.
+
+    Extra columns are sorted instead of depending on CSV or dictionary order,
+    so old and future method-specific evidence cannot disappear from Markdown
+    and repeated generation remains byte-for-byte deterministic.
+    """
+    base = tuple(field for field in base_fields if _valid_authority_field(field))
+    base_set = set(base)
+    extras = set()
+    for field in declared_fields:
+        if _valid_authority_field(field) and field not in base_set:
+            extras.add(field)
+    for row in rows:
+        for field in row:
+            if _valid_authority_field(field) and field not in base_set:
+                extras.add(field)
+    return base + tuple(sorted(extras))
+
+
 def _upsert(rows, row, key="run_id"):
     value = str(row[key])
     result = [existing for existing in rows if str(existing.get(key)) != value]
@@ -704,7 +734,17 @@ def _manifest_run_row(manifest, control_evidence=None):
         "evidence_id": manifest.get("evidence_id", manifest["run_id"]),
         "run_id": manifest["run_id"], "run_kind": manifest["run_kind"],
         "status": manifest["status"], "method_family": manifest["method_family"],
-        "method_variant": manifest["method_variant"], "branch": manifest["branch"],
+        "method_variant": manifest["method_variant"],
+        "method": manifest.get("method", manifest["method_variant"]),
+        "dataset": manifest.get("dataset", NOT_RECORDED),
+        "baseline": manifest.get("baseline", NOT_RECORDED),
+        "margin": manifest.get("margin", NOT_RECORDED),
+        "mode": manifest.get("mode", NOT_RECORDED),
+        "lambda": manifest.get("lambda", NOT_APPLICABLE),
+        "cross_camera_positive_lambda": manifest.get(
+            "cross_camera_positive_lambda", NOT_APPLICABLE
+        ),
+        "branch": manifest["branch"],
         "commit": manifest["commit"], "parent_branch": manifest["parent_branch"],
         "parent_commit": manifest["parent_commit"], "merge_base": manifest["merge_base"],
         "candidate_protocol_signature_sha256": manifest.get(
@@ -714,6 +754,13 @@ def _manifest_run_row(manifest, control_evidence=None):
             "implementation_signature_sha256", NOT_RECORDED
         ),
         "feature_reference_commit": manifest["feature_reference_commit"],
+        "multigranular_feature_signature": manifest.get(
+            "multigranular_feature_signature", NOT_RECORDED
+        ),
+        "multigranular_feature_signature_sha256": manifest.get(
+            "multigranular_feature_signature_sha256",
+            manifest["current_feature_signature_sha256"],
+        ),
         "feature_reference_signature_sha256": manifest["feature_reference_signature_sha256"],
         "current_feature_signature_sha256": manifest["current_feature_signature_sha256"],
         "feature_compatibility_status": manifest["feature_compatibility_status"],
@@ -747,6 +794,8 @@ def _manifest_run_row(manifest, control_evidence=None):
         "selected_epoch": metrics.get("selected_epoch", NOT_RECORDED),
         "notes": manifest.get("notes", NOT_RECORDED),
     }
+    for field in ALIGNMENT_PCC_FIELDS:
+        row.setdefault(field, NOT_APPLICABLE)
     for prefix, item in (
             ("source_config", source), ("resolved_config", resolved),
             ("training_log", training), ("console_log", console),
@@ -858,7 +907,8 @@ def _checkpoint_rows(records_root, run_rows):
     return [unique[key] for key in sorted(unique)]
 
 
-def _markdown_content(experiments_path, run_rows, formal_rows, checkpoint_rows):
+def _markdown_content(experiments_path, run_rows, formal_rows, checkpoint_rows,
+                      run_fields=(), formal_fields=()):
     path = Path(experiments_path)
     content = path.read_text(encoding="utf-8") if path.is_file() else "# Experiments\n"
     authoritative_ids = {
@@ -866,9 +916,15 @@ def _markdown_content(experiments_path, run_rows, formal_rows, checkpoint_rows):
         if row.get("run_id") not in (None, "", NOT_RECORDED)
     }
     content = _remove_legacy_dynamic_sections(content, authoritative_ids)
+    rendered_run_fields = _authority_fields(
+        RUN_FIELDS, run_fields, run_rows
+    )
+    rendered_formal_fields = _authority_fields(
+        FORMAL_FIELDS, formal_fields, formal_rows
+    )
     sections = (
-        (AUTO_RUNS_START, AUTO_RUNS_END, "Run Registry / All Recorded Runs", RUN_FIELDS, run_rows),
-        (AUTO_RESULTS_START, AUTO_RESULTS_END, "Formal Results", FORMAL_FIELDS, formal_rows),
+        (AUTO_RUNS_START, AUTO_RUNS_END, "Run Registry / All Recorded Runs", rendered_run_fields, run_rows),
+        (AUTO_RESULTS_START, AUTO_RESULTS_END, "Formal Results", rendered_formal_fields, formal_rows),
         (AUTO_CHECKPOINTS_START, AUTO_CHECKPOINTS_END, "Checkpoint Evidence", CHECKPOINT_FIELDS, checkpoint_rows),
     )
     for start, end, title, fields, rows in sections:
@@ -931,14 +987,14 @@ def register_dynamic_run_state(run_dir):
     run_rows, old_run_fields = _read_table(runs_path, ",")
     formal_rows, old_formal_fields = _read_table(formal_path, ",")
     evidence_rows, old_evidence_fields = _read_table(evidence_path, "\t")
-    persisted_run_fields = tuple(RUN_FIELDS) + tuple(
-        field for field in old_run_fields if field not in RUN_FIELDS
+    persisted_run_fields = _authority_fields(
+        RUN_FIELDS, old_run_fields, run_rows
     )
-    persisted_formal_fields = tuple(RUN_FIELDS) + tuple(
-        field for field in old_formal_fields if field not in RUN_FIELDS
+    persisted_formal_fields = _authority_fields(
+        FORMAL_FIELDS, old_formal_fields, formal_rows
     )
-    persisted_evidence_fields = tuple(EVIDENCE_FIELDS) + tuple(
-        field for field in old_evidence_fields if field not in EVIDENCE_FIELDS
+    persisted_evidence_fields = _authority_fields(
+        EVIDENCE_FIELDS, old_evidence_fields, evidence_rows
     )
     run_rows = [migrate_row(item, RUN_FIELDS) for item in run_rows]
     formal_rows = [migrate_row(item, FORMAL_FIELDS) for item in formal_rows]
@@ -952,7 +1008,10 @@ def register_dynamic_run_state(run_dir):
     evidence_rows.extend(_artifact_rows(manifest, control_evidence))
     evidence_rows = sorted(evidence_rows, key=lambda item: (str(item.get("run_id", "")), str(item.get("artifact_type", "")), str(item.get("path", ""))))
     checkpoints = _checkpoint_rows(records_root, run_rows)
-    markdown = _markdown_content(experiments_path, run_rows, formal_rows, checkpoints)
+    markdown = _markdown_content(
+        experiments_path, run_rows, formal_rows, checkpoints,
+        persisted_run_fields, persisted_formal_fields,
+    )
     _transactional_write({
         runs_path: _render_table(run_rows, persisted_run_fields, ","),
         formal_path: _render_table(formal_rows, persisted_formal_fields, ","),
@@ -966,12 +1025,17 @@ def register_dynamic_run_state(run_dir):
 
 def refresh_experiments_markdown(experiments_path, records_root):
     records_root = Path(records_root)
-    run_rows, _ = _read_table(records_root / "runs.csv", ",")
-    formal_rows, _ = _read_table(records_root / "tables" / "main_results.csv", ",")
+    run_rows, run_fields = _read_table(records_root / "runs.csv", ",")
+    formal_rows, formal_fields = _read_table(
+        records_root / "tables" / "main_results.csv", ","
+    )
     run_rows = [migrate_row(item, RUN_FIELDS) for item in run_rows]
     formal_rows = [migrate_row(item, FORMAL_FIELDS) for item in formal_rows]
     checkpoints = _checkpoint_rows(records_root, run_rows)
-    content = _markdown_content(experiments_path, run_rows, formal_rows, checkpoints)
+    content = _markdown_content(
+        experiments_path, run_rows, formal_rows, checkpoints,
+        run_fields, formal_fields,
+    )
     _atomic_write(experiments_path, content)
     return content
 
@@ -980,7 +1044,7 @@ def migrate_unified_schema(path, fields, delimiter=","):
     rows, old_fields = _read_table(path, delimiter)
     # Unknown historical columns are retained after the current schema rather
     # than discarded. Missing new evidence remains explicitly not_recorded.
-    merged_fields = list(fields) + [field for field in old_fields if field not in fields]
+    merged_fields = _authority_fields(fields, old_fields, rows)
     migrated = [migrate_row(row, fields) for row in rows]
     _atomic_write(path, _render_table(migrated, merged_fields, delimiter))
     return merged_fields, migrated

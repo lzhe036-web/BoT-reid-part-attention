@@ -42,11 +42,20 @@ GATING_STAT_FIELDS = (
     "dominant_k6_ratio",
 )
 
-BASE_RUN_FIELDS = (
+COMMON_PROTOCOL_FIELDS = (
     "schema_version", "experiment_id", "experiment_family", "evidence_id",
     "run_id", "run_kind", "status", "method_family", "method_variant",
+    "method", "dataset", "baseline", "margin", "mode", "lambda",
+    "cross_camera_positive_lambda",
     "branch", "commit", "parent_branch", "parent_commit", "merge_base",
     "candidate_protocol_signature_sha256", "implementation_signature_sha256",
+    "seed", "gpu", "start_time", "end_time", "runtime_seconds",
+    "return_code",
+)
+
+FEATURE_EVIDENCE_FIELDS = (
+    "multigranular_feature_signature",
+    "multigranular_feature_signature_sha256",
     "feature_reference_commit", "feature_reference_signature_sha256",
     "current_feature_signature_sha256", "feature_compatibility_status",
     "feature_compatibility_evidence_path",
@@ -54,7 +63,10 @@ BASE_RUN_FIELDS = (
     "feature_compatibility_evidence_sha256", "gating_signature_sha256",
     "gating_signature_path", "gating_signature_size_bytes",
     "gating_signature_evidence_sha256",
-    "seed", "source_config_origin_path", "source_config_origin_size_bytes",
+)
+
+ARTIFACT_INDEX_FIELDS = (
+    "source_config_origin_path", "source_config_origin_size_bytes",
     "source_config_origin_sha256", "source_config_path", "source_config_size_bytes",
     "source_config_sha256", "resolved_config_path",
     "resolved_config_size_bytes", "resolved_config_sha256",
@@ -71,9 +83,20 @@ BASE_RUN_FIELDS = (
     "reproducibility_path", "reproducibility_size_bytes",
     "reproducibility_sha256", "dataset_manifest_path",
     "dataset_manifest_sha256", "model_manifest_path", "model_manifest_sha256",
-    "environment_path", "environment_sha256", "gpu", "start_time", "end_time",
-    "runtime_seconds", "return_code", "alignment_mode",
-    "alignment_temperature", "gating_mode", "gating_input",
+    "environment_path", "environment_sha256",
+)
+
+ALIGNMENT_PCC_FIELDS = (
+    "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
+    "alignment_strategy", "alignment_mode", "alignment_temperature",
+    "valid_pcc_pair_count", "mean_fixed_index_part_distance",
+    "hard_alignment_loss", "valid_alignment_pair_count",
+    "mean_hard_path_cost", "mean_path_absolute_offset",
+    "soft_alignment_loss", "mean_soft_path_cost",
+)
+
+DYNAMIC_GATING_FIELDS = (
+    "gating_mode", "gating_input",
     "gating_temperature", "gating_normalization", "scale_order",
     "dynamic_gating_summary_path", "dynamic_gating_summary_size_bytes",
     "dynamic_gating_summary_sha256",
@@ -82,11 +105,29 @@ BASE_RUN_FIELDS = (
     "gating_samples_source_checkpoint_sha256", "gating_sample_selection_rule",
 )
 
-RUN_FIELDS = BASE_RUN_FIELDS + tuple(
-    field for field in GATING_STAT_FIELDS if field not in BASE_RUN_FIELDS
-) + (
+RESULT_FIELDS = (
     "rank1_percent", "rank5_percent", "rank10_percent", "map_percent",
     "best_epoch", "selected_epoch", "notes",
+)
+
+
+def _ordered_unique_fields(*groups):
+    result = []
+    for group in groups:
+        for field in group:
+            if field not in result:
+                result.append(field)
+    return tuple(result)
+
+
+RUN_FIELDS = _ordered_unique_fields(
+    COMMON_PROTOCOL_FIELDS,
+    FEATURE_EVIDENCE_FIELDS,
+    ARTIFACT_INDEX_FIELDS,
+    ALIGNMENT_PCC_FIELDS,
+    DYNAMIC_GATING_FIELDS,
+    GATING_STAT_FIELDS,
+    RESULT_FIELDS,
 )
 FORMAL_FIELDS = RUN_FIELDS
 EVIDENCE_FIELDS = (
@@ -120,6 +161,8 @@ def migrate_row(row, fields, assumed_version=LEGACY_STATIC_SCHEMA_VERSION):
     migrated["schema_version"] = str(version)
     aliases = {
         "commit": ("commit_id",),
+        "gpu": ("GPU",),
+        "runtime_seconds": ("runtime",),
         "source_config_path": ("config_file",),
         "training_log_path": ("log_path",),
         "training_log_sha256": ("log_sha256",),
