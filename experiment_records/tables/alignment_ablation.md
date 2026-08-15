@@ -1,0 +1,2 @@
+| schema_version | run_id | experiment_id | run_kind | baseline | method_family | method_variant | alignment_mode | alignment_temperature | gating_mode | parts | cross_camera_positive_lambda | alignment_lambda | valid_alignment_pair_count | hard_alignment_loss | mean_hard_path_cost | mean_path_absolute_offset | best_epoch | rank1 | map | runtime | seed | commit |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|

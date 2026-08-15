@@ -29,9 +29,10 @@ from utils.reproducibility import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 NOT_RECORDED = "not_recorded"
 MISSING_EVIDENCE = "missing_evidence"
+NOT_APPLICABLE = "not_applicable"
 AUTO_RESULTS_START = "<!-- AUTO-EXPERIMENT-RESULTS:START -->"
 AUTO_RESULTS_END = "<!-- AUTO-EXPERIMENT-RESULTS:END -->"
 
@@ -41,14 +42,18 @@ class EvidenceError(RuntimeError):
 
 
 MAIN_FIELDS = (
-    "run_id", "experiment_id", "experiment_family", "method", "dataset",
+    "schema_version", "run_id", "experiment_id", "experiment_family",
+    "run_kind", "method", "method_family", "method_variant", "dataset",
     "branch", "commit", "seed", "lambda", "cross_camera_positive_lambda",
     "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
-    "alignment_strategy", "baseline", "margin", "mode", "best_epoch",
+    "alignment_strategy", "alignment_mode", "alignment_temperature",
+    "gating_mode", "baseline", "margin", "mode", "best_epoch",
     "selected_epoch", "rank1", "rank5", "rank10", "map", "checkpoint",
     "checkpoint_sha256", "runtime_seconds", "gpu", "config", "log_path",
     "log_sha256", "output_dir", "valid_pcc_pair_count",
-    "mean_fixed_index_part_distance", "status", "notes",
+    "mean_fixed_index_part_distance", "hard_alignment_loss",
+    "valid_alignment_pair_count", "mean_hard_path_cost",
+    "mean_path_absolute_offset", "status", "notes",
 )
 LAMBDA_FIELDS = (
     "run_id", "experiment_id", "method", "dataset", "lambda", "seed",
@@ -78,24 +83,41 @@ ANCHOR_FIELDS = (
     "same_camera_positive_count", "commit",
 )
 PCC_FIELDS = (
-    "run_id", "experiment_id", "baseline", "pcc_enabled",
+    "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
+    "method_family", "method_variant", "pcc_enabled",
     "alignment_strategy", "pcc_parts", "cross_camera_positive_lambda",
     "pcc_lambda", "valid_pcc_pair_count",
-    "mean_fixed_index_part_distance", "best_epoch", "rank1", "map",
-    "runtime", "seed", "commit",
+    "mean_fixed_index_part_distance", "hard_alignment_loss",
+    "valid_alignment_pair_count", "mean_hard_path_cost",
+    "mean_path_absolute_offset", "best_epoch", "rank1", "map", "runtime",
+    "seed", "commit",
+)
+ALIGNMENT_FIELDS = (
+    "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
+    "method_family", "method_variant", "alignment_mode",
+    "alignment_temperature", "gating_mode", "parts",
+    "cross_camera_positive_lambda", "alignment_lambda",
+    "valid_alignment_pair_count", "hard_alignment_loss",
+    "mean_hard_path_cost", "mean_path_absolute_offset", "best_epoch",
+    "rank1", "map", "runtime", "seed", "commit",
 )
 RUN_FIELDS = (
-    "run_id", "experiment_id", "experiment_family", "method", "dataset",
+    "schema_version", "run_id", "experiment_id", "experiment_family",
+    "run_kind", "method", "method_family", "method_variant", "dataset",
     "branch", "commit_id", "config_file", "seed", "lambda",
     "cross_camera_positive_lambda", "pcc_lambda", "pcc_enabled",
-    "pcc_parts", "pcc_mode", "alignment_strategy", "baseline", "margin",
+    "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode",
+    "alignment_temperature", "gating_mode", "baseline", "margin",
     "mode", "GPU", "start_time", "end_time", "runtime", "best_epoch",
     "selected_epoch", "Rank-1", "Rank-5", "Rank-10", "mAP", "checkpoint",
     "checkpoint_sha256", "log_path", "log_sha256", "output_dir", "status",
-    "valid_pcc_pair_count", "mean_fixed_index_part_distance", "notes",
+    "valid_pcc_pair_count", "mean_fixed_index_part_distance",
+    "hard_alignment_loss", "valid_alignment_pair_count",
+    "mean_hard_path_cost", "mean_path_absolute_offset", "notes",
 )
 EVIDENCE_FIELDS = (
-    "run_id", "artifact_type", "path", "size_bytes", "sha256",
+    "schema_version", "run_id", "run_kind", "artifact_type", "path",
+    "size_bytes", "sha256",
 )
 
 TABLE_SCHEMAS = {
@@ -106,6 +128,7 @@ TABLE_SCHEMAS = {
     "distance_distribution": DISTANCE_FIELDS,
     "anchor_coverage": ANCHOR_FIELDS,
     "pcc_ablation": PCC_FIELDS,
+    "alignment_ablation": ALIGNMENT_FIELDS,
 }
 
 
@@ -260,15 +283,38 @@ def experiment_identity(configuration):
     pcc_enabled = modules["part_correspondence_consistency"]
     pcc_mode = nested_value(configuration, "MODEL.PCC_MODE")
     if pcc_enabled:
-        method = "C2-L03 + Fixed-Index Part Correspondence Consistency"
-        variant = "fixed_index_pcc"
-        relation = "same_pid_different_camera_same_index"
+        if pcc_mode == "fixed_index":
+            method = "C2-L03 + Fixed-Index Part Correspondence Consistency"
+            variant = "fixed_index_pcc"
+            method_variant = "fixed_index"
+            relation = "same_pid_different_camera_same_index"
+        elif pcc_mode == "hard_shortest_path":
+            method = "C2-L03 + Hard Shortest-Path Part Alignment"
+            variant = "hard_shortest_path"
+            method_variant = "hard_shortest_path"
+            relation = "same_pid_different_camera_monotonic_path"
+        else:
+            raise EvidenceError(
+                "Unsupported enabled PCC_MODE: {!r}".format(pcc_mode)
+            )
+        method_family = "part_alignment"
+        alignment_mode = pcc_mode
+        alignment_temperature = NOT_APPLICABLE
+        gating_mode = NOT_APPLICABLE
+    else:
+        method_family = variant
+        method_variant = variant
+        alignment_mode = NOT_APPLICABLE
+        alignment_temperature = NOT_APPLICABLE
+        gating_mode = NOT_APPLICABLE
     dataset = nested_value(configuration, "DATASETS.NAMES")
     if isinstance(dataset, (list, tuple)):
         dataset = dataset[0] if dataset else NOT_RECORDED
     return {
         "method": method,
         "variant": variant,
+        "method_family": method_family,
+        "method_variant": method_variant,
         "positive_relation": relation,
         "dataset": str(dataset),
         "lambda": loss_lambda,
@@ -286,6 +332,9 @@ def experiment_identity(configuration):
         if pcc_enabled else NOT_RECORDED,
         "pcc_mode": pcc_mode if pcc_enabled else NOT_RECORDED,
         "alignment_strategy": pcc_mode if pcc_enabled else NOT_RECORDED,
+        "alignment_mode": alignment_mode,
+        "alignment_temperature": alignment_temperature,
+        "gating_mode": gating_mode,
     }
 
 
@@ -504,7 +553,7 @@ def generate_run_id(experiment_id, commit, seed, when=None):
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", experiment_id).strip("-")
     return "{}-{}-{}-s{}".format(
         safe_id,
-        when.strftime("%Y%m%dT%H%M%SZ"),
+        when.strftime("%Y%m%dT%H%M%S%fZ"),
         str(commit)[:12],
         seed if seed != NOT_RECORDED else NOT_RECORDED,
     )
@@ -514,7 +563,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
                    config_file, resolved_cfg, output_dir, git_info, notes,
                    command, expected_branch, method=None,
                    baseline_method=NOT_RECORDED,
-                   baseline_commit=NOT_RECORDED):
+                   baseline_commit=NOT_RECORDED, run_kind="formal"):
+    if run_kind not in ("formal", "smoke"):
+        raise EvidenceError("run_kind must be 'formal' or 'smoke'")
     records_root = Path(records_root)
     run_dir = records_root / "runs" / run_id
     if run_dir.exists():
@@ -533,7 +584,10 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "experiment_id": experiment_id,
         "run_id": run_id,
         "experiment_family": experiment_family,
+        "run_kind": run_kind,
         "method": method or identity["method"],
+        "method_family": identity["method_family"],
+        "method_variant": identity["method_variant"],
         "baseline_method": baseline_method,
         "baseline_commit": baseline_commit,
         "dataset": identity["dataset"],
@@ -553,6 +607,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "pcc_lambda": identity["pcc_lambda"],
         "pcc_mode": identity["pcc_mode"],
         "alignment_strategy": identity["alignment_strategy"],
+        "alignment_mode": identity["alignment_mode"],
+        "alignment_temperature": identity["alignment_temperature"],
+        "gating_mode": identity["gating_mode"],
         "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
@@ -616,6 +673,7 @@ def parse_training_log(log_path):
     current = None
     iterations_per_epoch_values = set()
     pcc_epoch_summaries = []
+    hard_alignment_epoch_summaries = []
     epoch_evidence = {}
     required_training_fields = {
         "loss_total": False,
@@ -648,6 +706,22 @@ def parse_training_log(log_path):
                 "epoch": int(pcc_summary.group(1)),
                 "valid_pcc_pair_count": int(pcc_summary.group(2)),
                 "mean_fixed_index_part_distance": float(pcc_summary.group(3)),
+            })
+        hard_summary = re.search(
+            r"Hard Alignment Epoch Summary - Epoch:\s*(\d+)\s+"
+            r"hard_alignment_loss:\s*([0-9.eE+-]+)\s+"
+            r"valid_alignment_pair_count:\s*(\d+)\s+"
+            r"mean_hard_path_cost:\s*([0-9.eE+-]+)\s+"
+            r"mean_path_absolute_offset:\s*([0-9.eE+-]+)",
+            line,
+        )
+        if hard_summary:
+            hard_alignment_epoch_summaries.append({
+                "epoch": int(hard_summary.group(1)),
+                "hard_alignment_loss": float(hard_summary.group(2)),
+                "valid_alignment_pair_count": int(hard_summary.group(3)),
+                "mean_hard_path_cost": float(hard_summary.group(4)),
+                "mean_path_absolute_offset": float(hard_summary.group(5)),
             })
         iteration_match = re.search(
             r"Epoch\[(\d+)\]\s+Iteration\[(\d+)/(\d+)\]", line
@@ -766,6 +840,21 @@ def parse_training_log(log_path):
         ) / float(total_pcc_pairs)
     elif pcc_epoch_summaries:
         mean_pcc_distance = 0.0
+    total_alignment_pairs = sum(
+        row["valid_alignment_pair_count"]
+        for row in hard_alignment_epoch_summaries
+    )
+
+    def pair_weighted_hard_value(field):
+        if total_alignment_pairs:
+            return sum(
+                row["valid_alignment_pair_count"] * row[field]
+                for row in hard_alignment_epoch_summaries
+            ) / float(total_alignment_pairs)
+        if hard_alignment_epoch_summaries:
+            return 0.0
+        return NOT_RECORDED
+
     return {
         "path": normalized_path(path.resolve()),
         "sha256": sha256_file(path),
@@ -777,10 +866,26 @@ def parse_training_log(log_path):
             "loss_cross_camera_positive:" in raw_text
         ),
         "has_pcc_loss": "loss_pcc:" in raw_text,
+        "has_hard_alignment_loss": "hard_alignment_loss:" in raw_text,
         "pcc_epoch_summaries": pcc_epoch_summaries,
-        "valid_pcc_pair_count": total_pcc_pairs
-        if pcc_epoch_summaries else NOT_RECORDED,
+        "hard_alignment_epoch_summaries": hard_alignment_epoch_summaries,
+        "valid_pcc_pair_count": (
+            total_pcc_pairs if pcc_epoch_summaries
+            else total_alignment_pairs if hard_alignment_epoch_summaries
+            else NOT_RECORDED
+        ),
         "mean_fixed_index_part_distance": mean_pcc_distance,
+        "hard_alignment_loss": pair_weighted_hard_value(
+            "hard_alignment_loss"
+        ),
+        "valid_alignment_pair_count": total_alignment_pairs
+        if hard_alignment_epoch_summaries else NOT_RECORDED,
+        "mean_hard_path_cost": pair_weighted_hard_value(
+            "mean_hard_path_cost"
+        ),
+        "mean_path_absolute_offset": pair_weighted_hard_value(
+            "mean_path_absolute_offset"
+        ),
         "epoch_evidence": [
             epoch_evidence[epoch] for epoch in sorted(epoch_evidence)
         ],
@@ -982,6 +1087,7 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
         else:
             continue
         rows.append({
+            "schema_version": SCHEMA_VERSION,
             "epoch": epoch,
             "global_iteration": global_iteration,
             "global_iteration_source": mapping_source,
@@ -1006,8 +1112,9 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
     write_tsv(
         destination,
         (
-            "epoch", "global_iteration", "global_iteration_source",
-            "filename", "size_bytes", "sha256", "selected",
+            "schema_version", "epoch", "global_iteration",
+            "global_iteration_source", "filename", "path", "size_bytes",
+            "sha256", "selected",
         ),
         rows,
     )
@@ -1043,8 +1150,68 @@ def _read_csv(path):
         return list(csv.DictReader(handle))
 
 
+def _legacy_field_value(row, field):
+    """Supply explicit, lossless defaults while migrating v1 registries."""
+    if field == "schema_version":
+        return "1"
+    if field == "run_kind":
+        return "formal"
+    pcc_mode = row.get("pcc_mode") or row.get("alignment_strategy")
+    pcc_enabled = str(row.get("pcc_enabled", "")).lower() == "true"
+    if field == "method_family":
+        return "part_alignment" if pcc_enabled or pcc_mode else NOT_RECORDED
+    if field == "method_variant":
+        return pcc_mode or NOT_RECORDED
+    if field == "alignment_mode":
+        return pcc_mode or NOT_APPLICABLE
+    if field in ("alignment_temperature", "gating_mode"):
+        return NOT_APPLICABLE if pcc_enabled or pcc_mode else NOT_RECORDED
+    if field in (
+            "hard_alignment_loss", "valid_alignment_pair_count",
+            "mean_hard_path_cost", "mean_path_absolute_offset"):
+        return NOT_APPLICABLE if pcc_mode == "fixed_index" else NOT_RECORDED
+    return NOT_RECORDED
+
+
+def migrate_delimited_schema(path, fields, delimiter=","):
+    """Expand an older registry header without dropping rows or fields."""
+    target = Path(path)
+    rows = []
+    existing_fields = ()
+    if target.is_file() and target.stat().st_size:
+        with target.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            existing_fields = tuple(reader.fieldnames or ())
+            rows = list(reader)
+    unknown_fields = [field for field in existing_fields if field not in fields]
+    if unknown_fields:
+        raise EvidenceError(
+            "Schema migration would discard historical fields {} from {}"
+            .format(unknown_fields, target)
+        )
+    if existing_fields == tuple(fields):
+        return rows
+    migrated = []
+    for row in rows:
+        migrated.append({
+            field: row.get(field, _legacy_field_value(row, field))
+            for field in fields
+        })
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name("{}.tmp.{}".format(target.name, os.getpid()))
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=fields, delimiter=delimiter,
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(migrated)
+    os.replace(str(temporary), str(target))
+    return migrated
+
+
 def upsert_csv(path, fields, row, key_fields=("run_id",)):
-    rows = _read_csv(path)
+    rows = migrate_delimited_schema(path, fields, delimiter=",")
     normalized = {field: _table_value(row.get(field, NOT_RECORDED)) for field in fields}
     key = tuple(normalized[field] for field in key_fields)
     replaced = False
@@ -1069,10 +1236,7 @@ def upsert_csv(path, fields, row, key_fields=("run_id",)):
 
 def upsert_tsv(path, fields, row, key_fields=("run_id",)):
     target = Path(path)
-    rows = []
-    if target.is_file() and target.stat().st_size:
-        with target.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle, delimiter="\t"))
+    rows = migrate_delimited_schema(target, fields, delimiter="\t")
     normalized = {field: _table_value(row.get(field, NOT_RECORDED)) for field in fields}
     key = tuple(normalized[field] for field in key_fields)
     replaced = False
@@ -1115,24 +1279,12 @@ def ensure_record_layout(records_root):
     tables.mkdir(parents=True, exist_ok=True)
     for name, fields in TABLE_SCHEMAS.items():
         csv_path = tables / "{}.csv".format(name)
-        if not csv_path.is_file():
-            upsert_csv(csv_path, fields, {field: "" for field in fields}, key_fields=("run_id",))
-            rows = _read_csv(csv_path)
-            rows = [row for row in rows if any(row.values())]
-            temporary = csv_path.with_name("{}.tmp.{}".format(csv_path.name, os.getpid()))
-            with temporary.open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
-                writer.writeheader()
-                writer.writerows(rows)
-            os.replace(str(temporary), str(csv_path))
+        migrate_delimited_schema(csv_path, fields, delimiter=",")
         csv_to_markdown(csv_path, tables / "{}.md".format(name))
     runs_path = root / "runs.csv"
-    if not runs_path.is_file():
-        with runs_path.open("w", encoding="utf-8", newline="") as handle:
-            csv.DictWriter(handle, fieldnames=RUN_FIELDS, lineterminator="\n").writeheader()
+    migrate_delimited_schema(runs_path, RUN_FIELDS, delimiter=",")
     evidence_path = root / "evidence_manifest.tsv"
-    if not evidence_path.is_file():
-        write_tsv(evidence_path, EVIDENCE_FIELDS, [])
+    migrate_delimited_schema(evidence_path, EVIDENCE_FIELDS, delimiter="\t")
     return root
 
 
@@ -1241,7 +1393,7 @@ def _run_analysis_tools(repo_root, run_dir, manifest, selected_checkpoint):
         )
 
 
-def _artifact_rows(run_dir, log_info, selected_checkpoint, final_status):
+def _artifact_rows(run_dir, log_info, checkpoint_rows, final_status):
     run_dir = Path(run_dir)
     rows = []
     final_status_bytes = json_text(final_status).encode("utf-8")
@@ -1267,13 +1419,17 @@ def _artifact_rows(run_dir, log_info, selected_checkpoint, final_status):
             "size_bytes": log_info["size_bytes"],
             "sha256": log_info["sha256"],
         },
-        {
-            "artifact_type": "selected_checkpoint",
-            "path": selected_checkpoint["path"],
-            "size_bytes": selected_checkpoint["size_bytes"],
-            "sha256": selected_checkpoint["sha256"],
-        },
     ])
+    for checkpoint in checkpoint_rows:
+        rows.append({
+            "artifact_type": (
+                "selected_checkpoint" if checkpoint["selected"]
+                else "checkpoint"
+            ),
+            "path": checkpoint["path"],
+            "size_bytes": checkpoint["size_bytes"],
+            "sha256": checkpoint["sha256"],
+        })
     return rows
 
 
@@ -1290,12 +1446,16 @@ def update_experiments_markdown(experiments_path, main_rows):
     target = Path(experiments_path)
     historical = target.read_text(encoding="utf-8") if target.is_file() else "# Experiments\n"
     fields = (
-        "experiment_id", "run_id", "date", "commit", "branch", "method",
+        "experiment_id", "run_id", "run_kind", "date", "commit", "branch",
+        "method", "method_family", "method_variant",
         "dataset", "config", "output_dir", "log_path", "log_sha256", "GPU",
         "seed", "lambda", "cross_camera_positive_lambda", "pcc_lambda",
         "pcc_enabled", "pcc_parts", "pcc_mode", "alignment_strategy",
+        "alignment_mode", "alignment_temperature", "gating_mode",
         "baseline", "valid_pcc_pair_count",
-        "mean_fixed_index_part_distance", "runtime_seconds", "best_epoch", "Rank-1",
+        "mean_fixed_index_part_distance", "hard_alignment_loss",
+        "valid_alignment_pair_count", "mean_hard_path_cost",
+        "mean_path_absolute_offset", "runtime_seconds", "best_epoch", "Rank-1",
         "Rank-5", "Rank-10", "mAP", "checkpoint", "checkpoint_sha256",
         "status", "notes",
     )
@@ -1318,10 +1478,13 @@ def update_experiments_markdown(experiments_path, main_rows):
         values = {
             "experiment_id": row["experiment_id"],
             "run_id": row["run_id"],
+            "run_kind": row["run_kind"],
             "date": run_date,
             "commit": row["commit"],
             "branch": row["branch"],
             "method": row["method"],
+            "method_family": row["method_family"],
+            "method_variant": row["method_variant"],
             "dataset": row["dataset"],
             "config": row["config"],
             "output_dir": row["output_dir"],
@@ -1336,10 +1499,21 @@ def update_experiments_markdown(experiments_path, main_rows):
             "pcc_parts": row["pcc_parts"],
             "pcc_mode": row["pcc_mode"],
             "alignment_strategy": row["alignment_strategy"],
+            "alignment_mode": row["alignment_mode"],
+            "alignment_temperature": row["alignment_temperature"],
+            "gating_mode": row["gating_mode"],
             "baseline": row["baseline"],
             "valid_pcc_pair_count": row["valid_pcc_pair_count"],
             "mean_fixed_index_part_distance": row[
                 "mean_fixed_index_part_distance"
+            ],
+            "hard_alignment_loss": row["hard_alignment_loss"],
+            "valid_alignment_pair_count": row[
+                "valid_alignment_pair_count"
+            ],
+            "mean_hard_path_cost": row["mean_hard_path_cost"],
+            "mean_path_absolute_offset": row[
+                "mean_path_absolute_offset"
             ],
             "runtime_seconds": row["runtime_seconds"],
             "best_epoch": row["best_epoch"],
@@ -1371,11 +1545,16 @@ def update_experiments_markdown(experiments_path, main_rows):
 
 def _prepare_table_rows(manifest, metrics, environment, efficiency,
                         distance, anchor):
+    run_kind = manifest.get("run_kind", "formal")
     common = {
+        "schema_version": SCHEMA_VERSION,
         "run_id": manifest["run_id"],
         "experiment_id": manifest["experiment_id"],
         "experiment_family": manifest["experiment_family"],
+        "run_kind": run_kind,
         "method": manifest["method"],
+        "method_family": manifest.get("method_family", NOT_RECORDED),
+        "method_variant": manifest.get("method_variant", NOT_RECORDED),
         "dataset": manifest["dataset"],
         "branch": manifest["branch"],
         "commit": manifest["commit_id"],
@@ -1391,6 +1570,11 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "alignment_strategy": manifest.get(
             "alignment_strategy", NOT_RECORDED
         ),
+        "alignment_mode": manifest.get("alignment_mode", NOT_RECORDED),
+        "alignment_temperature": manifest.get(
+            "alignment_temperature", NOT_RECORDED
+        ),
+        "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
         "baseline": manifest.get("baseline", NOT_RECORDED),
         "margin": manifest["margin"],
         "mode": manifest["mode"],
@@ -1410,6 +1594,10 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "output_dir": manifest["output_dir"],
         "valid_pcc_pair_count": metrics["valid_pcc_pair_count"],
         "mean_fixed_index_part_distance": metrics["mean_fixed_index_part_distance"],
+        "hard_alignment_loss": metrics["hard_alignment_loss"],
+        "valid_alignment_pair_count": metrics["valid_alignment_pair_count"],
+        "mean_hard_path_cost": metrics["mean_hard_path_cost"],
+        "mean_path_absolute_offset": metrics["mean_path_absolute_offset"],
         "status": "success",
         "notes": manifest["notes"],
     }
@@ -1471,9 +1659,13 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "commit": common["commit"],
     }
     pcc_row = {
+        "schema_version": SCHEMA_VERSION,
         "run_id": common["run_id"],
         "experiment_id": common["experiment_id"],
+        "run_kind": common["run_kind"],
         "baseline": common["baseline"],
+        "method_family": common["method_family"],
+        "method_variant": common["method_variant"],
         "pcc_enabled": common["pcc_enabled"],
         "alignment_strategy": common["alignment_strategy"],
         "pcc_parts": common["pcc_parts"],
@@ -1481,6 +1673,41 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "pcc_lambda": common["pcc_lambda"],
         "valid_pcc_pair_count": common["valid_pcc_pair_count"],
         "mean_fixed_index_part_distance": common["mean_fixed_index_part_distance"],
+        "hard_alignment_loss": common["hard_alignment_loss"],
+        "valid_alignment_pair_count": common["valid_alignment_pair_count"],
+        "mean_hard_path_cost": common["mean_hard_path_cost"],
+        "mean_path_absolute_offset": common["mean_path_absolute_offset"],
+        "best_epoch": common["best_epoch"],
+        "rank1": common["rank1"],
+        "map": common["map"],
+        "runtime": common["runtime_seconds"],
+        "seed": common["seed"],
+        "commit": common["commit"],
+    }
+    alignment_row = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": common["run_id"],
+        "experiment_id": common["experiment_id"],
+        "run_kind": common["run_kind"],
+        "baseline": common["baseline"],
+        "method_family": common["method_family"],
+        "method_variant": common["method_variant"],
+        "alignment_mode": common["alignment_mode"],
+        "alignment_temperature": common["alignment_temperature"],
+        "gating_mode": common["gating_mode"],
+        "parts": common["pcc_parts"],
+        "cross_camera_positive_lambda": common[
+            "cross_camera_positive_lambda"
+        ],
+        "alignment_lambda": common["pcc_lambda"],
+        "valid_alignment_pair_count": common[
+            "valid_alignment_pair_count"
+        ],
+        "hard_alignment_loss": common["hard_alignment_loss"],
+        "mean_hard_path_cost": common["mean_hard_path_cost"],
+        "mean_path_absolute_offset": common[
+            "mean_path_absolute_offset"
+        ],
         "best_epoch": common["best_epoch"],
         "rank1": common["rank1"],
         "map": common["map"],
@@ -1490,7 +1717,7 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
     }
     return (
         common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-        pcc_row,
+        pcc_row, alignment_row,
     )
 
 
@@ -1544,6 +1771,27 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             )
         source_cfg = load_yaml(source_copy)
         resolved_cfg = load_yaml(resolved_copy)
+        identity = experiment_identity(resolved_cfg)
+        manifest.setdefault("run_kind", "formal")
+        if manifest["run_kind"] not in ("formal", "smoke"):
+            raise EvidenceError("Manifest run_kind is invalid")
+        for field in (
+                "method_family", "method_variant", "alignment_mode",
+                "alignment_temperature", "gating_mode"):
+            manifest.setdefault(field, identity[field])
+            if manifest[field] != identity[field]:
+                raise EvidenceError(
+                    "Manifest/config identity conflict for {}".format(field)
+                )
+        for field in (
+                "pcc_enabled", "pcc_parts", "pcc_lambda", "pcc_mode"):
+            expected = identity[field]
+            actual = manifest.get(field, expected)
+            if actual != expected:
+                raise EvidenceError(
+                    "Manifest/config PCC conflict for {}".format(field)
+                )
+            manifest.setdefault(field, expected)
         seed_values = (
             source_cfg.get("SEED", NOT_RECORDED),
             resolved_cfg.get("SEED", NOT_RECORDED),
@@ -1637,8 +1885,58 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if modules.get("part_correspondence_consistency"):
             if not log_info["has_pcc_loss"]:
                 raise EvidenceError("Enabled PCC loss is absent from log")
-            if not log_info["pcc_epoch_summaries"]:
-                raise EvidenceError("Enabled PCC has no epoch pair statistics")
+            alignment_mode = manifest.get("alignment_mode", manifest.get(
+                "pcc_mode", NOT_RECORDED
+            ))
+            if alignment_mode == "fixed_index":
+                if not log_info["pcc_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Enabled fixed-index PCC has no epoch pair statistics"
+                    )
+            elif alignment_mode == "hard_shortest_path":
+                if not log_info["has_hard_alignment_loss"]:
+                    raise EvidenceError(
+                        "Hard alignment loss evidence is absent from log"
+                    )
+                if not log_info["hard_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Hard alignment has no epoch pair statistics"
+                    )
+                required_hard = (
+                    "hard_alignment_loss", "valid_alignment_pair_count",
+                    "mean_hard_path_cost", "mean_path_absolute_offset",
+                )
+                missing_hard = [
+                    field for field in required_hard
+                    if log_info[field] in (
+                        NOT_RECORDED, MISSING_EVIDENCE, None, ""
+                    )
+                ]
+                if missing_hard:
+                    raise EvidenceError(
+                        "Hard alignment evidence lacks {}".format(missing_hard)
+                    )
+                parts = int(manifest.get("pcc_parts", 0))
+                if parts != 6:
+                    raise EvidenceError("Hard alignment evidence requires K=6")
+                expected_loss = float(
+                    log_info["mean_hard_path_cost"]
+                ) / float(2 * parts - 1)
+                if abs(float(log_info["hard_alignment_loss"])
+                       - expected_loss) > 2e-5:
+                    raise EvidenceError(
+                        "Hard alignment loss is inconsistent with raw path cost"
+                    )
+                offset = float(log_info["mean_path_absolute_offset"])
+                if not 0.0 <= offset <= float(parts - 1):
+                    raise EvidenceError(
+                        "Hard alignment path offset is outside valid bounds"
+                    )
+            else:
+                raise EvidenceError(
+                    "Unsupported alignment mode in run manifest: {!r}"
+                    .format(alignment_mode)
+                )
         validation_source = output_dir / "validation_history.jsonl"
         if validation_source.is_file():
             copy_file_atomic(validation_source, run_dir / "validation_history.jsonl")
@@ -1676,6 +1974,33 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         })
         atomic_write_json(run_dir / "model_manifest.json", model_manifest)
         runtime_seconds = float(status["training_runtime_seconds"])
+        alignment_mode = manifest.get("alignment_mode", NOT_APPLICABLE)
+        if alignment_mode == "hard_shortest_path":
+            mean_fixed_index_part_distance = NOT_APPLICABLE
+            hard_alignment_loss = log_info["hard_alignment_loss"]
+            valid_alignment_pair_count = log_info[
+                "valid_alignment_pair_count"
+            ]
+            mean_hard_path_cost = log_info["mean_hard_path_cost"]
+            mean_path_absolute_offset = log_info[
+                "mean_path_absolute_offset"
+            ]
+        elif alignment_mode == "fixed_index":
+            mean_fixed_index_part_distance = log_info[
+                "mean_fixed_index_part_distance"
+            ]
+            hard_alignment_loss = NOT_APPLICABLE
+            valid_alignment_pair_count = log_info["valid_pcc_pair_count"]
+            mean_hard_path_cost = NOT_APPLICABLE
+            mean_path_absolute_offset = NOT_APPLICABLE
+        else:
+            mean_fixed_index_part_distance = log_info[
+                "mean_fixed_index_part_distance"
+            ]
+            hard_alignment_loss = NOT_APPLICABLE
+            valid_alignment_pair_count = NOT_APPLICABLE
+            mean_hard_path_cost = NOT_APPLICABLE
+            mean_path_absolute_offset = NOT_APPLICABLE
         metrics = {
             "schema_version": SCHEMA_VERSION,
             "selection_rule": "highest Rank-1, then highest mAP, then latest epoch",
@@ -1695,9 +2020,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "log_sha256": log_info["sha256"],
             "runtime_seconds": runtime_seconds,
             "valid_pcc_pair_count": log_info["valid_pcc_pair_count"],
-            "mean_fixed_index_part_distance": log_info[
-                "mean_fixed_index_part_distance"
-            ],
+            "mean_fixed_index_part_distance": mean_fixed_index_part_distance,
+            "hard_alignment_loss": hard_alignment_loss,
+            "valid_alignment_pair_count": valid_alignment_pair_count,
+            "mean_hard_path_cost": mean_hard_path_cost,
+            "mean_path_absolute_offset": mean_path_absolute_offset,
             "run_dir": str(run_dir),
         }
         atomic_write_json(run_dir / "metrics_summary.json", metrics)
@@ -1721,7 +2048,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             manifest, metrics, environment, efficiency, distance, anchor
         )
         (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-         pcc_row) = rows
+         pcc_row, alignment_row) = rows
         final_status = dict(status)
         final_status.update({
             "status": "success",
@@ -1731,39 +2058,62 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "selected_epoch": metrics["selected_epoch"],
             "updated_at_utc": utc_now(),
         })
-        artifact_rows = _artifact_rows(run_dir, log_info, selected, final_status)
+        artifact_rows = _artifact_rows(
+            run_dir, log_info, checkpoint_rows, final_status
+        )
         write_tsv(
             run_dir / "artifact_hashes.tsv",
             ("artifact_type", "path", "size_bytes", "sha256"),
             artifact_rows,
         )
         tables_dir = records_root / "tables"
-        main_rows = upsert_csv(tables_dir / "main_results.csv", MAIN_FIELDS, common)
-        if _lambda_table_eligible(manifest):
-            upsert_csv(tables_dir / "lambda_sensitivity.csv", LAMBDA_FIELDS, lambda_row)
-        if experiment_identity(resolved_cfg)["variant"] in (
-                "baseline", "cross_camera_positive", "same_camera_positive"):
+        main_rows = _read_csv(tables_dir / "main_results.csv")
+        if manifest["run_kind"] == "formal":
+            main_rows = upsert_csv(
+                tables_dir / "main_results.csv", MAIN_FIELDS, common
+            )
+            if _lambda_table_eligible(manifest):
+                upsert_csv(
+                    tables_dir / "lambda_sensitivity.csv", LAMBDA_FIELDS,
+                    lambda_row,
+                )
+            if identity["variant"] in (
+                    "baseline", "cross_camera_positive",
+                    "same_camera_positive"):
+                upsert_csv(
+                    tables_dir / "same_camera_positive_ablation.csv",
+                    SAME_CAMERA_FIELDS,
+                    same_row,
+                )
+            upsert_csv(tables_dir / "caat_ablation.csv", CAAT_FIELDS, caat_row)
             upsert_csv(
-                tables_dir / "same_camera_positive_ablation.csv",
-                SAME_CAMERA_FIELDS,
-                same_row,
+                tables_dir / "distance_distribution.csv", DISTANCE_FIELDS,
+                distance_row,
             )
-        upsert_csv(tables_dir / "caat_ablation.csv", CAAT_FIELDS, caat_row)
-        upsert_csv(
-            tables_dir / "distance_distribution.csv", DISTANCE_FIELDS, distance_row
-        )
-        upsert_csv(tables_dir / "anchor_coverage.csv", ANCHOR_FIELDS, anchor_row)
-        if manifest.get("pcc_enabled", False):
-            upsert_csv(tables_dir / "pcc_ablation.csv", PCC_FIELDS, pcc_row)
-        for table_name in TABLE_SCHEMAS:
-            csv_to_markdown(
-                tables_dir / "{}.csv".format(table_name),
-                tables_dir / "{}.md".format(table_name),
+            upsert_csv(
+                tables_dir / "anchor_coverage.csv", ANCHOR_FIELDS, anchor_row
             )
+            if manifest.get("pcc_enabled", False):
+                upsert_csv(
+                    tables_dir / "pcc_ablation.csv", PCC_FIELDS, pcc_row
+                )
+                upsert_csv(
+                    tables_dir / "alignment_ablation.csv", ALIGNMENT_FIELDS,
+                    alignment_row,
+                )
+            for table_name in TABLE_SCHEMAS:
+                csv_to_markdown(
+                    tables_dir / "{}.csv".format(table_name),
+                    tables_dir / "{}.md".format(table_name),
+                )
         run_row = {
+            "schema_version": SCHEMA_VERSION,
             "run_id": manifest["run_id"], "experiment_id": manifest["experiment_id"],
             "experiment_family": manifest["experiment_family"],
+            "run_kind": manifest["run_kind"],
             "method": manifest["method"], "dataset": manifest["dataset"],
+            "method_family": manifest.get("method_family", NOT_RECORDED),
+            "method_variant": manifest.get("method_variant", NOT_RECORDED),
             "branch": manifest["branch"], "commit_id": manifest["commit_id"],
             "config_file": manifest["config_file"], "seed": manifest["seed"],
             "lambda": manifest["lambda"],
@@ -1777,6 +2127,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "alignment_strategy": manifest.get(
                 "alignment_strategy", NOT_RECORDED
             ),
+            "alignment_mode": manifest.get("alignment_mode", NOT_RECORDED),
+            "alignment_temperature": manifest.get(
+                "alignment_temperature", NOT_RECORDED
+            ),
+            "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
             "baseline": manifest.get("baseline", NOT_RECORDED),
             "margin": manifest["margin"],
             "mode": manifest["mode"], "GPU": _gpu_label(environment),
@@ -1793,13 +2148,23 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "mean_fixed_index_part_distance": metrics[
                 "mean_fixed_index_part_distance"
             ],
+            "hard_alignment_loss": metrics["hard_alignment_loss"],
+            "valid_alignment_pair_count": metrics[
+                "valid_alignment_pair_count"
+            ],
+            "mean_hard_path_cost": metrics["mean_hard_path_cost"],
+            "mean_path_absolute_offset": metrics[
+                "mean_path_absolute_offset"
+            ],
             "notes": manifest["notes"],
         }
         upsert_csv(records_root / "runs.csv", RUN_FIELDS, run_row)
         evidence_rows = []
         for row in artifact_rows:
             evidence_rows.append({
+                "schema_version": SCHEMA_VERSION,
                 "run_id": manifest["run_id"],
+                "run_kind": manifest["run_kind"],
                 "artifact_type": row["artifact_type"],
                 "path": row["path"],
                 "size_bytes": row["size_bytes"],
@@ -1812,7 +2177,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 row,
                 key_fields=("run_id", "path"),
             )
-        update_experiments_markdown(experiments_path, main_rows)
+        if manifest["run_kind"] == "formal":
+            update_experiments_markdown(experiments_path, main_rows)
         atomic_write_json(run_dir / "run_status.json", final_status)
         return {"manifest": manifest, "metrics": metrics, "status": final_status}
     except BaseException as error:

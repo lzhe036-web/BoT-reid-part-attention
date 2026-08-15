@@ -39,6 +39,10 @@ def _loss_output_to_dict(loss_output):
         'loss_pcc': loss_output.new_tensor(0.0),
         'valid_pcc_pair_count': 0,
         'mean_fixed_index_part_distance': loss_output.new_tensor(0.0),
+        'hard_alignment_loss': loss_output.new_tensor(0.0),
+        'valid_alignment_pair_count': 0,
+        'mean_hard_path_cost': loss_output.new_tensor(0.0),
+        'mean_path_absolute_offset': loss_output.new_tensor(0.0),
     }
 
 
@@ -148,6 +152,18 @@ def create_supervised_trainer(model, optimizer, loss_fn,
             'valid_pcc_pair_count': loss_dict.get('valid_pcc_pair_count', 0),
             'mean_fixed_index_part_distance': _item(
                 loss_dict.get('mean_fixed_index_part_distance', 0.0)
+            ),
+            'hard_alignment_loss': _item(
+                loss_dict.get('hard_alignment_loss', 0.0)
+            ),
+            'valid_alignment_pair_count': loss_dict.get(
+                'valid_alignment_pair_count', 0
+            ),
+            'mean_hard_path_cost': _item(
+                loss_dict.get('mean_hard_path_cost', 0.0)
+            ),
+            'mean_path_absolute_offset': _item(
+                loss_dict.get('mean_path_absolute_offset', 0.0)
             ),
             'acc': acc.item(),
         }
@@ -301,7 +317,8 @@ def do_train(
     if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
         RunningAverage(output_transform=lambda x: x['loss_pcc']).attach(trainer, 'avg_loss_pcc')
         RunningAverage(output_transform=lambda x: x['valid_pcc_pair_count']).attach(trainer, 'avg_valid_pcc_pair_count')
-        RunningAverage(output_transform=lambda x: x['mean_fixed_index_part_distance']).attach(trainer, 'avg_mean_fixed_index_part_distance')
+        if cfg.MODEL.PCC_MODE == 'fixed_index':
+            RunningAverage(output_transform=lambda x: x['mean_fixed_index_part_distance']).attach(trainer, 'avg_mean_fixed_index_part_distance')
     RunningAverage(output_transform=lambda x: x['acc']).attach(trainer, 'avg_acc')
 
     @trainer.on(Events.STARTED)
@@ -313,7 +330,12 @@ def do_train(
         scheduler.step()
         if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
             engine.state.pcc_epoch_pair_count = 0
-            engine.state.pcc_epoch_distance_sum = 0.0
+            if cfg.MODEL.PCC_MODE == 'fixed_index':
+                engine.state.pcc_epoch_distance_sum = 0.0
+            elif cfg.MODEL.PCC_MODE == 'hard_shortest_path':
+                engine.state.hard_epoch_loss_sum = 0.0
+                engine.state.hard_epoch_cost_sum = 0.0
+                engine.state.hard_epoch_offset_sum = 0.0
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
@@ -322,13 +344,28 @@ def do_train(
         if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
             pair_count = int(engine.state.output['valid_pcc_pair_count'])
             engine.state.pcc_epoch_pair_count += pair_count
-            engine.state.pcc_epoch_distance_sum += (
-                pair_count
-                * float(engine.state.output['mean_fixed_index_part_distance'])
-            )
+            if cfg.MODEL.PCC_MODE == 'fixed_index':
+                engine.state.pcc_epoch_distance_sum += (
+                    pair_count
+                    * float(engine.state.output['mean_fixed_index_part_distance'])
+                )
+            elif cfg.MODEL.PCC_MODE == 'hard_shortest_path':
+                engine.state.hard_epoch_loss_sum += (
+                    pair_count
+                    * float(engine.state.output['hard_alignment_loss'])
+                )
+                engine.state.hard_epoch_cost_sum += (
+                    pair_count
+                    * float(engine.state.output['mean_hard_path_cost'])
+                )
+                engine.state.hard_epoch_offset_sum += (
+                    pair_count
+                    * float(engine.state.output['mean_path_absolute_offset'])
+                )
 
         if iteration_in_epoch % log_period == 0:
-            if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+            if (cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+                    and cfg.MODEL.PCC_MODE == 'fixed_index'):
                 logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                             "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
                             "loss_cross_camera_positive: {:.3f}, loss_pcc: {:.3f}, "
@@ -346,6 +383,42 @@ def do_train(
                                     engine.state.metrics['avg_mean_fixed_index_part_distance'],
                                     engine.state.metrics['avg_acc'],
                                     scheduler.get_lr()[0]))
+            elif (cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+                    and cfg.MODEL.PCC_MODE == 'hard_shortest_path'):
+                logger.info(
+                    "Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
+                    "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
+                    "loss_cross_camera_positive: {:.3f}, loss_pcc: {:.3f}, "
+                    "cross_camera_positive_count: {:.1f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                    .format(
+                        engine.state.epoch, iteration_in_epoch,
+                        _engine_epoch_length(engine),
+                        engine.state.metrics['avg_loss'],
+                        engine.state.metrics['avg_loss_id'],
+                        engine.state.metrics['avg_loss_triplet'],
+                        engine.state.metrics['avg_loss_camera_triplet'],
+                        engine.state.metrics['avg_loss_cross_camera_positive'],
+                        engine.state.metrics['avg_loss_pcc'],
+                        engine.state.metrics['avg_cross_camera_positive_count'],
+                        engine.state.metrics['avg_acc'],
+                        scheduler.get_lr()[0],
+                    )
+                )
+                logger.info(
+                    "Hard Alignment Batch - Epoch: {} Iteration: {} "
+                    "hard_alignment_loss: {:.6f} "
+                    "valid_alignment_pair_count: {} "
+                    "mean_hard_path_cost: {:.6f} "
+                    "mean_path_absolute_offset: {:.6f}"
+                    .format(
+                        engine.state.epoch,
+                        iteration_in_epoch,
+                        float(engine.state.output['hard_alignment_loss']),
+                        int(engine.state.output['valid_alignment_pair_count']),
+                        float(engine.state.output['mean_hard_path_cost']),
+                        float(engine.state.output['mean_path_absolute_offset']),
+                    )
+                )
             else:
                 logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
                             "loss_triplet: {:.3f}, loss_camera_triplet: {:.3f}, "
@@ -367,15 +440,32 @@ def do_train(
         @trainer.on(Events.EPOCH_COMPLETED)
         def log_pcc_epoch_summary(engine):
             pair_count = int(engine.state.pcc_epoch_pair_count)
-            mean_distance = (
-                engine.state.pcc_epoch_distance_sum / float(pair_count)
-                if pair_count else 0.0
-            )
-            logger.info(
-                "PCC Epoch Summary - Epoch: {} valid_pcc_pair_count: {} "
-                "mean_fixed_index_part_distance: {:.6f}"
-                .format(engine.state.epoch, pair_count, mean_distance)
-            )
+            if cfg.MODEL.PCC_MODE == 'fixed_index':
+                mean_distance = (
+                    engine.state.pcc_epoch_distance_sum / float(pair_count)
+                    if pair_count else 0.0
+                )
+                logger.info(
+                    "PCC Epoch Summary - Epoch: {} valid_pcc_pair_count: {} "
+                    "mean_fixed_index_part_distance: {:.6f}"
+                    .format(engine.state.epoch, pair_count, mean_distance)
+                )
+            elif cfg.MODEL.PCC_MODE == 'hard_shortest_path':
+                denominator = float(pair_count) if pair_count else 1.0
+                logger.info(
+                    "Hard Alignment Epoch Summary - Epoch: {} "
+                    "hard_alignment_loss: {:.6f} "
+                    "valid_alignment_pair_count: {} "
+                    "mean_hard_path_cost: {:.6f} "
+                    "mean_path_absolute_offset: {:.6f}"
+                    .format(
+                        engine.state.epoch,
+                        engine.state.hard_epoch_loss_sum / denominator,
+                        pair_count,
+                        engine.state.hard_epoch_cost_sum / denominator,
+                        engine.state.hard_epoch_offset_sum / denominator,
+                    )
+                )
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)

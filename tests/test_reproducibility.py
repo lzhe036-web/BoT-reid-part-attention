@@ -20,6 +20,7 @@ from data.samplers.triplet_sampler import RandomIdentitySampler
 from tools.run_experiment import (
     _build_training_environment,
     _launch_training_subprocess,
+    _validate_run_overrides,
 )
 from utils.reproducibility import (
     RUNNER_SEED_ENV,
@@ -140,6 +141,25 @@ class ReproducibilityProtocolTest(unittest.TestCase):
         self.assertEqual(passed_env["PYTHONHASHSEED"], "42")
         self.assertEqual(passed_env[RUNNER_SEED_ENV], "42")
         self.assertEqual(passed_env["EXISTING"], "kept")
+
+    def test_formal_overrides_fail_and_smoke_overrides_are_isolated(self):
+        with self.assertRaisesRegex(RuntimeError, "Formal runs forbid"):
+            _validate_run_overrides(
+                "formal", ["SOLVER.MAX_EPOCHS", "1"]
+            )
+        _validate_run_overrides(
+            "smoke",
+            [
+                "SOLVER.MAX_EPOCHS", "1",
+                "SOLVER.CHECKPOINT_PERIOD", "1",
+                "SOLVER.EVAL_PERIOD", "1",
+                "OUTPUT_DIR", "/tmp/isolated-smoke",
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "non-isolated"):
+            _validate_run_overrides(
+                "smoke", ["MODEL.PCC_MODE", "fixed_index"]
+            )
 
     def test_cudnn_protocol_is_deterministic_without_benchmark(self):
         _apply()

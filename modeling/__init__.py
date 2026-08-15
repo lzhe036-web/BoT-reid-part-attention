@@ -22,5 +22,6 @@ def build_model(cfg, num_classes):
         part_attention_parts=cfg.MODEL.PART_ATTENTION_PARTS,
         part_correspondence_consistency=cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY,
         pcc_parts=cfg.MODEL.PCC_PARTS,
+        pcc_mode=cfg.MODEL.PCC_MODE,
     )
     return model

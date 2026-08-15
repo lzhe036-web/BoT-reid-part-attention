@@ -14,7 +14,10 @@ from .triplet_loss import (
     count_cross_camera_positives,
 )
 from .center_loss import CenterLoss
-from .part_correspondence_consistency import fixed_index_pcc_loss
+from .part_correspondence_consistency import (
+    SUPPORTED_ALIGNMENT_MODES,
+    part_alignment_loss,
+)
 
 
 def make_loss(cfg, num_classes):    # modified by gu
@@ -33,11 +36,12 @@ def make_loss(cfg, num_classes):    # modified by gu
     cross_camera_positive = None
     pcc_enabled = cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
     if pcc_enabled and cfg.MODEL.PCC_PARTS != 6:
-        raise ValueError("Fixed-Index PCC requires PCC_PARTS=6")
-    if pcc_enabled and cfg.MODEL.PCC_MODE != 'fixed_index':
+        raise ValueError("Part alignment requires PCC_PARTS=6")
+    if pcc_enabled and cfg.MODEL.PCC_MODE not in SUPPORTED_ALIGNMENT_MODES:
         raise ValueError(
-            "Fixed-Index PCC only supports PCC_MODE='fixed_index', got {}"
-            .format(cfg.MODEL.PCC_MODE)
+            "Unsupported PCC_MODE {!r}; expected one of {}".format(
+                cfg.MODEL.PCC_MODE, ", ".join(SUPPORTED_ALIGNMENT_MODES)
+            )
         )
     if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
         if cfg.MODEL.CAMERA_AWARE_TRIPLET:
@@ -91,6 +95,10 @@ def make_loss(cfg, num_classes):    # modified by gu
         loss_pcc = zero
         valid_pcc_pair_count = 0
         mean_fixed_index_part_distance = zero
+        hard_alignment_loss = zero
+        valid_alignment_pair_count = 0
+        mean_hard_path_cost = zero
+        mean_path_absolute_offset = zero
         if pcc_enabled:
             if pcc_local_features is None:
                 raise RuntimeError(
@@ -105,9 +113,22 @@ def make_loss(cfg, num_classes):    # modified by gu
                 )
             if camids is None:
                 raise RuntimeError("PCC is enabled but camera IDs are unavailable")
-            loss_pcc, valid_pcc_pair_count, mean_fixed_index_part_distance = (
-                fixed_index_pcc_loss(pcc_local_features, target, camids)
+            alignment = part_alignment_loss(
+                pcc_local_features, target, camids, cfg.MODEL.PCC_MODE
             )
+            loss_pcc = alignment['loss_pcc']
+            valid_pcc_pair_count = alignment['valid_pcc_pair_count']
+            mean_fixed_index_part_distance = alignment[
+                'mean_fixed_index_part_distance'
+            ]
+            hard_alignment_loss = alignment['hard_alignment_loss']
+            valid_alignment_pair_count = alignment[
+                'valid_alignment_pair_count'
+            ]
+            mean_hard_path_cost = alignment['mean_hard_path_cost']
+            mean_path_absolute_offset = alignment[
+                'mean_path_absolute_offset'
+            ]
             total_loss = total_loss + cfg.MODEL.PCC_LAMBDA * loss_pcc
 
         return {
@@ -120,6 +141,10 @@ def make_loss(cfg, num_classes):    # modified by gu
             'loss_pcc': loss_pcc,
             'valid_pcc_pair_count': valid_pcc_pair_count,
             'mean_fixed_index_part_distance': mean_fixed_index_part_distance,
+            'hard_alignment_loss': hard_alignment_loss,
+            'valid_alignment_pair_count': valid_alignment_pair_count,
+            'mean_hard_path_cost': mean_hard_path_cost,
+            'mean_path_absolute_offset': mean_path_absolute_offset,
         }
 
     if sampler == 'softmax':
@@ -159,7 +184,7 @@ def make_loss(cfg, num_classes):    # modified by gu
 
 def make_loss_with_center(cfg, num_classes):    # modified by gu
     if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
-        raise ValueError("Fixed-Index PCC does not support center-loss training")
+        raise ValueError("Part alignment does not support center-loss training")
     if cfg.MODEL.NAME == 'resnet18' or cfg.MODEL.NAME == 'resnet34':
         feat_dim = 512
     else:

@@ -19,8 +19,10 @@ from tools.analyze_anchor_coverage import summarize_batches
 from tools.analyze_distance_distributions import compute_distance_statistics
 from utils.experiment_recording import (
     AUTO_RESULTS_START,
+    EVIDENCE_FIELDS,
     EvidenceError,
     MAIN_FIELDS,
+    NOT_APPLICABLE,
     NOT_RECORDED,
     atomic_write_json,
     atomic_write_text,
@@ -29,6 +31,7 @@ from utils.experiment_recording import (
     experiment_identity,
     finalize_run,
     git_metadata,
+    migrate_delimited_schema,
     normalized_path,
     sha256_file,
     validate_git_preflight,
@@ -49,7 +52,8 @@ def _read_tsv(path):
         return list(csv.DictReader(handle, delimiter="\t"))
 
 
-def _base_config(output_dir, variant="cross", seed=42):
+def _base_config(output_dir, variant="cross", seed=42,
+                 pcc_mode="fixed_index"):
     model = {
         "NAME": "resnet50",
         "NECK": "bnneck",
@@ -62,7 +66,7 @@ def _base_config(output_dir, variant="cross", seed=42):
         "PART_CORRESPONDENCE_CONSISTENCY": False,
         "PCC_PARTS": 6,
         "PCC_LAMBDA": 0.1,
-        "PCC_MODE": "fixed_index",
+        "PCC_MODE": pcc_mode,
     }
     if variant == "cross":
         model["CROSS_CAMERA_POSITIVE_ONLY"] = True
@@ -95,11 +99,12 @@ def _base_config(output_dir, variant="cross", seed=42):
 
 def _training_log(config_text):
     pcc_enabled = "PART_CORRESPONDENCE_CONSISTENCY: true" in config_text
+    hard_enabled = pcc_enabled and "PCC_MODE: hard_shortest_path" in config_text
     first_pcc = ""
     second_pcc = ""
     first_summary = []
     second_summary = []
-    if pcc_enabled:
+    if pcc_enabled and not hard_enabled:
         first_pcc = ", loss_pcc: 0.2, valid_pcc_pair_count: 12.0, mean_fixed_index_part_distance: 0.2"
         second_pcc = ", loss_pcc: 0.1, valid_pcc_pair_count: 14.0, mean_fixed_index_part_distance: 0.1"
         first_summary = [
@@ -107,6 +112,17 @@ def _training_log(config_text):
         ]
         second_summary = [
             "2026-08-07 11:00:00 reid_baseline.train INFO: PCC Epoch Summary - Epoch: 2 valid_pcc_pair_count: 1400 mean_fixed_index_part_distance: 0.100000"
+        ]
+    elif hard_enabled:
+        first_pcc = ", loss_pcc: 0.2"
+        second_pcc = ", loss_pcc: 0.1"
+        first_summary = [
+            "2026-08-07 10:09:59 reid_baseline.train INFO: Hard Alignment Batch - Epoch: 1 Iteration: 100 hard_alignment_loss: 0.200000 valid_alignment_pair_count: 12 mean_hard_path_cost: 2.200000 mean_path_absolute_offset: 0.400000",
+            "2026-08-07 10:10:00 reid_baseline.train INFO: Hard Alignment Epoch Summary - Epoch: 1 hard_alignment_loss: 0.200000 valid_alignment_pair_count: 1200 mean_hard_path_cost: 2.200000 mean_path_absolute_offset: 0.400000",
+        ]
+        second_summary = [
+            "2026-08-07 10:59:59 reid_baseline.train INFO: Hard Alignment Batch - Epoch: 2 Iteration: 100 hard_alignment_loss: 0.100000 valid_alignment_pair_count: 14 mean_hard_path_cost: 1.100000 mean_path_absolute_offset: 0.200000",
+            "2026-08-07 11:00:00 reid_baseline.train INFO: Hard Alignment Epoch Summary - Epoch: 2 hard_alignment_loss: 0.100000 valid_alignment_pair_count: 1400 mean_hard_path_cost: 1.100000 mean_path_absolute_offset: 0.200000",
         ]
     return "\n".join([
         "2026-08-07 10:00:00 reid_baseline.train INFO: Start training",
@@ -135,14 +151,17 @@ def _training_log(config_text):
 def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
                  experiment_id="C2-L03", seed=42, include_log=True,
                  include_checkpoint=True, applied_seed=None,
-                 training_exit_code=0, include_efficiency=True):
+                 training_exit_code=0, include_efficiency=True,
+                 pcc_mode="fixed_index", run_kind="formal"):
     root = Path(root)
     records = root / "experiment_records"
     run_dir = records / "runs" / run_id
     output = root / ("output-" + run_id)
     run_dir.mkdir(parents=True)
     output.mkdir(parents=True)
-    config = _base_config(output, variant=variant, seed=seed)
+    config = _base_config(
+        output, variant=variant, seed=seed, pcc_mode=pcc_mode
+    )
     config_text = yaml.safe_dump(config, sort_keys=True)
     source = run_dir / "config_source.yml"
     resolved = run_dir / "config_resolved.yml"
@@ -154,7 +173,10 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "experiment_id": experiment_id,
         "run_id": run_id,
         "experiment_family": family,
+        "run_kind": run_kind,
         "method": identity["method"],
+        "method_family": identity["method_family"],
+        "method_variant": identity["method_variant"],
         "dataset": identity["dataset"],
         "branch": "C2L03",
         "commit_id": FULL_COMMIT,
@@ -170,6 +192,9 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
         "pcc_lambda": identity["pcc_lambda"],
         "pcc_mode": identity["pcc_mode"],
         "alignment_strategy": identity["alignment_strategy"],
+        "alignment_mode": identity["alignment_mode"],
+        "alignment_temperature": identity["alignment_temperature"],
+        "gating_mode": identity["gating_mode"],
         "baseline": identity["baseline"],
         "margin": identity["margin"],
         "mode": identity["mode"],
@@ -635,6 +660,173 @@ class ExperimentRecordingTest(unittest.TestCase):
         result = summarize_batches(samples, [0, 1, 2, 3], 4)
         self.assertEqual(result["total_anchor_count"], 4)
         self.assertEqual(result["valid_cross_camera_anchor_count"], 2)
+
+    def test_experiment_identity_is_alignment_mode_aware(self):
+        fixed = experiment_identity(_base_config("fixed", variant="pcc"))
+        hard = experiment_identity(_base_config(
+            "hard", variant="pcc", pcc_mode="hard_shortest_path"
+        ))
+        self.assertEqual(fixed["method_variant"], "fixed_index")
+        self.assertEqual(hard["method_family"], "part_alignment")
+        self.assertEqual(hard["method_variant"], "hard_shortest_path")
+        self.assertEqual(hard["alignment_mode"], "hard_shortest_path")
+        self.assertEqual(hard["alignment_temperature"], NOT_APPLICABLE)
+        self.assertEqual(hard["gating_mode"], NOT_APPLICABLE)
+        self.assertNotEqual(fixed["method"], hard["method"])
+
+    def test_hard_statistics_are_pair_weighted_and_written_to_alignment_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory,
+                variant="pcc",
+                family="c2l03_hard_shortest_path_alignment",
+                experiment_id="C2-HARD-ALIGN-K6-S42",
+                pcc_mode="hard_shortest_path",
+            )
+            result = finalize_fixture(records, run_dir, experiments)
+            expected_loss = (1200 * 0.2 + 1400 * 0.1) / 2600.0
+            expected_cost = (1200 * 2.2 + 1400 * 1.1) / 2600.0
+            expected_offset = (1200 * 0.4 + 1400 * 0.2) / 2600.0
+            self.assertAlmostEqual(
+                float(result["metrics"]["hard_alignment_loss"]),
+                expected_loss,
+            )
+            self.assertAlmostEqual(
+                float(result["metrics"]["mean_hard_path_cost"]),
+                expected_cost,
+            )
+            self.assertAlmostEqual(
+                float(result["metrics"]["mean_path_absolute_offset"]),
+                expected_offset,
+            )
+            row = _read_csv(
+                records / "tables" / "alignment_ablation.csv"
+            )[0]
+            self.assertEqual(row["run_kind"], "formal")
+            self.assertEqual(row["method_variant"], "hard_shortest_path")
+            self.assertEqual(row["valid_alignment_pair_count"], "2600")
+            self.assertEqual(row["alignment_temperature"], NOT_APPLICABLE)
+            self.assertEqual(row["gating_mode"], NOT_APPLICABLE)
+
+    def test_smoke_uses_registry_but_is_excluded_from_formal_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory,
+                variant="pcc",
+                family="c2l03_hard_shortest_path_alignment",
+                experiment_id="C2-HARD-ALIGN-K6-S42-SMOKE",
+                pcc_mode="hard_shortest_path",
+                run_kind="smoke",
+            )
+            historical = experiments.read_text(encoding="utf-8")
+            finalize_fixture(records, run_dir, experiments)
+            self.assertEqual(
+                _read_csv(records / "tables" / "main_results.csv"), []
+            )
+            self.assertEqual(
+                _read_csv(records / "tables" / "pcc_ablation.csv"), []
+            )
+            self.assertEqual(
+                _read_csv(records / "tables" / "alignment_ablation.csv"), []
+            )
+            self.assertEqual(
+                experiments.read_text(encoding="utf-8"), historical
+            )
+            registry = _read_csv(records / "runs.csv")
+            evidence = _read_tsv(records / "evidence_manifest.tsv")
+            self.assertEqual(registry[0]["run_kind"], "smoke")
+            self.assertTrue(evidence)
+            self.assertEqual({row["run_kind"] for row in evidence}, {"smoke"})
+
+    def test_legacy_schema_migration_preserves_rows_and_marks_v1(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "main_results.csv"
+            path.write_text(
+                "run_id,experiment_id,pcc_enabled,pcc_mode,notes\n"
+                "legacy-1,OLD-PCC,True,fixed_index,keep-me\n",
+                encoding="utf-8",
+            )
+            rows = migrate_delimited_schema(path, MAIN_FIELDS)
+            self.assertEqual(len(rows), 1)
+            migrated = _read_csv(path)[0]
+            self.assertEqual(migrated["run_id"], "legacy-1")
+            self.assertEqual(migrated["notes"], "keep-me")
+            self.assertEqual(migrated["schema_version"], "1")
+            self.assertEqual(migrated["run_kind"], "formal")
+            self.assertEqual(migrated["method_family"], "part_alignment")
+            self.assertEqual(migrated["alignment_mode"], "fixed_index")
+
+            tsv_path = Path(directory) / "evidence_manifest.tsv"
+            tsv_path.write_text(
+                "run_id\tartifact_type\tpath\tsize_bytes\tsha256\n"
+                "legacy-1\ttraining_log\tlog.txt\t8\tdeadbeef\n",
+                encoding="utf-8",
+            )
+            migrate_delimited_schema(
+                tsv_path, EVIDENCE_FIELDS, delimiter="\t"
+            )
+            evidence = _read_tsv(tsv_path)[0]
+            self.assertEqual(evidence["schema_version"], "1")
+            self.assertEqual(evidence["run_kind"], "formal")
+            self.assertEqual(evidence["sha256"], "deadbeef")
+
+    def test_legacy_fixed_index_json_manifest_remains_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory, variant="pcc"
+            )
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for field in (
+                    "run_kind", "method_family", "method_variant",
+                    "alignment_mode", "alignment_temperature", "gating_mode"):
+                manifest.pop(field)
+            manifest["schema_version"] = 1
+            atomic_write_json(manifest_path, manifest)
+            result = finalize_fixture(records, run_dir, experiments)
+            self.assertEqual(result["status"]["status"], "success")
+            row = _read_csv(records / "tables" / "main_results.csv")[0]
+            self.assertEqual(row["run_kind"], "formal")
+            self.assertEqual(row["alignment_mode"], "fixed_index")
+
+    def test_missing_required_hard_evidence_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, output, experiments = make_fixture(
+                directory, variant="pcc", pcc_mode="hard_shortest_path"
+            )
+            log_path = output / "log.txt"
+            lines = [
+                line for line in log_path.read_text(encoding="utf-8").splitlines()
+                if "Hard Alignment" not in line
+            ]
+            atomic_write_text(log_path, "\n".join(lines) + "\n")
+            with self.assertRaisesRegex(
+                    EvidenceError, "Hard alignment loss evidence"):
+                finalize_fixture(records, run_dir, experiments)
+            self.assertEqual(
+                _read_csv(records / "tables" / "main_results.csv"), []
+            )
+
+    def test_evidence_manifest_contains_every_checkpoint_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, output, experiments = make_fixture(directory)
+            first = output / "resnet50_checkpoint_100.pt"
+            first.write_bytes(b"first checkpoint")
+            finalize_fixture(records, run_dir, experiments)
+            evidence = _read_tsv(records / "evidence_manifest.tsv")
+            checkpoint_rows = [
+                row for row in evidence
+                if row["artifact_type"] in ("checkpoint", "selected_checkpoint")
+            ]
+            self.assertEqual(len(checkpoint_rows), 2)
+            by_name = {Path(row["path"]).name: row for row in checkpoint_rows}
+            self.assertEqual(
+                by_name[first.name]["sha256"], sha256_file(first)
+            )
+            selected = output / "resnet50_checkpoint_200.pt"
+            self.assertEqual(
+                by_name[selected.name]["sha256"], sha256_file(selected)
+            )
 
 
 if __name__ == "__main__":

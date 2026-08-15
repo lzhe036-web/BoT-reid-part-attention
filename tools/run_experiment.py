@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
-"""Single formal entry point: preflight, train, analyze, finalize, archive."""
+"""Unified formal/smoke entry point: verify, train, finalize, archive."""
 
 from __future__ import absolute_import
 
@@ -21,6 +21,7 @@ from config import cfg
 from data.datasets import init_dataset
 from utils.experiment_recording import (
     NOT_RECORDED,
+    SCHEMA_VERSION,
     atomic_write_json,
     build_dataset_manifest,
     collect_environment,
@@ -40,10 +41,13 @@ from utils.reproducibility import (
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Run one formal Re-ID experiment")
+    parser = argparse.ArgumentParser(description="Run one recorded Re-ID experiment")
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--experiment-family", required=True)
+    parser.add_argument(
+        "--run-kind", choices=("formal", "smoke"), default="formal"
+    )
     parser.add_argument("--expected-branch", required=True)
     parser.add_argument("--expected-commit")
     parser.add_argument("--run-id")
@@ -70,6 +74,28 @@ def _load_config(config_path, opts=None):
     local_cfg.merge_from_list(opts or [])
     local_cfg.freeze()
     return local_cfg
+
+
+def _validate_run_overrides(run_kind, opts):
+    overrides = list(opts or [])
+    if run_kind == "formal" and overrides:
+        raise RuntimeError("Formal runs forbid command-line config overrides")
+    if len(overrides) % 2:
+        raise RuntimeError("Config overrides must contain key/value pairs")
+    allowed_smoke = {
+        "SOLVER.MAX_EPOCHS",
+        "SOLVER.CHECKPOINT_PERIOD",
+        "SOLVER.EVAL_PERIOD",
+        "OUTPUT_DIR",
+    }
+    keys = set(overrides[::2])
+    unexpected = sorted(keys - allowed_smoke)
+    if run_kind == "smoke" and unexpected:
+        raise RuntimeError(
+            "Smoke overrides contain non-isolated fields: {}".format(
+                unexpected
+            )
+        )
 
 
 def _load_explicit_source_seed(config_path):
@@ -115,7 +141,7 @@ def _require_new_output_dir(path):
             raise RuntimeError("OUTPUT_DIR exists and is not a directory: {}".format(output))
         if next(output.iterdir(), None) is not None:
             raise RuntimeError(
-                "Formal OUTPUT_DIR is not empty; refusing to overwrite evidence: {}"
+                "OUTPUT_DIR is not empty; refusing to overwrite evidence: {}"
                 .format(output)
             )
     return output
@@ -126,10 +152,12 @@ def _model_manifest(configuration, method=None,
                     baseline_commit=NOT_RECORDED):
     identity = experiment_identity(configuration)
     return {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "backbone": configuration.get("MODEL", {}).get("NAME", NOT_RECORDED),
         "neck": configuration.get("MODEL", {}).get("NECK", NOT_RECORDED),
         "method": method or identity["method"],
+        "method_family": identity["method_family"],
+        "method_variant": identity["method_variant"],
         "baseline": identity["baseline"],
         "baseline_method": baseline_method,
         "baseline_commit": baseline_commit,
@@ -139,6 +167,9 @@ def _model_manifest(configuration, method=None,
             "parts": identity["pcc_parts"],
             "mode": identity["pcc_mode"],
             "alignment_strategy": identity["alignment_strategy"],
+            "alignment_mode": identity["alignment_mode"],
+            "alignment_temperature": identity["alignment_temperature"],
+            "gating_mode": identity["gating_mode"],
             "lambda": identity["pcc_lambda"],
         },
         "cross_camera_positive_lambda": identity[
@@ -153,6 +184,7 @@ def _model_manifest(configuration, method=None,
 
 def run(args):
     config_path = Path(args.config).resolve()
+    _validate_run_overrides(args.run_kind, args.opts)
     git_info = validate_git_preflight(
         REPO_ROOT, args.expected_branch, expected_commit=args.expected_commit
     )
@@ -181,6 +213,7 @@ def run(args):
         method=args.method,
         baseline_method=args.baseline_method,
         baseline_commit=args.baseline_commit,
+        run_kind=args.run_kind,
     )
     try:
         environment = collect_environment(
@@ -249,7 +282,7 @@ def main(argv=None):
     try:
         return run(args)
     except BaseException as error:
-        print("Formal experiment failed closed: {}".format(error), file=sys.stderr)
+        print("Experiment failed closed: {}".format(error), file=sys.stderr)
         return 1
 
 

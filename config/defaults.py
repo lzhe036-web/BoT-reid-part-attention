@@ -60,8 +60,8 @@ _C.MODEL.CAMERA_AWARE_TRIPLET_MODE = "hard"
 _C.MODEL.CROSS_CAMERA_POSITIVE_ONLY = False
 _C.MODEL.CROSS_CAMERA_POSITIVE_LAMBDA = 0.5
 _C.MODEL.CROSS_CAMERA_POSITIVE_MODE = "mean"
-# Enable fixed-index cross-camera part correspondence consistency. Disabled by
-# default so all existing experiment configurations retain their old behavior.
+# Enable cross-camera local-part alignment. Disabled by default so all existing
+# experiment configurations retain their old behavior.
 _C.MODEL.PART_CORRESPONDENCE_CONSISTENCY = False
 _C.MODEL.PCC_PARTS = 6
 _C.MODEL.PCC_LAMBDA = 0.1

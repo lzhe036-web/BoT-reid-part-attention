@@ -9,11 +9,20 @@ This directory is maintained by `tools/run_experiment.py` and
 - `tables/*.csv` files are the machine-readable sources of truth.
 - `tables/*.md` files are generated from the corresponding CSV files.
 - `tables/pcc_ablation.csv` records explicit cross-camera-positive and PCC
-  weights separately for fixed-index PCC runs.
+  weights separately while retaining fixed-index-compatible fields.
+- `tables/alignment_ablation.csv` compares formal fixed-index and hard-alignment
+  runs. Its Markdown view is always generated from the CSV source.
+
+Registry schema version 2 adds `run_kind`, method/alignment identity fields,
+and hard-alignment evidence. Existing version-1 CSV/TSV rows are migrated
+losslessly: historical fields and rows are retained, legacy runs default to
+`run_kind=formal`, and unavailable evidence remains explicitly marked.
 
 Failed or incomplete runs remain under `runs/`, but they are not written to
-successful result tables. Historical rows outside the generated section of
-`EXPERIMENTS.md` are never rewritten.
+successful result tables. Successful smoke runs are indexed in `runs.csv` and
+`evidence_manifest.tsv`, while all formal result tables and the generated
+section of `EXPERIMENTS.md` exclude them. Historical rows outside that section
+are never rewritten.
 
 Formal training applies the shared protocol in `utils/reproducibility.py` before
 constructing DataLoaders, models, or optimizers, then writes the actual receipt
