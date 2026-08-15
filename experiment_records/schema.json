@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "compatible_read_versions": [1, 2],
+  "sentinels": {
+    "not_applicable": "The field does not apply to this method or run state.",
+    "not_recorded": "The evidence has not yet been produced.",
+    "missing_evidence": "The evidence was required for this state but is absent."
+  },
+  "authoritative_tables": {
+    "all_runs": "experiment_records/runs.csv",
+    "formal_results": "experiment_records/tables/main_results.csv",
+    "evidence": "experiment_records/evidence_manifest.tsv"
+  },
+  "dynamic_gating": {
+    "method_family": "multi_granularity_feature",
+    "method_variant": "per_sample_dynamic_gating",
+    "scalar_statistics": "all columns named p2/p4/p6, applied_w, entropy, dominant ratio, temperature and sample count",
+    "detailed_artifacts": ["dynamic_gating_summary.json", "gating_samples.tsv"]
+  },
+  "migration": "v1 columns and rows are retained; new unrecoverable fields become not_recorded; unknown historical columns are preserved."
+}

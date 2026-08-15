@@ -4,6 +4,8 @@
 @contact: sherlockliao01@gmail.com
 """
 
+import math
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -199,6 +201,56 @@ class MultiGranularityPartHead(nn.Module):
         return tuple(scale_features)
 
 
+class MultiGranularityDynamicGate(nn.Module):
+    """Per-sample scaled-softmax controller for existing scale descriptors."""
+
+    def __init__(self, in_planes, num_scales, temperature=1.0,
+                 gating_input='global', normalization='scaled_softmax'):
+        super(MultiGranularityDynamicGate, self).__init__()
+        if gating_input != 'global':
+            raise ValueError(
+                "MULTI_GRANULARITY_GATING_INPUT must be 'global', got {!r}"
+                .format(gating_input)
+            )
+        if normalization != 'scaled_softmax':
+            raise ValueError(
+                "MULTI_GRANULARITY_GATING_NORMALIZATION must be "
+                "'scaled_softmax', got {!r}".format(normalization)
+            )
+        if (isinstance(temperature, bool)
+                or not isinstance(temperature, (int, float))
+                or not math.isfinite(float(temperature))
+                or float(temperature) <= 0.0):
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_TAU must be finite and greater than '
+                'zero, got {!r}'.format(temperature)
+            )
+        if (not isinstance(num_scales, int) or isinstance(num_scales, bool)
+                or num_scales <= 0):
+            raise ValueError('num_scales must be a positive integer')
+
+        self.in_planes = int(in_planes)
+        self.num_scales = int(num_scales)
+        self.temperature = float(temperature)
+        self.gating_input = gating_input
+        self.normalization = normalization
+        self.controller = nn.Linear(self.in_planes, self.num_scales)
+        nn.init.constant_(self.controller.weight, 0.0)
+        nn.init.constant_(self.controller.bias, 0.0)
+
+    def forward(self, global_feat):
+        if global_feat.dim() != 2 or global_feat.size(1) != self.in_planes:
+            raise ValueError(
+                'Dynamic gate expects [B,{}], got {}'.format(
+                    self.in_planes, tuple(global_feat.shape)
+                )
+            )
+        logits = self.controller(global_feat)
+        probabilities = F.softmax(logits / self.temperature, dim=1)
+        weights = float(self.num_scales) * probabilities
+        return logits, probabilities, weights
+
+
 class Baseline(nn.Module):
     in_planes = 2048
 
@@ -206,9 +258,13 @@ class Baseline(nn.Module):
                  part_attention=False, part_attention_parts=6,
                  multi_granularity_part=False,
                  multi_granularity_part_scales=(2, 4, 6),
-                 multi_granularity_part_dim=256,
-                 multi_granularity_part_aggregation='mean',
-                 multi_granularity_part_fusion='concat'):
+                  multi_granularity_part_dim=256,
+                  multi_granularity_part_aggregation='mean',
+                  multi_granularity_part_fusion='concat',
+                  multi_granularity_dynamic_gating=False,
+                  multi_granularity_gating_input='global',
+                  multi_granularity_gating_tau=1.0,
+                  multi_granularity_gating_normalization='scaled_softmax'):
         super(Baseline, self).__init__()
         if part_attention and multi_granularity_part:
             raise ValueError(
@@ -314,6 +370,19 @@ class Baseline(nn.Module):
         self.neck_feat = neck_feat
         self.part_attention = part_attention
         self.multi_granularity_part = multi_granularity_part
+        if type(multi_granularity_dynamic_gating) is not bool:
+            raise ValueError(
+                'MULTI_GRANULARITY_DYNAMIC_GATING must be a boolean, got {!r}'
+                .format(multi_granularity_dynamic_gating)
+            )
+        self.multi_granularity_dynamic_gating = multi_granularity_dynamic_gating
+        self._last_dynamic_gating = None
+
+        if self.multi_granularity_dynamic_gating and not self.multi_granularity_part:
+            raise ValueError(
+                'MODEL.MULTI_GRANULARITY_DYNAMIC_GATING=True requires '
+                'MODEL.MULTI_GRANULARITY_PART=True'
+            )
 
         if self.part_attention:
             self.part_attention_head = PartAttentionHead(self.in_planes, part_attention_parts)
@@ -338,6 +407,16 @@ class Baseline(nn.Module):
                 len(self.multi_granularity_part_head.scales)
                 * self.multi_granularity_part_head.projection_dim
             )
+            if self.multi_granularity_dynamic_gating:
+                self.multi_granularity_dynamic_gate = MultiGranularityDynamicGate(
+                    in_planes=self.in_planes,
+                    num_scales=len(self.multi_granularity_part_head.scales),
+                    temperature=multi_granularity_gating_tau,
+                    gating_input=str(multi_granularity_gating_input).lower(),
+                    normalization=str(
+                        multi_granularity_gating_normalization
+                    ).lower(),
+                )
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.feature_dim, self.num_classes)
@@ -361,6 +440,21 @@ class Baseline(nn.Module):
             global_feat = global_feat + part_feat
         if self.multi_granularity_part:
             scale_features = self.multi_granularity_part_head(feature_map)
+            if self.multi_granularity_dynamic_gating:
+                gate_logits, probabilities, weights = (
+                    self.multi_granularity_dynamic_gate(global_feat)
+                )
+                scale_features = tuple(
+                    scale_feature * weights[:, index:index + 1]
+                    for index, scale_feature in enumerate(scale_features)
+                )
+                self._last_dynamic_gating = {
+                    'logits': gate_logits.detach(),
+                    'probabilities': probabilities.detach(),
+                    'weights': weights.detach(),
+                }
+            else:
+                self._last_dynamic_gating = None
             fused_pre_bn = torch.cat((global_feat,) + scale_features, dim=1)
         else:
             fused_pre_bn = global_feat
@@ -380,6 +474,12 @@ class Baseline(nn.Module):
             else:
                 # print("Test with feature before BN")
                 return fused_pre_bn
+
+    def dynamic_gating_values(self, global_feat):
+        """Expose differentiable controller values for validation/evidence."""
+        if not self.multi_granularity_dynamic_gating:
+            raise RuntimeError('Dynamic multi-granularity gating is disabled')
+        return self.multi_granularity_dynamic_gate(global_feat)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

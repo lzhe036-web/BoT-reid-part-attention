@@ -14,6 +14,10 @@ from ignite.metrics import RunningAverage
 
 from utils.reid_metric import R1_mAP
 from utils.experiment_recording import append_validation_record, utc_now
+from utils.dynamic_gating_evidence import (
+    GatingEpochAccumulator,
+    append_gating_epoch_record,
+)
 
 global ITER
 ITER = 0
@@ -49,6 +53,38 @@ def _item(value):
     return value
 
 
+def _model_gating_evidence(model):
+    module = model.module if isinstance(model, nn.DataParallel) else model
+    evidence = getattr(module, '_last_dynamic_gating', None)
+    if not evidence:
+        return None
+    return {
+        key: value.detach().to('cpu') if torch.is_tensor(value) else value
+        for key, value in evidence.items()
+    }
+
+
+def _engine_epoch_length(engine):
+    epoch_length = engine.state.epoch_length
+    if epoch_length is None or int(epoch_length) <= 0:
+        raise RuntimeError(
+            'Ignite engine.state.epoch_length must be a positive integer'
+        )
+    return int(epoch_length)
+
+
+def _attach_epoch_evidence_logging(trainer, logger):
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def log_epoch_evidence(engine):
+        logger.info(
+            'EPOCH_EVIDENCE epoch={} global_iteration={} epoch_length={}'
+            .format(
+                int(engine.state.epoch), int(engine.state.iteration),
+                _engine_epoch_length(engine),
+            )
+        )
+
+
 def create_supervised_trainer(model, optimizer, loss_fn,
                               device=None):
     """
@@ -81,6 +117,7 @@ def create_supervised_trainer(model, optimizer, loss_fn,
         loss, loss_dict = _loss_output_to_dict(loss_output)
         loss.backward()
         optimizer.step()
+        gating_evidence = _model_gating_evidence(model)
         # compute acc
         acc = (score.max(1)[1] == target).float().mean()
         return {
@@ -90,6 +127,10 @@ def create_supervised_trainer(model, optimizer, loss_fn,
             'loss_camera_triplet': _item(loss_dict['loss_camera_triplet']),
             'loss_cross_camera_positive': _item(loss_dict.get('loss_cross_camera_positive', loss_dict['loss_total'].new_tensor(0.0) if torch.is_tensor(loss_dict['loss_total']) else 0.0)),
             'cross_camera_positive_count': loss_dict['cross_camera_positive_count'],
+            'gating_probabilities': (
+                gating_evidence['probabilities']
+                if gating_evidence is not None else None
+            ),
             'acc': acc.item(),
         }
 
@@ -216,6 +257,7 @@ def do_train(
         checkpointer,
         {'model': model, 'optimizer': optimizer}
     )
+    _attach_epoch_evidence_logging(trainer, logger)
     timer = Timer(average=True)
 
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,
@@ -237,11 +279,23 @@ def do_train(
     @trainer.on(Events.EPOCH_STARTED)
     def adjust_learning_rate(engine):
         scheduler.step()
+        if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
+            engine.state.dynamic_gating_accumulator = GatingEpochAccumulator(
+                cfg.MODEL.MULTI_GRANULARITY_GATING_TAU
+            )
 
     @trainer.on(Events.ITERATION_COMPLETED)
     def log_training_loss(engine):
         global ITER
         ITER += 1
+
+        if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
+            probabilities = engine.state.output.get('gating_probabilities')
+            if probabilities is None:
+                raise RuntimeError(
+                    'Dynamic gating is enabled but the model emitted no gate evidence'
+                )
+            engine.state.dynamic_gating_accumulator.update(probabilities)
 
         if ITER % log_period == 0:
             logger.info("Epoch[{}] Iteration[{}/{}] loss_total: {:.3f}, loss_id: {:.3f}, "
@@ -260,6 +314,28 @@ def do_train(
                 logger.info("No cross-camera positive anchors in current batch; cross-camera auxiliary loss is skipped.")
         if len(train_loader) == ITER:
             ITER = 0
+
+    if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
+        @trainer.on(Events.EPOCH_COMPLETED)
+        def log_dynamic_gating_epoch_summary(engine):
+            statistics = engine.state.dynamic_gating_accumulator.summary()
+            append_gating_epoch_record(
+                output_dir,
+                engine.state.epoch,
+                engine.state.iteration,
+                _engine_epoch_length(engine),
+                statistics,
+            )
+            logger.info(
+                'DYNAMIC_GATING_EPOCH {}'.format(
+                    ' '.join(
+                        '{}={:.12g}'.format(key, value)
+                        if isinstance(value, float)
+                        else '{}={}'.format(key, value)
+                        for key, value in statistics.items()
+                    )
+                )
+            )
 
     # adding handlers using `trainer.on` decorator API
     @trainer.on(Events.EPOCH_COMPLETED)
@@ -335,6 +411,7 @@ def do_train_with_center(
             'optimizer_center': optimizer_center
         }
     )
+    _attach_epoch_evidence_logging(trainer, logger)
     timer = Timer(average=True)
 
     timer.attach(trainer, start=Events.EPOCH_STARTED, resume=Events.ITERATION_STARTED,

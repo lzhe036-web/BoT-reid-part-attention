@@ -58,6 +58,13 @@ _C.MODEL.MULTI_GRANULARITY_PART_SCALES = [2, 4, 6]
 _C.MODEL.MULTI_GRANULARITY_PART_DIM = 256
 _C.MODEL.MULTI_GRANULARITY_PART_AGGREGATION = "mean"
 _C.MODEL.MULTI_GRANULARITY_PART_FUSION = "concat"
+# Optional per-sample controller for the existing K=[2,4,6] descriptors.  The
+# controller is deliberately disabled by default so historical static concat
+# configurations retain their exact parameter schema and forward behaviour.
+_C.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING = False
+_C.MODEL.MULTI_GRANULARITY_GATING_INPUT = "global"
+_C.MODEL.MULTI_GRANULARITY_GATING_TAU = 1.0
+_C.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION = "scaled_softmax"
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5

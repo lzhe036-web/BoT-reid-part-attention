@@ -155,6 +155,13 @@ FORMAL_RESOLVED_DEFAULTS = {
     # YACS literal-decodes numeric-looking strings, so DEVICE_ID remains in the
     # defaults and is locked when present in the resolved configuration.
     "MODEL.DEVICE_ID": "0",
+    # Added after the immutable Static baseline.  These optional resolved
+    # defaults preserve the exact historical static-concat behaviour while
+    # keeping the legacy formal source YAML valid and fully covered.
+    "MODEL.MULTI_GRANULARITY_DYNAMIC_GATING": False,
+    "MODEL.MULTI_GRANULARITY_GATING_INPUT": "global",
+    "MODEL.MULTI_GRANULARITY_GATING_TAU": 1.0,
+    "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION": "scaled_softmax",
 }
 
 RUN_FIELDS = (
@@ -2908,6 +2915,27 @@ def _git_blob_sha256(repo_root, commit, relative_path):
     return hashlib.sha256(content).hexdigest()
 
 
+def _git_blob_execution_sha256_variants(repo_root, commit, relative_path):
+    """Hashes for the Git blob and its platform checkout byte representation."""
+    try:
+        content = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "show",
+                "{}:{}".format(commit, relative_path),
+            ],
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceIncompleteError(
+            "Training commit does not contain {}".format(relative_path)
+        ) from error
+    variants = {hashlib.sha256(content).hexdigest()}
+    if os.linesep == "\r\n":
+        normalized = content.replace(b"\r\n", b"\n")
+        variants.add(hashlib.sha256(normalized.replace(b"\n", b"\r\n")).hexdigest())
+    return variants
+
+
 def _replace_profile_resolved_hash(profile, resolved_sha256):
     argv = profile.get("argv")
     if not isinstance(argv, list):
@@ -3007,13 +3035,15 @@ def recover_existing_run(output_dir, record_dir, repo_root,
     finalization_commit = _git_output(repo, ["rev-parse", "HEAD"])
     if not re.fullmatch(r"[0-9a-f]{40}", finalization_commit):
         raise EvidenceIncompleteError("Recovery finalization_commit is not a full SHA")
-    training_profiler_sha256 = _git_blob_sha256(
+    training_profiler_variants = _git_blob_execution_sha256_variants(
         repo, training_commit, "tools/profile_multi_granularity_part.py"
     )
-    if efficiency.get("profiler_script_sha256") != training_profiler_sha256:
+    recorded_profiler_sha256 = efficiency.get("profiler_script_sha256")
+    if recorded_profiler_sha256 not in training_profiler_variants:
         raise EvidenceIncompleteError(
             "Recorded profiler does not match the training commit"
         )
+    training_profiler_sha256 = recorded_profiler_sha256
 
     source_path = assert_path_allowed(manifest.get("source_config", {}).get("path", ""))
     if fixture_root is not None:
@@ -3213,3 +3243,33 @@ def recover_existing_run(output_dir, record_dir, repo_root,
         finalization_commit=finalization_commit,
         expected_profiler_script_sha256=training_profiler_sha256,
     )
+
+
+# Unified schema-v2 Dynamic Gating APIs. They are implemented in a focused
+# module to keep the historical C2-MGP schema-v1 reader stable, but are exposed
+# here so every experiment runner continues to use one recorder namespace.
+from utils.dynamic_experiment_registry import (  # noqa: E402,F401
+    AUTO_CHECKPOINTS_END as DYNAMIC_AUTO_CHECKPOINTS_END,
+    AUTO_CHECKPOINTS_START as DYNAMIC_AUTO_CHECKPOINTS_START,
+    AUTO_FORMAL_END as DYNAMIC_AUTO_FORMAL_END,
+    AUTO_FORMAL_START as DYNAMIC_AUTO_FORMAL_START,
+    AUTO_RUNS_END as DYNAMIC_AUTO_RUNS_END,
+    AUTO_RUNS_START as DYNAMIC_AUTO_RUNS_START,
+    CHECKPOINT_FIELDS as DYNAMIC_CHECKPOINT_FIELDS,
+    DynamicExperimentEvidenceError,
+    EVIDENCE_FIELDS as DYNAMIC_EVIDENCE_FIELDS,
+    RUN_FIELDS as DYNAMIC_RUN_FIELDS,
+    UNIFIED_SCHEMA_VERSION,
+    build_dynamic_checkpoint_manifest,
+    generate_run_id as generate_unique_run_id,
+    initialize_dynamic_run,
+    migrate_unified_schema,
+    refresh_experiments_markdown,
+    register_dynamic_run_state,
+    seal_dynamic_run_evidence,
+    select_dynamic_checkpoint,
+    transition_dynamic_run,
+    validate_dynamic_configuration,
+    validate_dynamic_lineage,
+    validate_dynamic_runtime_worktree,
+)
