@@ -107,7 +107,7 @@ def _git(repo_root, args):
         raise DynamicExperimentEvidenceError(
             "Git evidence command failed: {}".format(" ".join(args))
         ) from error
-    return output.decode("utf-8", errors="replace").strip()
+    return output.decode("utf-8", errors="replace").rstrip("\r\n")
 
 
 _PROTOCOL_IGNORED_PATHS = (
@@ -284,9 +284,7 @@ def validate_dynamic_runtime_worktree(repo_root, run_dir, output_dir):
     unexpected = []
     status = _git(repo, ["status", "--porcelain=v1", "--untracked-files=all"])
     for line in status.splitlines():
-        relative = line[3:].strip().strip('"').replace("\\", "/")
-        if " -> " in relative:
-            relative = relative.split(" -> ", 1)[1]
+        relative = _porcelain_relative_path(line)
         candidate = (repo / relative).resolve()
         if relative in allowed_files:
             continue
@@ -300,6 +298,23 @@ def validate_dynamic_runtime_worktree(repo_root, run_dir, output_dir):
             )
         )
     return True
+
+
+def _porcelain_relative_path(line):
+    """Extract a path without consuming Git porcelain status columns."""
+    if len(line) < 4 or line[2] != " ":
+        raise DynamicExperimentEvidenceError(
+            "Malformed Git porcelain status line: {!r}".format(line)
+        )
+    relative = line[3:].strip()
+    if " -> " in relative:
+        relative = relative.split(" -> ", 1)[1]
+    relative = relative.strip().strip('"').replace("\\", "/")
+    if not relative:
+        raise DynamicExperimentEvidenceError(
+            "Git porcelain status line has no path: {!r}".format(line)
+        )
+    return relative
 
 
 def _nested(mapping, dotted):
