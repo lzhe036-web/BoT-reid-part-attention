@@ -50,6 +50,7 @@ from utils.reproducibility import (
     validate_seed,
     validate_seed_evidence_chain,
 )
+from utils.smoke_gate import validate_formal_smoke_gate
 
 
 def parse_args(argv=None):
@@ -70,6 +71,10 @@ def parse_args(argv=None):
     parser.add_argument("--parent-branch", default=NOT_RECORDED)
     parser.add_argument("--parent-commit", default=NOT_RECORDED)
     parser.add_argument("--feature-reference-commit", default=NOT_RECORDED)
+    parser.add_argument(
+        "--required-smoke-experiment-id",
+        help="Require matching successful one-epoch smoke evidence before formal",
+    )
     parser.add_argument(
         "--feature-reference-config", default=FEATURE_REFERENCE_CONFIG
     )
@@ -424,6 +429,23 @@ def run(args):
     source_seed = _load_explicit_source_seed(config_path)
     resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))
     validate_seed_evidence_chain(source_seed, resolved_seed, resolved_seed)
+    smoke_gate_evidence = None
+    if args.required_smoke_experiment_id and args.run_kind != "formal":
+        raise RuntimeError(
+            "--required-smoke-experiment-id is valid only for formal runs"
+        )
+    if args.run_kind == "formal" and args.required_smoke_experiment_id:
+        smoke_gate_evidence = validate_formal_smoke_gate(
+            repo_root=REPO_ROOT,
+            records_root=args.records_root,
+            formal_config_path=config_path,
+            formal_configuration=configuration,
+            current_commit=git_info["commit"],
+            expected_branch=args.expected_branch,
+            expected_experiment_id=args.required_smoke_experiment_id,
+            expected_experiment_family=args.experiment_family,
+            feature_compatibility=feature_compatibility,
+        )
     training_env = _build_training_environment(resolved_seed)
     run_id = args.run_id or generate_run_id(
         args.experiment_id, git_info["commit"], resolved_seed
@@ -449,6 +471,9 @@ def run(args):
         feature_compatibility=feature_compatibility,
         experiments_path=REPO_ROOT / "EXPERIMENTS.md",
     )
+    if smoke_gate_evidence is not None:
+        manifest["smoke_gate"] = smoke_gate_evidence
+        atomic_write_json(run_dir / "run_manifest.json", manifest)
     try:
         environment = collect_environment(
             run_dir,

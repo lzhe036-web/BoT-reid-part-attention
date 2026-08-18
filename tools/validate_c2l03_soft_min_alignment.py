@@ -4,8 +4,10 @@
 
 from __future__ import absolute_import
 
+import argparse
 import itertools
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +59,24 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Validate one C2-L03 Soft-Min formal configuration"
+    )
+    parser.add_argument(
+        "--config-file",
+        default=str(SOFT_CONFIG),
+        help="Soft-Min formal YAML; defaults to the tau=0.1 regression config",
+    )
+    parser.add_argument(
+        "--expected-tau",
+        default=0.1,
+        type=float,
+        help="Exact positive Soft-Min temperature required by the candidate",
+    )
+    return parser.parse_args(argv)
+
+
 def changed_leaf_paths(left, right, prefix=""):
     paths = set()
     for key in set(left) | set(right):
@@ -90,7 +110,17 @@ def right_down_oracle(matrix, tau):
     return -tau * torch.logsumexp(-path_costs / tau, dim=0)
 
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+    candidate_config = Path(args.config_file)
+    if not candidate_config.is_absolute():
+        candidate_config = REPO_ROOT / candidate_config
+    candidate_config = candidate_config.resolve()
+    require(candidate_config.is_file(), "Soft candidate config does not exist")
+    require(
+        math.isfinite(args.expected_tau) and args.expected_tau > 0.0,
+        "expected tau must be finite and greater than zero",
+    )
     hard_text = subprocess.check_output(
         [
             "git", "show", "{}:{}".format(
@@ -106,19 +136,38 @@ def main():
         "working-tree Hard formal config differs from fixed Hard commit",
     )
     hard = yaml.safe_load(hard_text)
-    soft = yaml.safe_load(SOFT_CONFIG.read_text(encoding="utf-8"))
-    differences = changed_leaf_paths(hard, soft)
+    reference_soft = yaml.safe_load(SOFT_CONFIG.read_text(encoding="utf-8"))
+    soft = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
+    hard_differences = changed_leaf_paths(hard, soft)
     require(
-        differences == {
+        hard_differences == {
             "MODEL.PCC_MODE", "MODEL.PCC_SOFTMIN_TAU", "OUTPUT_DIR"
         },
-        "formal config isolation failed: {}".format(sorted(differences)),
+        "Hard/Soft formal config isolation failed: {}".format(
+            sorted(hard_differences)
+        ),
+    )
+    reference_differences = changed_leaf_paths(reference_soft, soft)
+    expected_reference_differences = (
+        set() if candidate_config == SOFT_CONFIG.resolve()
+        else {"MODEL.PCC_SOFTMIN_TAU", "OUTPUT_DIR"}
+    )
+    require(
+        reference_differences == expected_reference_differences,
+        "tau=0.1 protocol isolation failed: {}".format(
+            sorted(reference_differences)
+        ),
     )
     require(soft["SEED"] == 42, "Soft formal seed must be 42")
     require(soft["MODEL"]["PCC_PARTS"] == 6, "Soft K must be 6")
     require(soft["MODEL"]["PCC_LAMBDA"] == 0.1, "Soft lambda must be 0.1")
+    require(soft["MODEL"]["PCC_MODE"] == "soft_min", "mode must be soft_min")
     tau = float(soft["MODEL"]["PCC_SOFTMIN_TAU"])
-    require(tau == 0.1, "Soft candidate tau must be explicit 0.1")
+    require(math.isfinite(tau) and tau > 0.0, "Soft tau must be positive")
+    require(
+        tau == args.expected_tau,
+        "Soft candidate tau must be explicit {}".format(args.expected_tau),
+    )
 
     lineage = validate_parent_lineage(
         REPO_ROOT, HARD_BRANCH, HARD_SHA, child_commit="HEAD"
@@ -178,6 +227,13 @@ def main():
         ),
         "tau-to-zero Hard limit failed",
     )
+    large_matrices = torch.full(
+        (3, 4, 4), 1.0e20, dtype=torch.float64, device=device
+    )
+    require(
+        torch.isfinite(soft_min_path_costs(large_matrices, tau)).all(),
+        "Soft DP is not numerically stable for large finite costs",
+    )
 
     local = torch.randn(4, 6, 16, device=device, requires_grad=True)
     pids = torch.tensor([0, 0, 1, 1], device=device)
@@ -210,7 +266,7 @@ def main():
     )
 
     local_cfg = cfg.clone()
-    local_cfg.merge_from_file(str(SOFT_CONFIG))
+    local_cfg.merge_from_file(str(candidate_config))
     local_cfg.defrost()
     local_cfg.MODEL.IF_LABELSMOOTH = "off"
     local_cfg.freeze()
@@ -256,9 +312,11 @@ def main():
     require(identity["alignment_temperature"] == tau, "identity tau failed")
     require(identity["gating_mode"] == NOT_APPLICABLE, "gating sentinel failed")
     report = {
+        "config_file": str(candidate_config),
         "device": str(device),
         "parent_lineage": lineage,
-        "config_differences": sorted(differences),
+        "hard_config_differences": sorted(hard_differences),
+        "tau0p1_config_differences": sorted(reference_differences),
         "seed": soft["SEED"],
         "tau": tau,
         "distance_matrix_shape": list(distance.shape),
