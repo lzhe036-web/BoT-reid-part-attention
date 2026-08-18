@@ -1,0 +1,13 @@
+{
+  "best_epoch": 120,
+  "end_time": "2026-08-15T06:06:05Z",
+  "phase": "complete",
+  "run_id": "C2-L03-SOFTMIN-T0P1-S42-20260815T051002692632Z-b1c1cd3eabfc-s42",
+  "schema_version": 4,
+  "selected_epoch": 120,
+  "status": "success",
+  "training_end_time": "2026-08-15T06:06:05Z",
+  "training_exit_code": 0,
+  "training_runtime_seconds": 3359.4054203424603,
+  "updated_at_utc": "2026-08-15T06:06:22Z"
+}

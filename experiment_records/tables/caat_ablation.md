@@ -1,2 +1,3 @@
 | run_id | experiment_id | baseline | camera_aware_triplet | cross_camera_positive | same_camera_positive | hierarchical | weighted | multi_granularity | lambda | rank1 | map | Params | FLOPs | runtime | seed | commit |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C2-L03-SOFTMIN-T0P1-S42-20260815T051002692632Z-b1c1cd3eabfc-s42 | C2-L03-SOFTMIN-T0P1-S42 | True | False | True | False | False | False | False | 0.3 | 94.9 | 87.4 | 25052225 | 8106565632 | 3359.4054203424603 | 42 | b1c1cd3eabfca0bb1a08b90b3712523a3e7e719b |

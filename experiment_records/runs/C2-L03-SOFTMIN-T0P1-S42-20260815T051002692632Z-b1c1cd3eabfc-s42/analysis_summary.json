@@ -1,0 +1,10 @@
+{
+  "analysis_commit": "b1c1cd3eabfca0bb1a08b90b3712523a3e7e719b",
+  "analysis_time": "2026-08-15T06:06:22Z",
+  "anchor_coverage": "complete",
+  "distance_distribution": "complete",
+  "efficiency_profile": "complete",
+  "schema_version": 4,
+  "source_checkpoint_sha256": "be004186e77e2aa709b28ba0026cb1e028b7dad6e0627641249ae09cfbb73f90",
+  "training_evidence_separate_from_post_hoc_analysis": true
+}

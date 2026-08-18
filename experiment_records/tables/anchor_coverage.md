@@ -1,2 +1,3 @@
 | run_id | experiment_id | dataset | seed | total_anchors | valid_cross_camera_anchors | invalid_cross_camera_anchors | coverage_percent | cross_camera_positive_count | same_camera_positive_count | commit |
 |---|---|---|---|---|---|---|---|---|---|---|
+| C2-L03-SOFTMIN-T0P1-S42-20260815T051002692632Z-b1c1cd3eabfc-s42 | C2-L03-SOFTMIN-T0P1-S42 | market1501 | 42 | 117120 | 114512 | 2608 | 97.77322404371584 | 270894 | 80466 | b1c1cd3eabfca0bb1a08b90b3712523a3e7e719b |

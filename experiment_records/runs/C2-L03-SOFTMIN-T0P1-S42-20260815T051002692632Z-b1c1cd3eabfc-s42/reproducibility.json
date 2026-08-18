@@ -1,0 +1,32 @@
+{
+  "PYTHONHASHSEED": "42",
+  "application_order": [
+    "python_random",
+    "numpy",
+    "torch_cpu",
+    "torch_cuda",
+    "torch_cuda_all",
+    "cudnn_deterministic",
+    "cudnn_benchmark"
+  ],
+  "applied_seed": 42,
+  "cudnn_benchmark": false,
+  "cudnn_deterministic": true,
+  "dataloader_train_generator_seed": 42,
+  "dataloader_validation_generator_seed": 43,
+  "dataloader_worker_seed_base": 42,
+  "dataloader_worker_seed_strategy": "torch_initial_seed_mod_2**32_from_explicit_train_or_validation_generator;seeds_python_numpy_torch",
+  "numpy_seed": 42,
+  "python_random_seed": 42,
+  "resolved_seed": 42,
+  "runner_seed": 42,
+  "sampler_seed": 42,
+  "sampler_seed_strategy": "global_python_numpy_rng_seeded_before_sampler_use",
+  "schema_version": 1,
+  "seed": 42,
+  "source_seed": 42,
+  "status": "complete",
+  "torch_cpu_seed": 42,
+  "torch_cuda_available": true,
+  "torch_cuda_seed": 42
+}

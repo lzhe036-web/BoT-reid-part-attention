@@ -1,0 +1,23 @@
+{
+  "analysis_seed": 42,
+  "analysis_time": "2026-08-15T06:06:18Z",
+  "average_cross_camera_positive_per_anchor": 2.3129610655737705,
+  "average_same_camera_positive_per_anchor": 0.6870389344262295,
+  "batch_count": 1830,
+  "batch_size": 64,
+  "coverage_percent": 97.77322404371584,
+  "cross_camera_anchor_coverage": 0.9777322404371585,
+  "cross_camera_positive_count": 270894,
+  "epochs_simulated": 10,
+  "invalid_cross_camera_anchor_count": 2608,
+  "num_instance": 4,
+  "same_camera_positive_count": 80466,
+  "sampler": "softmax_triplet",
+  "schema_version": 1,
+  "scope_note": "Controlled replay of sampler rules; not claimed to be the exact historical batch sequence when an applied training seed is unavailable.",
+  "source": "post_hoc_controlled_sampler_analysis",
+  "total_anchor_count": 117120,
+  "training_seed": 42,
+  "training_trace_observed": false,
+  "valid_cross_camera_anchor_count": 114512
+}

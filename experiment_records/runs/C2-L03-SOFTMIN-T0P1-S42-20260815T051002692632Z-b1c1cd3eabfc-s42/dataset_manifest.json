@@ -1,0 +1,32 @@
+{
+  "batch_size": 64,
+  "data_root": "/root/autodl-tmp/datasets",
+  "dataset": "market1501",
+  "dataset_manifest_sha256": "c5c1d87ba5f0d209ffcd7f986f66c213d4c240c210a78d50cd6ced00490ee55f",
+  "hash_basis": "sorted relative path, pid, camid, size_bytes",
+  "num_instance": 4,
+  "num_workers": 8,
+  "recorded_at_utc": "2026-08-15T05:10:06Z",
+  "sampler": "softmax_triplet",
+  "schema_version": 4,
+  "splits": {
+    "gallery": {
+      "camera_count": 6,
+      "image_count": 15913,
+      "manifest_sha256": "232c0c1037ac7a6b42409842c520d4a8375fda9058c4c1b50f258d1643574a18",
+      "pid_count": 751
+    },
+    "query": {
+      "camera_count": 6,
+      "image_count": 3368,
+      "manifest_sha256": "53fc0f41a35d71c47537b2aa40fa1db0c31e174cb861394967da8d0f68767b6f",
+      "pid_count": 750
+    },
+    "train": {
+      "camera_count": 6,
+      "image_count": 12936,
+      "manifest_sha256": "3cba5dd0f997d92431e7550d791aa228b5a2f11df478e7ce46d4cbc2c80e2b57",
+      "pid_count": 751
+    }
+  }
+}

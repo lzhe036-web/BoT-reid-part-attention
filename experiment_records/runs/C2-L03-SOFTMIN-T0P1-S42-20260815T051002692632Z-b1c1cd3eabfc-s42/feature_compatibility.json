@@ -1,0 +1,83 @@
+{
+  "components": {
+    "baseline_forward": {
+      "current_sha256": "4681e3a54cddb8387db39d90da18e96fdb2f9d40c14e5d21fb56b57722c1ca46",
+      "reference_sha256": "4681e3a54cddb8387db39d90da18e96fdb2f9d40c14e5d21fb56b57722c1ca46",
+      "status": "compatible"
+    },
+    "build_cross_camera_positive_pairs": {
+      "current_sha256": "0c4cd42114802582c1ac1822735c94f7749c29a3fa2f3a51bfc092b45f1f2178",
+      "reference_sha256": "0c4cd42114802582c1ac1822735c94f7749c29a3fa2f3a51bfc092b45f1f2178",
+      "status": "compatible"
+    },
+    "build_local_part_descriptors": {
+      "current_sha256": "9ef18011dbcb7cc82f1044b5b02d5a0c8e0c30c2c3b2fcc02bde3d50991bcdb7",
+      "reference_sha256": "9ef18011dbcb7cc82f1044b5b02d5a0c8e0c30c2c3b2fcc02bde3d50991bcdb7",
+      "status": "compatible"
+    },
+    "feature_parameter_schema": {
+      "current_sha256": "2e52959752c9fa7aa54d153b1e50c274c2b990f784c54756fd17a6cb8db0891e",
+      "reference_sha256": "2e52959752c9fa7aa54d153b1e50c274c2b990f784c54756fd17a6cb8db0891e",
+      "status": "compatible"
+    },
+    "feature_protocol": {
+      "current_sha256": "f515de54ba009f635d66128fa89e43ac3d12d71a8c955498712bf09fce07ff7e",
+      "reference_sha256": "f515de54ba009f635d66128fa89e43ac3d12d71a8c955498712bf09fce07ff7e",
+      "status": "compatible"
+    },
+    "global_descriptor_definition": {
+      "current_sha256": "0032f7344f581e66b2a451415427547f5afb0032dbb7cfc7405d470932e24d60",
+      "reference_sha256": "0032f7344f581e66b2a451415427547f5afb0032dbb7cfc7405d470932e24d60",
+      "status": "compatible"
+    },
+    "horizontal_part_bounds": {
+      "current_sha256": "36d112fed3fcb3d2317cf1a0ce5f9d5a9dccfa5aa563787a660a589fc2aae9d8",
+      "reference_sha256": "36d112fed3fcb3d2317cf1a0ce5f9d5a9dccfa5aa563787a660a589fc2aae9d8",
+      "status": "compatible"
+    },
+    "inference_descriptor_definition": {
+      "current_sha256": "7b6ba245ba31ebcde541cee2a401fb227879914525aceb17ec11641f9c348aab",
+      "reference_sha256": "7b6ba245ba31ebcde541cee2a401fb227879914525aceb17ec11641f9c348aab",
+      "status": "compatible"
+    },
+    "local_descriptor_definition": {
+      "current_sha256": "4bff1b6f10c8811a4a30f3d93c62f49db1639a38f17f1bbb17fa0c08c93d96a2",
+      "reference_sha256": "4bff1b6f10c8811a4a30f3d93c62f49db1639a38f17f1bbb17fa0c08c93d96a2",
+      "status": "compatible"
+    },
+    "pairwise_local_distance_matrix": {
+      "current_sha256": "4af47bf8c96d31b906a37d1e87e01836952155ecc2fd2d660a7fed9b85b6bc48",
+      "reference_sha256": "4af47bf8c96d31b906a37d1e87e01836952155ecc2fd2d660a7fed9b85b6bc48",
+      "status": "compatible"
+    },
+    "part_attention_forward": {
+      "current_sha256": "eec01e88b7aa9cf255fc37a0624ef9f1af1fe268657d298845295374d2278897",
+      "reference_sha256": "eec01e88b7aa9cf255fc37a0624ef9f1af1fe268657d298845295374d2278897",
+      "status": "compatible"
+    },
+    "part_attention_init": {
+      "current_sha256": "435b12ef2c8a5ae03d194fb5e294dc68ba4698b21a425a62a87189dc3256d08c",
+      "reference_sha256": "435b12ef2c8a5ae03d194fb5e294dc68ba4698b21a425a62a87189dc3256d08c",
+      "status": "compatible"
+    },
+    "resnet50_backbone": {
+      "current_sha256": "2bf759e4a14747cf619e881731168533dfdbf0aec44a39979dd739610df64a6d",
+      "reference_sha256": "2bf759e4a14747cf619e881731168533dfdbf0aec44a39979dd739610df64a6d",
+      "status": "compatible"
+    },
+    "select_pair_local_features": {
+      "current_sha256": "d929db362aa8fb4da2257c4063536eaab5fb983fa6162558d972579bf045a4ee",
+      "reference_sha256": "d929db362aa8fb4da2257c4063536eaab5fb983fa6162558d972579bf045a4ee",
+      "status": "compatible"
+    }
+  },
+  "current_feature_signature_sha256": "c2920e260748f9251e52af3bbd10f12740d8549074fc9dc424aa359c1fa4394b",
+  "feature_compatibility_status": "compatible",
+  "feature_current_commit": "b1c1cd3eabfca0bb1a08b90b3712523a3e7e719b",
+  "feature_reference_commit": "6b46f2c3747124b97d59ed5cf987f33efb82282b",
+  "feature_reference_signature_sha256": "c2920e260748f9251e52af3bbd10f12740d8549074fc9dc424aa359c1fa4394b",
+  "mismatched_components": [],
+  "parameter_schema_access": "git_archive_zip_revision_import",
+  "schema_version": 1,
+  "source_access": "git_show_revision_objects"
+}

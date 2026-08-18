@@ -1,0 +1,65 @@
+{
+  "analysis_seed": 42,
+  "analysis_time": "2026-08-15T06:06:15Z",
+  "analysis_type": "post_hoc_checkpoint_feature_distance",
+  "checkpoint": "/root/autodl-tmp/experiments/BoT/c2l03_soft_min_alignment_tau0p1_seed42_market1501/resnet50_checkpoint_22320.pt",
+  "cross_camera_gap": 0.030923402591862548,
+  "dataset": "market1501",
+  "different_id": {
+    "count": 8199718,
+    "mean": 1.409129555692676,
+    "p25": 1.3833320871556127,
+    "p50": 1.4172451203827074,
+    "p75": 1.4456288766897336,
+    "p95": 1.4824477408233716,
+    "std": 0.05653569980036936
+  },
+  "different_id_mean": 1.409129555692676,
+  "different_id_std": 0.05653569980036936,
+  "max_samples": 4096,
+  "negative": {
+    "count": 8199718,
+    "mean": 1.409129555692676,
+    "p25": 1.3833320871556127,
+    "p50": 1.4172451203827074,
+    "p75": 1.4456288766897336,
+    "p95": 1.4824477408233716,
+    "std": 0.05653569980036936
+  },
+  "population_count": 19281,
+  "positive": {
+    "count": 186842,
+    "mean": 1.3197395936642315,
+    "p25": 1.2931114383899402,
+    "p50": 1.3526402206784582,
+    "p75": 1.3959846183884905,
+    "p95": 1.4450619164940957,
+    "std": 0.13582017657286044
+  },
+  "same_id_cross_camera": {
+    "count": 154294,
+    "mean": 1.3251264708522292,
+    "p25": 1.2974136336963458,
+    "p50": 1.3548298730133146,
+    "p75": 1.397488224084365,
+    "p95": 1.4462193493218476,
+    "std": 0.12676562355424612
+  },
+  "same_id_cross_camera_mean": 1.3251264708522292,
+  "same_id_cross_camera_std": 0.12676562355424612,
+  "same_id_same_camera": {
+    "count": 32548,
+    "mean": 1.2942030682603667,
+    "p25": 1.2699872889493355,
+    "p50": 1.3406488204854718,
+    "p75": 1.3884087621273467,
+    "p95": 1.4387579592907345,
+    "std": 0.17008367931160098
+  },
+  "same_id_same_camera_mean": 1.2942030682603667,
+  "same_id_same_camera_std": 0.17008367931160098,
+  "sample_count": 4096,
+  "sampling_rule": "all query+gallery samples when <= max_samples; otherwise a sorted uniform sample without replacement using analysis_seed",
+  "schema_version": 1,
+  "source_checkpoint_sha256": "be004186e77e2aa709b28ba0026cb1e028b7dad6e0627641249ae09cfbb73f90"
+}

@@ -1,0 +1,29 @@
+{
+  "CUDA_VISIBLE_DEVICES": "0",
+  "PYTHONHASHSEED": "not_recorded",
+  "cuda_runtime": "11.8",
+  "cudnn_version": 8700,
+  "environment_packages_path": "/root/autodl-tmp/BoT-reid-c2l03-soft-min-alignment-formal-v1/experiment_records/runs/C2-L03-SOFTMIN-T0P1-S42-20260815T051002692632Z-b1c1cd3eabfc-s42/environment_packages.txt",
+  "environment_packages_sha256": "256626ecc745211b89b938bc1c69e3dd76d8ddcbbb6fbae3de18f9fa2d4461f4",
+  "git_branch": "exp/c2l03-soft-min-alignment",
+  "git_commit": "b1c1cd3eabfca0bb1a08b90b3712523a3e7e719b",
+  "git_controlled_evidence_dir": "experiment_records/runs/C2-L03-SOFTMIN-T0P1-S42-20260815T051002692632Z-b1c1cd3eabfc-s42",
+  "git_controlled_evidence_only": true,
+  "gpu_count": 1,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4090",
+      "total_memory_bytes": 25250627584
+    }
+  ],
+  "hostname": "autodl-container-wtl0lh99as-8320625b",
+  "nvidia_driver": "580.142",
+  "os": "Linux-5.15.0-176-generic-x86_64-with-glibc2.35",
+  "python_executable": "/root/miniconda3/bin/python",
+  "python_version": "3.10.8",
+  "pytorch_version": "2.1.2+cu118",
+  "recorded_at_utc": "2026-08-15T05:10:03Z",
+  "schema_version": 4,
+  "training_subprocess_PYTHONHASHSEED": "42"
+}
