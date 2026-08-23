@@ -52,6 +52,27 @@ HARD_CONFIG = REPO_ROOT / "configs" / (
 SOFT_CONFIG = REPO_ROOT / "configs" / (
     "softmax_triplet_c2l03_soft_min_alignment_autodl.yml"
 )
+TAU0P2_CONFIG = REPO_ROOT / "configs" / (
+    "softmax_triplet_c2l03_soft_min_alignment_tau0p2_autodl.yml"
+)
+TAU_SWEEP_SHA = "734e335034ac1cb935d9e63f0f00736c16821f13"
+TAU_SWEEP_BRANCH = "exp/c2l03-soft-min-alignment-tau-sweep"
+LAMBDA_OUTPUTS = {
+    0.05: "/root/autodl-tmp/experiments/BoT/c2l03_soft_min_alignment_tau0p2_lambda0p05_seed42_market1501",
+    0.1: "/root/autodl-tmp/experiments/BoT/c2l03_soft_min_alignment_tau0p2_lambda0p1_seed42_market1501",
+    0.3: "/root/autodl-tmp/experiments/BoT/c2l03_soft_min_alignment_tau0p2_lambda0p3_seed42_market1501",
+}
+LAMBDA_CONFIGS = {
+    0.05: REPO_ROOT / "configs" / (
+        "softmax_triplet_c2l03_soft_min_alignment_tau0p2_lambda0p05_autodl.yml"
+    ),
+    0.1: REPO_ROOT / "configs" / (
+        "softmax_triplet_c2l03_soft_min_alignment_tau0p2_lambda0p1_autodl.yml"
+    ),
+    0.3: REPO_ROOT / "configs" / (
+        "softmax_triplet_c2l03_soft_min_alignment_tau0p2_lambda0p3_autodl.yml"
+    ),
+}
 
 
 def require(condition, message):
@@ -73,6 +94,12 @@ def parse_args(argv=None):
         default=0.1,
         type=float,
         help="Exact positive Soft-Min temperature required by the candidate",
+    )
+    parser.add_argument(
+        "--expected-lambda",
+        default=0.1,
+        type=float,
+        help="Exact MODEL.PCC_LAMBDA required by the candidate",
     )
     return parser.parse_args(argv)
 
@@ -121,6 +148,10 @@ def main(argv=None):
         math.isfinite(args.expected_tau) and args.expected_tau > 0.0,
         "expected tau must be finite and greater than zero",
     )
+    require(
+        math.isfinite(args.expected_lambda) and args.expected_lambda >= 0.0,
+        "expected lambda must be finite and non-negative",
+    )
     hard_text = subprocess.check_output(
         [
             "git", "show", "{}:{}".format(
@@ -136,31 +167,94 @@ def main(argv=None):
         "working-tree Hard formal config differs from fixed Hard commit",
     )
     hard = yaml.safe_load(hard_text)
-    reference_soft = yaml.safe_load(SOFT_CONFIG.read_text(encoding="utf-8"))
+    is_lambda_sweep = "_lambda" in candidate_config.stem
+    reference_path = TAU0P2_CONFIG if is_lambda_sweep else SOFT_CONFIG
+    reference_soft = yaml.safe_load(reference_path.read_text(encoding="utf-8"))
     soft = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
     hard_differences = changed_leaf_paths(hard, soft)
+    expected_hard_differences = {
+        "MODEL.PCC_MODE", "MODEL.PCC_SOFTMIN_TAU", "OUTPUT_DIR"
+    }
+    if soft["MODEL"]["PCC_LAMBDA"] != hard["MODEL"]["PCC_LAMBDA"]:
+        expected_hard_differences.add("MODEL.PCC_LAMBDA")
     require(
-        hard_differences == {
-            "MODEL.PCC_MODE", "MODEL.PCC_SOFTMIN_TAU", "OUTPUT_DIR"
-        },
+        hard_differences == expected_hard_differences,
         "Hard/Soft formal config isolation failed: {}".format(
             sorted(hard_differences)
         ),
     )
     reference_differences = changed_leaf_paths(reference_soft, soft)
-    expected_reference_differences = (
-        set() if candidate_config == SOFT_CONFIG.resolve()
-        else {"MODEL.PCC_SOFTMIN_TAU", "OUTPUT_DIR"}
-    )
+    expected_reference_differences = set()
+    for field, left, right in (
+            ("MODEL.PCC_LAMBDA", reference_soft["MODEL"]["PCC_LAMBDA"],
+             soft["MODEL"]["PCC_LAMBDA"]),
+            ("MODEL.PCC_SOFTMIN_TAU",
+             reference_soft["MODEL"]["PCC_SOFTMIN_TAU"],
+             soft["MODEL"]["PCC_SOFTMIN_TAU"]),
+            ("OUTPUT_DIR", reference_soft["OUTPUT_DIR"], soft["OUTPUT_DIR"])):
+        if left != right:
+            expected_reference_differences.add(field)
     require(
         reference_differences == expected_reference_differences,
-        "tau=0.1 protocol isolation failed: {}".format(
+        "Soft-Min template protocol isolation failed: {}".format(
             sorted(reference_differences)
         ),
     )
+    if is_lambda_sweep:
+        require(
+            reference_differences <= {"MODEL.PCC_LAMBDA", "OUTPUT_DIR"},
+            "lambda sweep changes fields outside PCC_LAMBDA/OUTPUT_DIR",
+        )
+        require(args.expected_tau == 0.2, "lambda sweep must fix tau=0.2")
+        require(
+            args.expected_lambda in LAMBDA_OUTPUTS,
+            "lambda sweep candidate is outside the declared matrix",
+        )
+        require(
+            soft["OUTPUT_DIR"] == LAMBDA_OUTPUTS[args.expected_lambda],
+            "lambda sweep OUTPUT_DIR does not match its candidate",
+        )
+        require(
+            len(set(LAMBDA_OUTPUTS.values())) == len(LAMBDA_OUTPUTS),
+            "lambda sweep OUTPUT_DIR values are not unique",
+        )
+        observed_outputs = set()
+        for expected_lambda, path in sorted(LAMBDA_CONFIGS.items()):
+            require(path.is_file(), "lambda sweep matrix config is missing")
+            matrix_config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            require(
+                changed_leaf_paths(reference_soft, matrix_config)
+                <= {"MODEL.PCC_LAMBDA", "OUTPUT_DIR"},
+                "lambda sweep matrix config changes the fixed protocol",
+            )
+            require(
+                matrix_config["MODEL"]["PCC_LAMBDA"] == expected_lambda,
+                "lambda sweep matrix config has the wrong PCC lambda",
+            )
+            require(
+                matrix_config["MODEL"]["PCC_SOFTMIN_TAU"] == 0.2,
+                "lambda sweep matrix config changed tau",
+            )
+            require(
+                matrix_config["OUTPUT_DIR"] == LAMBDA_OUTPUTS[expected_lambda],
+                "lambda sweep matrix config has the wrong OUTPUT_DIR",
+            )
+            observed_outputs.add(matrix_config["OUTPUT_DIR"])
+        require(
+            len(observed_outputs) == len(LAMBDA_CONFIGS),
+            "lambda sweep matrix OUTPUT_DIR values are not unique",
+        )
     require(soft["SEED"] == 42, "Soft formal seed must be 42")
     require(soft["MODEL"]["PCC_PARTS"] == 6, "Soft K must be 6")
-    require(soft["MODEL"]["PCC_LAMBDA"] == 0.1, "Soft lambda must be 0.1")
+    require(
+        soft["MODEL"]["PCC_LAMBDA"] == args.expected_lambda,
+        "Soft PCC lambda must be {}".format(args.expected_lambda),
+    )
+    require(
+        soft["MODEL"]["CROSS_CAMERA_POSITIVE_LAMBDA"]
+        == hard["MODEL"]["CROSS_CAMERA_POSITIVE_LAMBDA"] == 0.3,
+        "cross-camera positive lambda changed or was confused with lambda_p",
+    )
     require(soft["MODEL"]["PCC_MODE"] == "soft_min", "mode must be soft_min")
     tau = float(soft["MODEL"]["PCC_SOFTMIN_TAU"])
     require(math.isfinite(tau) and tau > 0.0, "Soft tau must be positive")
@@ -169,14 +263,36 @@ def main(argv=None):
         "Soft candidate tau must be explicit {}".format(args.expected_tau),
     )
 
+    lineage_branch = TAU_SWEEP_BRANCH if is_lambda_sweep else HARD_BRANCH
+    lineage_sha = TAU_SWEEP_SHA if is_lambda_sweep else HARD_SHA
     lineage = validate_parent_lineage(
-        REPO_ROOT, HARD_BRANCH, HARD_SHA, child_commit="HEAD"
+        REPO_ROOT, lineage_branch, lineage_sha, child_commit="HEAD"
     )
     origin_hard = subprocess.check_output(
         ["git", "rev-parse", "origin/{}".format(HARD_BRANCH)],
         cwd=str(REPO_ROOT), text=True,
     ).strip()
     require(origin_hard == HARD_SHA, "remote-tracking Hard tip changed")
+    if is_lambda_sweep:
+        origin_parent = subprocess.check_output(
+            ["git", "rev-parse", "origin/{}".format(TAU_SWEEP_BRANCH)],
+            cwd=str(REPO_ROOT), text=True,
+        ).strip()
+        require(origin_parent == TAU_SWEEP_SHA, "remote tau-sweep parent changed")
+        tau0p2_text = subprocess.check_output(
+            [
+                "git", "show", "{}:{}".format(
+                    TAU_SWEEP_SHA,
+                    "configs/softmax_triplet_c2l03_soft_min_alignment_tau0p2_autodl.yml",
+                ),
+            ],
+            cwd=str(REPO_ROOT), text=True,
+        )
+        require(
+            TAU0P2_CONFIG.read_text(encoding="utf-8").replace("\r\n", "\n")
+            == tau0p2_text.replace("\r\n", "\n"),
+            "working-tree tau=0.2 template differs from fixed parent commit",
+        )
 
     hard_signature, hard_signature_sha = (
         canonical_multigranular_feature_signature(hard)
@@ -280,7 +396,7 @@ def main(argv=None):
         F.cross_entropy(score, pids)
         + TripletLoss(local_cfg.SOLVER.MARGIN)(feature, pids)[0]
         + 0.3 * CrossCameraPositiveLoss("mean")(feature, pids, camids)
-        + 0.1 * soft_min_alignment_loss(
+        + args.expected_lambda * soft_min_alignment_loss(
             formula_local, pids, camids, tau
         )[0]
     )
@@ -310,6 +426,14 @@ def main(argv=None):
     identity = experiment_identity(soft)
     require(identity["method_variant"] == "soft_min", "identity failed")
     require(identity["alignment_temperature"] == tau, "identity tau failed")
+    require(
+        identity["pcc_lambda"] == args.expected_lambda,
+        "identity pcc_lambda failed",
+    )
+    require(
+        identity["lambda"] == 0.3,
+        "generic lambda must remain the cross-camera-positive coefficient",
+    )
     require(identity["gating_mode"] == NOT_APPLICABLE, "gating sentinel failed")
     report = {
         "config_file": str(candidate_config),
@@ -319,6 +443,10 @@ def main(argv=None):
         "tau0p1_config_differences": sorted(reference_differences),
         "seed": soft["SEED"],
         "tau": tau,
+        "pcc_lambda": soft["MODEL"]["PCC_LAMBDA"],
+        "cross_camera_positive_lambda": soft["MODEL"][
+            "CROSS_CAMERA_POSITIVE_LAMBDA"
+        ],
         "distance_matrix_shape": list(distance.shape),
         "soft_alignment_loss": float(soft_loss.detach()),
         "mean_soft_path_cost": float(raw_cost),

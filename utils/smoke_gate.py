@@ -140,10 +140,56 @@ def _validate_checkpoint_evidence(run_dir, status):
     )
 
 
+def _validate_artifact_manifest(run_dir, manifest):
+    path = run_dir / "artifact_hashes.tsv"
+    _require(path.is_file(), "missing artifact_hashes.tsv")
+    _require(
+        path.stat().st_size == manifest.get("artifact_manifest_size_bytes"),
+        "smoke artifact manifest size differs",
+    )
+    _require(
+        sha256_file(path) == manifest.get("artifact_manifest_sha256"),
+        "smoke artifact manifest SHA256 differs",
+    )
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    by_type = {row.get("artifact_type"): row for row in rows}
+    required = {
+        "source_config", "resolved_config", "console_log",
+        "dataset_manifest", "environment", "environment_packages",
+        "feature_compatibility", "metrics_summary", "model_manifest",
+        "reproducibility", "checkpoint_manifest", "run_status",
+        "training_log", "selected_checkpoint",
+    }
+    _require(
+        not (required - set(by_type)),
+        "smoke artifact manifest lacks {}".format(
+            sorted(required - set(by_type))
+        ),
+    )
+    for artifact_type in required:
+        row = by_type[artifact_type]
+        artifact_path = Path(row["path"])
+        if not artifact_path.is_absolute():
+            artifact_path = run_dir / artifact_path
+        _require_file_hash(
+            artifact_path, row.get("sha256"),
+            "smoke {}".format(artifact_type),
+        )
+        _require(
+            artifact_path.stat().st_size == int(row.get("size_bytes", -1)),
+            "smoke {} size differs".format(artifact_type),
+        )
+
+
 def _validate_candidate(
         repo_root, run_dir, formal_config_path, formal_configuration,
         current_commit, expected_branch, expected_experiment_id,
-        expected_experiment_family, feature_compatibility):
+        expected_experiment_family, feature_compatibility,
+        expected_parent_branch=None, expected_parent_commit=None,
+        expected_merge_base=None, expected_protocol_signature=None,
+        expected_implementation_signature=None,
+        expected_dataset_manifest=None):
     manifest = _read_json(run_dir / "run_manifest.json")
     status = _read_json(run_dir / "run_status.json")
     _require(manifest.get("run_kind") == "smoke", "run_kind is not smoke")
@@ -167,6 +213,21 @@ def _validate_candidate(
         manifest.get("expected_branch") == expected_branch,
         "smoke expected_branch differs",
     )
+    if expected_parent_branch is not None:
+        _require(
+            manifest.get("parent_branch") == expected_parent_branch,
+            "smoke parent branch differs",
+        )
+    if expected_parent_commit is not None:
+        _require(
+            manifest.get("parent_commit") == expected_parent_commit,
+            "smoke parent commit differs",
+        )
+    if expected_merge_base is not None:
+        _require(
+            manifest.get("merge_base") == expected_merge_base,
+            "smoke merge-base differs",
+        )
 
     source_copy = run_dir / "config_source.yml"
     resolved_copy = run_dir / "config_resolved.yml"
@@ -183,6 +244,14 @@ def _validate_candidate(
         resolved_copy, manifest.get("config_resolved_sha256"),
         "smoke resolved config",
     )
+    for path, field, label in (
+            (source_copy, "config_source_size_bytes", "source config"),
+            (resolved_copy, "config_resolved_size_bytes", "resolved config")):
+        if expected_protocol_signature is not None:
+            _require(
+                path.stat().st_size == manifest.get(field),
+                "smoke {} size differs".format(label),
+            )
     smoke_configuration = _read_yaml(resolved_copy)
     protocol_differences = _changed_leaf_paths(
         formal_configuration, smoke_configuration
@@ -208,6 +277,31 @@ def _validate_candidate(
         != formal_configuration.get("OUTPUT_DIR"),
         "smoke and formal OUTPUT_DIR must differ",
     )
+    if expected_protocol_signature is not None:
+        _require(
+            smoke_configuration.get("OUTPUT_DIR") == "{}_smoke".format(
+                str(formal_configuration.get("OUTPUT_DIR")).rstrip("/")
+            ),
+            "smoke OUTPUT_DIR is not the deterministic _smoke directory",
+        )
+        _require(
+            manifest.get("protocol_signature_sha256")
+            == expected_protocol_signature,
+            "smoke protocol signature differs",
+        )
+        _require(
+            manifest.get("implementation_signature_sha256")
+            == expected_implementation_signature,
+            "smoke implementation signature differs",
+        )
+        _require(
+            manifest.get("git_preflight_clean") is True,
+            "smoke clean-worktree preflight is missing",
+        )
+        _require(
+            manifest.get("git_status_preflight") == [],
+            "smoke preflight Git status is not empty",
+        )
 
     model = formal_configuration.get("MODEL", {})
     expected_fields = {
@@ -217,6 +311,10 @@ def _validate_candidate(
         "pcc_mode": model.get("PCC_MODE"),
         "alignment_temperature": model.get("PCC_SOFTMIN_TAU"),
     }
+    if expected_protocol_signature is not None:
+        expected_fields["cross_camera_positive_lambda"] = model.get(
+            "CROSS_CAMERA_POSITIVE_LAMBDA"
+        )
     mismatched = {
         key: (manifest.get(key), value)
         for key, value in expected_fields.items()
@@ -250,6 +348,41 @@ def _validate_candidate(
         "smoke training log",
     )
     _validate_checkpoint_evidence(run_dir, status)
+    if expected_dataset_manifest is not None:
+        dataset = _read_json(run_dir / "dataset_manifest.json")
+        expected_dataset_sha = expected_dataset_manifest.get(
+            "dataset_manifest_sha256"
+        )
+        _require(
+            dataset.get("dataset_manifest_sha256") == expected_dataset_sha,
+            "smoke dataset manifest signature differs",
+        )
+        _require(
+            manifest.get("dataset_manifest_sha256") == expected_dataset_sha,
+            "smoke manifest dataset signature differs",
+        )
+        for field in ("dataset", "sampler", "batch_size", "num_instance"):
+            _require(
+                dataset.get(field) == expected_dataset_manifest.get(field),
+                "smoke dataset/protocol {} differs".format(field),
+            )
+        _validate_artifact_manifest(run_dir, manifest)
+        environment = _read_json(run_dir / "environment.json")
+        _require(environment.get("gpus"), "smoke GPU evidence is missing")
+        _require(
+            environment.get("git_branch") == manifest.get("branch")
+            and environment.get("git_commit") == manifest.get("commit_id"),
+            "smoke environment Git evidence differs",
+        )
+        reproducibility = _read_json(run_dir / "reproducibility.json")
+        _require(
+            reproducibility.get("status") == "complete"
+            and reproducibility.get("applied_seed")
+            == formal_configuration.get("SEED")
+            and reproducibility.get("cudnn_deterministic") is True
+            and reproducibility.get("cudnn_benchmark") is False,
+            "smoke reproducibility/seed evidence is incomplete",
+        )
 
     smoke_commit = manifest.get("commit_id", "")
     _require(len(smoke_commit) == 40, "smoke commit_id is not a full SHA")
@@ -274,13 +407,24 @@ def _validate_candidate(
         "config_source_sha256": formal_source_sha,
         "selected_epoch": 1,
         "feature_reference_commit": manifest.get("feature_reference_commit"),
+        "protocol_signature_sha256": manifest.get(
+            "protocol_signature_sha256"
+        ),
+        "implementation_signature_sha256": manifest.get(
+            "implementation_signature_sha256"
+        ),
+        "dataset_manifest_sha256": manifest.get("dataset_manifest_sha256"),
     }
 
 
 def validate_formal_smoke_gate(
         repo_root, records_root, formal_config_path, formal_configuration,
         current_commit, expected_branch, expected_experiment_id,
-        expected_experiment_family, feature_compatibility):
+        expected_experiment_family, feature_compatibility,
+        expected_parent_branch=None, expected_parent_commit=None,
+        expected_merge_base=None, expected_protocol_signature=None,
+        expected_implementation_signature=None,
+        expected_dataset_manifest=None):
     """Return matching smoke evidence or reject the formal run fail-closed."""
     repo_root = Path(repo_root)
     records_root = Path(records_root)
@@ -309,6 +453,14 @@ def validate_formal_smoke_gate(
                 repo_root, run_dir, formal_config_path, formal_configuration,
                 current_commit, expected_branch, expected_experiment_id,
                 expected_experiment_family, feature_compatibility,
+                expected_parent_branch=expected_parent_branch,
+                expected_parent_commit=expected_parent_commit,
+                expected_merge_base=expected_merge_base,
+                expected_protocol_signature=expected_protocol_signature,
+                expected_implementation_signature=(
+                    expected_implementation_signature
+                ),
+                expected_dataset_manifest=expected_dataset_manifest,
             )
         except (SmokeGateError, OSError, ValueError, subprocess.SubprocessError) as error:
             failures.append("{}: {}".format(run_dir.name, error))

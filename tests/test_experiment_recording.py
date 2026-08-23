@@ -359,7 +359,13 @@ class ExperimentRecordingTest(unittest.TestCase):
             )
 
             metadata = git_metadata(repo)
-            self.assertEqual(set(metadata), {"commit", "branch", "dirty"})
+            self.assertEqual(set(metadata), {
+                "commit", "branch", "dirty", "status_porcelain", "tree",
+                "has_upstream", "upstream",
+            })
+            self.assertEqual(metadata["status_porcelain"], [])
+            self.assertEqual(len(metadata["tree"]), 40)
+            self.assertFalse(metadata["has_upstream"])
             self.assertRegex(metadata["commit"], r"^[0-9a-f]{40}$")
             self.assertEqual(metadata["branch"], "metadata-test")
             self.assertFalse(metadata["dirty"])

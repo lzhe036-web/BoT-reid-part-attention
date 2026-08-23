@@ -44,6 +44,9 @@ AUTO_RUNS_START = "<!-- AUTO-EXPERIMENT-RUNS:START -->"
 AUTO_RUNS_END = "<!-- AUTO-EXPERIMENT-RUNS:END -->"
 AUTO_CHECKPOINTS_START = "<!-- AUTO-CHECKPOINT-EVIDENCE:START -->"
 AUTO_CHECKPOINTS_END = "<!-- AUTO-CHECKPOINT-EVIDENCE:END -->"
+SOFT_LAMBDA_SWEEP_FAMILY = (
+    "c2l03_soft_min_alignment_lambda_sweep_tau0p2"
+)
 
 
 class EvidenceError(RuntimeError):
@@ -130,6 +133,13 @@ ALIGNMENT_FIELDS = (
     "soft_alignment_loss", "mean_soft_path_cost", "best_epoch",
     "rank1", "map", "runtime", "seed", "commit",
 )
+SOFT_ALIGNMENT_LAMBDA_FIELDS = (
+    "schema_version", "run_id", "experiment_id", "run_kind", "status",
+    "alignment_mode", "alignment_temperature", "pcc_lambda",
+    "alignment_lambda", "parts", "seed", "rank1", "rank5", "rank10",
+    "map", "best_epoch", "runtime", "checkpoint", "checkpoint_sha256",
+    "commit", "output_dir",
+)
 RUN_FIELDS = (
     "schema_version", "run_id", "experiment_id", "experiment_family",
     "run_kind", "method", "method_family", "method_variant", "dataset",
@@ -172,7 +182,10 @@ TABLE_SCHEMAS = {
     "anchor_coverage": ANCHOR_FIELDS,
     "pcc_ablation": PCC_FIELDS,
     "alignment_ablation": ALIGNMENT_FIELDS,
+    "soft_alignment_lambda_sensitivity": SOFT_ALIGNMENT_LAMBDA_FIELDS,
 }
+
+PURE_EVIDENCE_PATHS = ("EXPERIMENTS.md", "experiment_records/")
 
 
 def utc_now():
@@ -218,6 +231,45 @@ def sha256_file(path):
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def config_protocol_signature(configuration):
+    """Hash the semantic experiment protocol, excluding only OUTPUT_DIR."""
+    payload = json.loads(json.dumps(configuration))
+    payload.pop("OUTPUT_DIR", None)
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def git_implementation_signature(repo_root, revision="HEAD"):
+    """Hash the tracked non-evidence tree for smoke/formal equivalence."""
+    try:
+        output = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "ls-tree", "-r", "--full-tree",
+                str(revision),
+            ],
+            stderr=subprocess.STDOUT,
+        ).decode("utf-8", errors="replace")
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceError(
+            "Cannot compute implementation signature: {}".format(error)
+        )
+    retained = []
+    for line in output.splitlines():
+        if "\t" not in line:
+            raise EvidenceError("Cannot parse Git tree entry")
+        _, path = line.split("\t", 1)
+        path = normalized_path(path)
+        if path == PURE_EVIDENCE_PATHS[0] or path.startswith(
+                PURE_EVIDENCE_PATHS[1]):
+            continue
+        retained.append(line)
+    return hashlib.sha256(
+        ("\n".join(retained) + "\n").encode("utf-8")
+    ).hexdigest()
 
 
 def normalized_path(path):
@@ -439,15 +491,33 @@ def _git_status_entries(repo_root):
 def git_metadata(repo_root):
     commit = _git_output(repo_root, ["rev-parse", "HEAD"])
     branch = _git_output(repo_root, ["branch", "--show-current"])
-    dirty = bool(_git_status_entries(repo_root))
+    status_entries = _git_status_entries(repo_root)
+    dirty = bool(status_entries)
     if not re.match(r"^[0-9a-fA-F]{40}$", commit):
         raise EvidenceError("Git commit is not a full SHA: {}".format(commit))
     if not branch:
         raise EvidenceError("Detached HEAD is not allowed for formal training")
+    upstream_process = subprocess.run(
+        [
+            "git", "-C", str(repo_root), "rev-parse", "--abbrev-ref",
+            "--symbolic-full-name", "@{upstream}",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    upstream = (
+        upstream_process.stdout.strip()
+        if upstream_process.returncode == 0 else NOT_RECORDED
+    )
     return {
         "commit": commit.lower(),
         "branch": branch,
         "dirty": dirty,
+        "status_porcelain": [
+            "{} {}".format(status, path) for status, path in status_entries
+        ],
+        "tree": _git_output(repo_root, ["rev-parse", "HEAD^{tree}"]).lower(),
+        "has_upstream": upstream != NOT_RECORDED,
+        "upstream": upstream,
     }
 
 
@@ -675,7 +745,10 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
                    baseline_commit=NOT_RECORDED, run_kind="formal",
                    parent_branch=NOT_RECORDED,
                    parent_commit=NOT_RECORDED,
-                   feature_compatibility=None, experiments_path=None):
+                   feature_compatibility=None, experiments_path=None,
+                   protocol_signature_sha256=None,
+                   implementation_signature_sha256=None,
+                   dataset_manifest=None):
     if run_kind not in ("formal", "smoke"):
         raise EvidenceError("run_kind must be 'formal' or 'smoke'")
     records_root = ensure_record_layout(records_root)
@@ -721,11 +794,6 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
                     feature_compatibility.get("mismatched_components", [])
                 )
             )
-        if parent_commit not in (None, "", NOT_RECORDED):
-            if str(feature_reference_commit).lower() != str(parent_commit).lower():
-                raise EvidenceError(
-                    "Feature reference commit differs from the recorded parent"
-                )
         atomic_write_json(feature_path, feature_compatibility)
         feature_path_value = normalized_path(feature_path.resolve())
         feature_size = feature_path.stat().st_size
@@ -748,14 +816,34 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "dataset": identity["dataset"],
         "branch": git_info["branch"],
         "commit_id": git_info["commit"],
+        "commit_tree": git_info.get("tree", NOT_RECORDED),
+        "git_preflight_clean": not git_info.get("dirty", True),
+        "git_status_preflight": list(git_info.get("status_porcelain", [])),
+        "has_upstream": bool(git_info.get("has_upstream", False)),
+        "upstream": git_info.get("upstream", NOT_RECORDED),
         "parent_branch": parent_branch,
         "parent_commit": parent_commit,
+        "merge_base": git_info.get("merge_base", NOT_RECORDED),
         "expected_branch": expected_branch,
         "config_file": normalized_path(Path(config_file).resolve()),
         "config_source": "config_source.yml",
+        "config_source_size_bytes": source_copy.stat().st_size,
         "config_source_sha256": sha256_file(source_copy),
         "config_resolved": "config_resolved.yml",
+        "config_resolved_size_bytes": resolved_copy.stat().st_size,
         "config_resolved_sha256": sha256_file(resolved_copy),
+        "protocol_signature_sha256": (
+            protocol_signature_sha256
+            or config_protocol_signature(configuration)
+        ),
+        "implementation_signature_sha256": (
+            implementation_signature_sha256 or NOT_RECORDED
+        ),
+        "dataset_manifest_sha256": (
+            (dataset_manifest or {}).get(
+                "dataset_manifest_sha256", NOT_RECORDED
+            )
+        ),
         "seed": seed,
         "lambda": identity["lambda"],
         "cross_camera_positive_lambda": identity["cross_camera_positive_lambda"],
@@ -2106,7 +2194,24 @@ def _lambda_table_eligible(manifest):
     identifier = str(manifest["experiment_id"]).lower()
     return (
         manifest["lambda"] != NOT_RECORDED
+        and manifest.get("experiment_family") != SOFT_LAMBDA_SWEEP_FAMILY
         and ("lambda" in family or re.search(r"(?:^|-)l\d+", identifier))
+    )
+
+
+def _soft_alignment_lambda_table_eligible(manifest):
+    try:
+        tau = float(manifest.get("alignment_temperature"))
+        alignment_lambda = float(manifest.get("pcc_lambda"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        manifest.get("experiment_family") == SOFT_LAMBDA_SWEEP_FAMILY
+        and manifest.get("run_kind") == "formal"
+        and manifest.get("status", "success") == "success"
+        and manifest.get("alignment_mode") == "soft_min"
+        and tau == 0.2
+        and alignment_lambda in (0.05, 0.1, 0.3)
     )
 
 
@@ -2155,6 +2260,12 @@ def _replace_generated_section(content, start, end, generated):
 
 
 def _authoritative_run_rows(records_root):
+    """Read the machine registry, recovering only rows absent from it.
+
+    Persisted registry rows must not be re-derived on another host: doing so
+    would rewrite authoritative paths, sizes, and hashes using checkout-local
+    path and newline semantics.
+    """
     records_root = Path(records_root)
     registry = {
         row.get("run_id"): row for row in _read_csv(records_root / "runs.csv")
@@ -2167,9 +2278,11 @@ def _authoritative_run_rows(records_root):
             continue
         manifest = read_json(manifest_path)
         status = read_json(status_path)
-        registry[manifest.get("run_id", run_dir.name)] = _run_row_from_manifest(
-            run_dir, manifest, status
-        )
+        run_id = manifest.get("run_id", run_dir.name)
+        if run_id not in registry:
+            registry[run_id] = _run_row_from_manifest(
+                run_dir, manifest, status
+            )
     return sorted(
         registry.values(),
         key=lambda row: (row.get("start_time", ""), row.get("run_id", "")),
@@ -2547,6 +2660,11 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             raise EvidenceError("Source config hash changed")
         if sha256_file(resolved_copy) != manifest["config_resolved_sha256"]:
             raise EvidenceError("Resolved config hash changed")
+        for path, field, label in (
+                (source_copy, "config_source_size_bytes", "Source config"),
+                (resolved_copy, "config_resolved_size_bytes", "Resolved config")):
+            if field in manifest and int(manifest[field]) != path.stat().st_size:
+                raise EvidenceError("{} size changed".format(label))
         output_dir = Path(manifest["output_dir"])
         reproducibility_source = output_dir / "reproducibility.json"
         if reproducibility_source.is_file():
@@ -2629,12 +2747,15 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                         "Soft alignment {} is missing".format(parent_field)
                     )
             if verify_git:
-                validate_parent_lineage(
+                lineage = validate_parent_lineage(
                     repo_root,
                     manifest["parent_branch"],
                     manifest["parent_commit"],
                     child_commit=manifest["commit_id"],
                 )
+                if manifest.get("merge_base", NOT_RECORDED) not in (
+                        NOT_RECORDED, lineage["merge_base"]):
+                    raise EvidenceError("Recorded merge-base differs")
             if int(manifest.get("schema_version", 1)) >= 4:
                 feature_path = run_dir / "feature_compatibility.json"
                 if not feature_path.is_file():
@@ -2665,9 +2786,9 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                         )
                     )
                 if feature["feature_reference_commit"].lower() != str(
-                        manifest["parent_commit"]).lower():
+                        manifest.get("feature_reference_commit", "")).lower():
                     raise EvidenceError(
-                        "Feature reference is not the fixed Hard parent commit"
+                        "Feature reference commit evidence differs"
                     )
                 if feature["feature_compatibility_status"] != "compatible":
                     raise EvidenceError("Shared feature compatibility failed")
@@ -2763,6 +2884,55 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         dataset_manifest = read_json(run_dir / "dataset_manifest.json")
         if not dataset_manifest.get("dataset_manifest_sha256"):
             raise EvidenceError("Dataset manifest hash is missing")
+        if manifest.get("dataset_manifest_sha256", NOT_RECORDED) not in (
+                NOT_RECORDED, dataset_manifest["dataset_manifest_sha256"]):
+            raise EvidenceError("Dataset manifest signature differs")
+        if manifest.get("experiment_family") == SOFT_LAMBDA_SWEEP_FAMILY:
+            required_strict = (
+                "protocol_signature_sha256",
+                "implementation_signature_sha256", "merge_base",
+                "commit_tree", "has_upstream", "upstream",
+                "config_source_size_bytes", "config_resolved_size_bytes",
+                "dataset_manifest_sha256",
+            )
+            missing_strict = [
+                field for field in required_strict
+                if field not in manifest or manifest[field] in (
+                    None, "", NOT_RECORDED, MISSING_EVIDENCE
+                ) and field not in ("upstream",)
+            ]
+            if missing_strict:
+                raise EvidenceError(
+                    "Lambda sweep manifest lacks {}".format(missing_strict)
+                )
+            if manifest.get("git_preflight_clean") is not True:
+                raise EvidenceError("Lambda sweep preflight was not clean")
+            if manifest.get("git_status_preflight") != []:
+                raise EvidenceError("Lambda sweep preflight status is not empty")
+            if len(str(manifest["protocol_signature_sha256"])) != 64:
+                raise EvidenceError("Protocol signature is invalid")
+            if len(str(manifest["implementation_signature_sha256"])) != 64:
+                raise EvidenceError("Implementation signature is invalid")
+            protocol_configuration = json.loads(json.dumps(resolved_cfg))
+            if manifest["run_kind"] == "smoke":
+                for key in (
+                        "MAX_EPOCHS", "CHECKPOINT_PERIOD", "EVAL_PERIOD"):
+                    protocol_configuration["SOLVER"][key] = source_cfg[
+                        "SOLVER"
+                    ][key]
+            if config_protocol_signature(protocol_configuration) != manifest[
+                    "protocol_signature_sha256"]:
+                raise EvidenceError("Protocol signature/config conflict")
+            if git_implementation_signature(
+                    repo_root, manifest["commit_id"]
+            ) != manifest["implementation_signature_sha256"]:
+                raise EvidenceError("Implementation signature/Git conflict")
+            if _git_output(
+                    repo_root, ["rev-parse", "{}^{{tree}}".format(
+                        manifest["commit_id"]
+                    )]
+            ).lower() != manifest["commit_tree"]:
+                raise EvidenceError("Commit tree evidence differs")
         if int(manifest.get("schema_version", 1)) >= 4:
             console_path = run_dir / "console.log"
             if not console_path.is_file() or console_path.stat().st_size <= 0:
@@ -3165,6 +3335,38 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 upsert_csv(
                     tables_dir / "alignment_ablation.csv", ALIGNMENT_FIELDS,
                     alignment_row,
+                )
+            if _soft_alignment_lambda_table_eligible(manifest):
+                upsert_csv(
+                    tables_dir / "soft_alignment_lambda_sensitivity.csv",
+                    SOFT_ALIGNMENT_LAMBDA_FIELDS,
+                    {
+                        "schema_version": common["schema_version"],
+                        "run_id": common["run_id"],
+                        "experiment_id": common["experiment_id"],
+                        "run_kind": common["run_kind"],
+                        "status": common["status"],
+                        "alignment_mode": common["alignment_mode"],
+                        "alignment_temperature": common[
+                            "alignment_temperature"
+                        ],
+                        "pcc_lambda": common["pcc_lambda"],
+                        "alignment_lambda": common["pcc_lambda"],
+                        "parts": common["pcc_parts"],
+                        "seed": common["seed"],
+                        "rank1": common["rank1"],
+                        "rank5": common["rank5"],
+                        "rank10": common["rank10"],
+                        "map": common["map"],
+                        "best_epoch": common["best_epoch"],
+                        "runtime": common["runtime_seconds"],
+                        "checkpoint": common["checkpoint"],
+                        "checkpoint_sha256": common[
+                            "checkpoint_sha256"
+                        ],
+                        "commit": common["commit"],
+                        "output_dir": common["output_dir"],
+                    },
                 )
             for table_name in TABLE_SCHEMAS:
                 csv_to_markdown(

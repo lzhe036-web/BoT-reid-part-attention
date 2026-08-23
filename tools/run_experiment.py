@@ -6,11 +6,14 @@ from __future__ import absolute_import
 
 import argparse
 import codecs
+import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,10 +30,12 @@ from utils.experiment_recording import (
     atomic_write_json,
     build_dataset_manifest,
     collect_environment,
+    config_protocol_signature,
     experiment_identity,
     finalize_run,
     generate_run_id,
     initialize_run,
+    git_implementation_signature,
     record_console_log_evidence,
     record_run_failure,
     record_training_exit,
@@ -97,6 +102,19 @@ def _load_config(config_path, opts=None):
     local_cfg.merge_from_list(opts or [])
     local_cfg.freeze()
     return local_cfg
+
+
+def _effective_run_opts(run_kind, source_output_dir, opts=None):
+    """Derive the standard one-epoch smoke without shell hyperparameter overrides."""
+    overrides = list(opts or [])
+    if run_kind != "smoke" or overrides:
+        return overrides
+    return [
+        "SOLVER.MAX_EPOCHS", "1",
+        "SOLVER.CHECKPOINT_PERIOD", "1",
+        "SOLVER.EVAL_PERIOD", "1",
+        "OUTPUT_DIR", "{}_smoke".format(str(source_output_dir).rstrip("/")),
+    ]
 
 
 def _validate_run_overrides(run_kind, opts):
@@ -196,6 +214,55 @@ class TrainingInterrupted(KeyboardInterrupt):
     def __init__(self, message, returncode=None):
         super(TrainingInterrupted, self).__init__(message)
         self.returncode = returncode
+
+
+@contextlib.contextmanager
+def _formal_gpu_lock(run_kind):
+    """Reject concurrent formal runs targeting the same visible GPU set."""
+    if run_kind != "formal":
+        yield NOT_RECORDED
+        return
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
+    safe_visible = re.sub(r"[^A-Za-z0-9_.-]+", "_", visible) or "all"
+    lock_path = Path(tempfile.gettempdir()) / (
+        "bot-reid-formal-gpu-{}.lock".format(safe_visible)
+    )
+    handle = lock_path.open("a+")
+    acquired = False
+    try:
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write("0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(
+                    handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+        except (IOError, OSError):
+            raise RuntimeError(
+                "Another formal experiment already holds the GPU lock: {}"
+                .format(lock_path)
+            )
+        acquired = True
+        yield str(lock_path)
+    finally:
+        try:
+            if acquired:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def _write_console_chunk(decoder, chunk, console_handle, terminal_stream,
@@ -380,7 +447,13 @@ def run(args):
     git_info = validate_git_preflight(
         REPO_ROOT, args.expected_branch, expected_commit=args.expected_commit
     )
-    local_cfg = _load_config(config_path, args.opts)
+    source_local_cfg = _load_config(config_path)
+    source_configuration = _plain_config(source_local_cfg)
+    effective_opts = _effective_run_opts(
+        args.run_kind, source_local_cfg.OUTPUT_DIR, args.opts
+    )
+    _validate_run_overrides(args.run_kind, effective_opts)
+    local_cfg = _load_config(config_path, effective_opts)
     output_dir = _require_new_output_dir(local_cfg.OUTPUT_DIR)
     configuration = _plain_config(local_cfg)
     _validate_resolved_run_config(
@@ -392,10 +465,11 @@ def run(args):
             "Parent branch and parent commit must be recorded together"
         )
     if args.parent_branch != NOT_RECORDED:
-        validate_parent_lineage(
+        lineage = validate_parent_lineage(
             REPO_ROOT, args.parent_branch, args.parent_commit,
             child_commit=git_info["commit"],
         )
+        git_info["merge_base"] = lineage["merge_base"]
     feature_compatibility = None
     alignment_mode = configuration.get("MODEL", {}).get("PCC_MODE")
     if (alignment_mode == "soft_min"
@@ -406,12 +480,6 @@ def run(args):
             .format(FIXED_HARD_FEATURE_REFERENCE_COMMIT)
         )
     if args.feature_reference_commit != NOT_RECORDED:
-        if args.parent_commit != NOT_RECORDED and (
-                args.feature_reference_commit.lower()
-                != args.parent_commit.lower()):
-            raise RuntimeError(
-                "Feature reference must be the exact recorded Hard parent commit"
-            )
         reference_configuration = _load_revision_config(
             REPO_ROOT, args.feature_reference_commit,
             args.feature_reference_config,
@@ -429,6 +497,18 @@ def run(args):
     source_seed = _load_explicit_source_seed(config_path)
     resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))
     validate_seed_evidence_chain(source_seed, resolved_seed, resolved_seed)
+    protocol_signature_sha256 = config_protocol_signature(
+        source_configuration
+    )
+    implementation_signature_sha256 = git_implementation_signature(
+        REPO_ROOT, git_info["commit"]
+    )
+    dataset = init_dataset(
+        local_cfg.DATASETS.NAMES, root=local_cfg.DATASETS.ROOT_DIR
+    )
+    dataset_manifest = build_dataset_manifest(
+        dataset, configuration, local_cfg.DATASETS.ROOT_DIR
+    )
     smoke_gate_evidence = None
     if args.required_smoke_experiment_id and args.run_kind != "formal":
         raise RuntimeError(
@@ -445,6 +525,14 @@ def run(args):
             expected_experiment_id=args.required_smoke_experiment_id,
             expected_experiment_family=args.experiment_family,
             feature_compatibility=feature_compatibility,
+            expected_parent_branch=args.parent_branch,
+            expected_parent_commit=args.parent_commit,
+            expected_merge_base=git_info.get("merge_base", NOT_RECORDED),
+            expected_protocol_signature=protocol_signature_sha256,
+            expected_implementation_signature=(
+                implementation_signature_sha256
+            ),
+            expected_dataset_manifest=dataset_manifest,
         )
     training_env = _build_training_environment(resolved_seed)
     run_id = args.run_id or generate_run_id(
@@ -470,6 +558,9 @@ def run(args):
         parent_commit=args.parent_commit,
         feature_compatibility=feature_compatibility,
         experiments_path=REPO_ROOT / "EXPERIMENTS.md",
+        protocol_signature_sha256=protocol_signature_sha256,
+        implementation_signature_sha256=implementation_signature_sha256,
+        dataset_manifest=dataset_manifest,
     )
     if smoke_gate_evidence is not None:
         manifest["smoke_gate"] = smoke_gate_evidence
@@ -483,12 +574,6 @@ def run(args):
             expected_commit=git_info["commit"],
         )
         atomic_write_json(run_dir / "environment.json", environment)
-        dataset = init_dataset(
-            local_cfg.DATASETS.NAMES, root=local_cfg.DATASETS.ROOT_DIR
-        )
-        dataset_manifest = build_dataset_manifest(
-            dataset, configuration, local_cfg.DATASETS.ROOT_DIR
-        )
         atomic_write_json(run_dir / "dataset_manifest.json", dataset_manifest)
         model_manifest = _model_manifest(
                 configuration,
@@ -518,7 +603,7 @@ def run(args):
             "tools/train.py",
             "--config_file",
             str(config_path),
-        ] + list(args.opts or [])
+        ] + list(effective_opts)
         started = time.monotonic()
         completed = _launch_training_subprocess(
             train_command, training_env, run_dir / "console.log"
@@ -573,7 +658,8 @@ def run(args):
 def main(argv=None):
     args = parse_args(argv)
     try:
-        return run(args)
+        with _formal_gpu_lock(args.run_kind):
+            return run(args)
     except BaseException as error:
         print("Experiment failed closed: {}".format(error), file=sys.stderr)
         return 1

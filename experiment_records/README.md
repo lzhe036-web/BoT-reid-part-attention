@@ -12,13 +12,19 @@ This directory is maintained by `tools/run_experiment.py` and
   weights separately while retaining fixed-index-compatible fields.
 - `tables/alignment_ablation.csv` compares formal fixed-index, hard, and
   Soft-Min alignment runs. Its Markdown view is always generated from CSV.
+- `tables/soft_alignment_lambda_sensitivity.csv` is the strict formal-only
+  view for the Soft-Min `tau=0.2`, `MODEL.PCC_LAMBDA` matrix
+  `{0.05, 0.1, 0.3}`.  It records both `pcc_lambda` and the equivalent
+  `alignment_lambda`; the legacy generic `lambda` remains reserved for the
+  cross-camera-positive coefficient.
 
-Registry schema version 3 adds Soft-Min cost/temperature evidence, parent Hard
-lineage, future-compatible gating temperature fields, and a canonical
-multigranular feature signature with SHA256. Existing version-1/version-2
-CSV/TSV rows are migrated losslessly: historical fields and rows are retained,
-legacy runs default to `run_kind=formal`, and unavailable evidence remains
-explicitly marked as `not_recorded` or `not_applicable` by semantics.
+Registry schema version 4 retains the version-3 Soft-Min and multigranular
+fields and adds hashed console/config/feature/artifact evidence. Existing
+version-1/version-2/version-3 CSV/TSV rows are migrated losslessly: historical
+fields and rows are retained, legacy runs default to `run_kind=formal`, and
+unavailable evidence remains explicitly marked as `not_recorded` or
+`not_applicable` by semantics. The lambda-sensitivity view reuses schema 4 and
+does not rewrite any existing registry schema or historical row.
 
 Failed or incomplete runs remain under `runs/` and are indexed with their
 available hashes in `runs.csv` and `evidence_manifest.tsv`, but they are never
