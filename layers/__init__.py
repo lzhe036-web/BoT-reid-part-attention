@@ -21,6 +21,33 @@ from .part_correspondence_consistency import (
 )
 
 
+def validate_pcc_warmup_epochs(value):
+    if isinstance(value, bool):
+        raise ValueError("PCC_WARMUP_EPOCHS must be a non-negative integer")
+    try:
+        integer = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("PCC_WARMUP_EPOCHS must be a non-negative integer")
+    if integer != value or integer < 0:
+        raise ValueError("PCC_WARMUP_EPOCHS must be a non-negative integer")
+    return integer
+
+
+def effective_pcc_lambda(configured_lambda, warmup_epochs, epoch):
+    """Return the fixed PCC coefficient after an epoch-count gate."""
+    warmup_epochs = validate_pcc_warmup_epochs(warmup_epochs)
+    if isinstance(epoch, bool):
+        raise ValueError("Training epoch must be a positive integer")
+    try:
+        integer_epoch = int(epoch)
+    except (TypeError, ValueError):
+        raise ValueError("Training epoch must be a positive integer")
+    if integer_epoch != epoch or integer_epoch <= 0:
+        raise ValueError("Training epoch must be a positive integer")
+    configured_lambda = float(configured_lambda)
+    return 0.0 if integer_epoch <= warmup_epochs else configured_lambda
+
+
 def make_loss(cfg, num_classes):    # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
     if cfg.MODEL.METRIC_LOSS_TYPE == 'triplet':
@@ -36,6 +63,10 @@ def make_loss(cfg, num_classes):    # modified by gu
     camera_triplet = None
     cross_camera_positive = None
     pcc_enabled = cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY
+    pcc_warmup_epochs = validate_pcc_warmup_epochs(
+        cfg.MODEL.PCC_WARMUP_EPOCHS
+    )
+    pcc_epoch_state = {"epoch": 1}
     if pcc_enabled and cfg.MODEL.PCC_PARTS != 6:
         raise ValueError("Part alignment requires PCC_PARTS=6")
     if pcc_enabled and cfg.MODEL.PCC_MODE not in SUPPORTED_ALIGNMENT_MODES:
@@ -140,7 +171,17 @@ def make_loss(cfg, num_classes):    # modified by gu
             ]
             soft_alignment_loss = alignment['soft_alignment_loss']
             mean_soft_path_cost = alignment['mean_soft_path_cost']
-            total_loss = total_loss + cfg.MODEL.PCC_LAMBDA * loss_pcc
+            pcc_effective_lambda = effective_pcc_lambda(
+                cfg.MODEL.PCC_LAMBDA,
+                pcc_warmup_epochs,
+                pcc_epoch_state["epoch"],
+            )
+            # Do not even attach the local-alignment branch to total_loss while
+            # gated.  The raw value is still computed for audit-only metrics.
+            if pcc_effective_lambda > 0.0:
+                total_loss = total_loss + pcc_effective_lambda * loss_pcc
+        else:
+            pcc_effective_lambda = 0.0
 
         return {
             'loss_total': total_loss,
@@ -161,6 +202,13 @@ def make_loss(cfg, num_classes):    # modified by gu
             'alignment_temperature': (
                 cfg.MODEL.PCC_SOFTMIN_TAU
                 if cfg.MODEL.PCC_MODE == 'soft_min' else None
+            ),
+            'pcc_configured_lambda': float(cfg.MODEL.PCC_LAMBDA),
+            'pcc_effective_lambda': pcc_effective_lambda,
+            'pcc_warmup_epochs': pcc_warmup_epochs,
+            'pcc_warmup_active': (
+                bool(pcc_enabled)
+                and pcc_epoch_state["epoch"] <= pcc_warmup_epochs
             ),
         }
 
@@ -196,6 +244,23 @@ def make_loss(cfg, num_classes):    # modified by gu
     else:
         print('expected sampler should be softmax, triplet or softmax_triplet, '
               'but got {}'.format(cfg.DATALOADER.SAMPLER))
+
+    def set_epoch(epoch):
+        # effective_pcc_lambda performs the strict epoch validation.
+        effective_lambda = effective_pcc_lambda(
+            cfg.MODEL.PCC_LAMBDA, pcc_warmup_epochs, epoch
+        )
+        pcc_epoch_state["epoch"] = int(epoch)
+        loss_func.pcc_current_epoch = int(epoch)
+        loss_func.pcc_effective_lambda = effective_lambda
+
+    loss_func.set_epoch = set_epoch
+    loss_func.pcc_warmup_epochs = pcc_warmup_epochs
+    loss_func.pcc_configured_lambda = float(cfg.MODEL.PCC_LAMBDA)
+    loss_func.pcc_current_epoch = 1
+    loss_func.pcc_effective_lambda = effective_pcc_lambda(
+        cfg.MODEL.PCC_LAMBDA, pcc_warmup_epochs, 1
+    )
     return loss_func
 
 

@@ -216,6 +216,12 @@ class LambdaSweepProtocolTest(unittest.TestCase):
                 self.assertEqual(lock, "not_recorded")
 
     def test_parent_algorithms_model_descriptor_data_and_eval_are_unchanged(self):
+        current_branch = subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            cwd=str(REPO_ROOT), text=True,
+        ).strip()
+        if current_branch != BRANCH:
+            self.skipTest("lambda-sweep protected-tree assertion is branch-specific")
         protected = (
             "layers", "modeling", "data", "engine", "solver",
             "tools/train.py", "tools/test.py",
@@ -512,7 +518,7 @@ class StrictLambdaSmokeGateTest(unittest.TestCase):
 
 class LambdaTableSchemaTest(unittest.TestCase):
     def test_view_schema_is_explicit_and_uses_pcc_lambda(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(SCHEMA_VERSION, 5)
         self.assertEqual(
             TABLE_SCHEMAS["soft_alignment_lambda_sensitivity"],
             SOFT_ALIGNMENT_LAMBDA_FIELDS,

@@ -361,19 +361,30 @@ class ExperimentRecordingTest(unittest.TestCase):
             metadata = git_metadata(repo)
             self.assertEqual(set(metadata), {
                 "commit", "branch", "dirty", "status_porcelain", "tree",
-                "has_upstream", "upstream",
+                "has_upstream", "upstream", "status_porcelain_raw",
+                "staged_diff_empty", "unstaged_diff_empty",
+                "operations_in_progress", "preflight_checked_at_utc",
+                "commit_time", "commit_parents",
             })
             self.assertEqual(metadata["status_porcelain"], [])
+            self.assertEqual(metadata["status_porcelain_raw"], "")
+            self.assertTrue(metadata["staged_diff_empty"])
+            self.assertTrue(metadata["unstaged_diff_empty"])
+            self.assertEqual(metadata["operations_in_progress"], [])
+            self.assertEqual(metadata["commit_parents"], [])
             self.assertEqual(len(metadata["tree"]), 40)
             self.assertFalse(metadata["has_upstream"])
             self.assertRegex(metadata["commit"], r"^[0-9a-f]{40}$")
             self.assertEqual(metadata["branch"], "metadata-test")
             self.assertFalse(metadata["dirty"])
+            validated = validate_git_preflight(
+                repo, "metadata-test", metadata["commit"]
+            )
             self.assertEqual(
-                validate_git_preflight(
-                    repo, "metadata-test", metadata["commit"]
-                ),
-                metadata,
+                {key: value for key, value in validated.items()
+                 if key != "preflight_checked_at_utc"},
+                {key: value for key, value in metadata.items()
+                 if key != "preflight_checked_at_utc"},
             )
 
             tracked.write_text("dirty\n", encoding="utf-8")

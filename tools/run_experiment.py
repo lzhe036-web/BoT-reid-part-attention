@@ -39,6 +39,8 @@ from utils.experiment_recording import (
     record_console_log_evidence,
     record_run_failure,
     record_training_exit,
+    sha256_bytes,
+    sha256_file,
     validate_git_preflight,
     validate_parent_lineage,
 )
@@ -54,6 +56,7 @@ from utils.reproducibility import (
     RUNNER_SEED_ENV,
     validate_seed,
     validate_seed_evidence_chain,
+    resolved_config_text,
 )
 from utils.smoke_gate import validate_formal_smoke_gate
 
@@ -82,6 +85,14 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--feature-reference-config", default=FEATURE_REFERENCE_CONFIG
+    )
+    parser.add_argument(
+        "--reference-config",
+        help="Resolved-config comparison reference used by strict protocols",
+    )
+    parser.add_argument(
+        "--expected-config-difference", action="append", default=[],
+        help="Exact dotted leaf expected to differ from --reference-config",
     )
     parser.add_argument(
         "--records-root",
@@ -365,6 +376,58 @@ def _plain_config(local_cfg):
     return yaml.safe_load(resolved_config_text(local_cfg))
 
 
+def _changed_leaf_paths(left, right, prefix=""):
+    paths = set()
+    for key in set(left) | set(right):
+        path = "{}.{}".format(prefix, key) if prefix else str(key)
+        if key not in left or key not in right:
+            paths.add(path)
+        elif isinstance(left[key], dict) and isinstance(right[key], dict):
+            paths.update(_changed_leaf_paths(left[key], right[key], path))
+        elif left[key] != right[key]:
+            paths.add(path)
+    return paths
+
+
+def _build_config_comparison(reference_path, reference_cfg, candidate_path,
+                             candidate_cfg, expected_differences):
+    expected = list(expected_differences or [])
+    if len(expected) != len(set(expected)):
+        raise RuntimeError("Expected config differences contain duplicates")
+    reference_configuration = _plain_config(reference_cfg)
+    candidate_configuration = _plain_config(candidate_cfg)
+    observed = sorted(_changed_leaf_paths(
+        reference_configuration, candidate_configuration
+    ))
+    if set(observed) != set(expected):
+        raise RuntimeError(
+            "Resolved-config differences are not isolated: expected={} "
+            "observed={}".format(sorted(expected), observed)
+        )
+    reference_text = resolved_config_text(reference_cfg).encode("utf-8")
+    candidate_text = resolved_config_text(candidate_cfg).encode("utf-8")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "pass",
+        "reference_config_path": str(Path(reference_path).resolve()).replace(
+            "\\", "/"
+        ),
+        "reference_config_size_bytes": Path(reference_path).stat().st_size,
+        "reference_config_sha256": sha256_file(reference_path),
+        "reference_resolved_size_bytes": len(reference_text),
+        "reference_resolved_sha256": sha256_bytes(reference_text),
+        "candidate_config_path": str(Path(candidate_path).resolve()).replace(
+            "\\", "/"
+        ),
+        "candidate_config_size_bytes": Path(candidate_path).stat().st_size,
+        "candidate_config_sha256": sha256_file(candidate_path),
+        "candidate_resolved_size_bytes": len(candidate_text),
+        "candidate_resolved_sha256": sha256_bytes(candidate_text),
+        "expected_differences": sorted(expected),
+        "observed_differences": observed,
+    }
+
+
 def _require_new_output_dir(path):
     output = Path(path)
     if output.exists():
@@ -430,6 +493,7 @@ def _model_manifest(configuration, method=None,
             "gating_mode": identity["gating_mode"],
             "gating_temperature": identity["gating_temperature"],
             "lambda": identity["pcc_lambda"],
+            "warmup_epochs": identity["local_alignment_warmup_epochs"],
         },
         "cross_camera_positive_lambda": identity[
             "cross_camera_positive_lambda"
@@ -449,6 +513,19 @@ def run(args):
     )
     source_local_cfg = _load_config(config_path)
     source_configuration = _plain_config(source_local_cfg)
+    if bool(args.reference_config) != bool(args.expected_config_difference):
+        raise RuntimeError(
+            "--reference-config and --expected-config-difference must be "
+            "provided together"
+        )
+    config_comparison = None
+    if args.reference_config:
+        reference_path = Path(args.reference_config).resolve()
+        reference_cfg = _load_config(reference_path)
+        config_comparison = _build_config_comparison(
+            reference_path, reference_cfg, config_path, source_local_cfg,
+            args.expected_config_difference,
+        )
     effective_opts = _effective_run_opts(
         args.run_kind, source_local_cfg.OUTPUT_DIR, args.opts
     )
@@ -538,6 +615,12 @@ def run(args):
     run_id = args.run_id or generate_run_id(
         args.experiment_id, git_info["commit"], resolved_seed
     )
+    train_command = [
+        sys.executable,
+        "tools/train.py",
+        "--config_file",
+        str(config_path),
+    ] + list(effective_opts)
     run_dir, manifest = initialize_run(
         records_root=args.records_root,
         experiment_id=args.experiment_id,
@@ -562,6 +645,20 @@ def run(args):
         implementation_signature_sha256=implementation_signature_sha256,
         dataset_manifest=dataset_manifest,
     )
+    manifest["runner_command"] = list(sys.argv)
+    manifest["training_command"] = list(train_command)
+    if config_comparison is not None:
+        comparison_path = atomic_write_json(
+            run_dir / "config_comparison.json", config_comparison
+        )
+        manifest.update({
+            "config_comparison_path": str(comparison_path.resolve()).replace(
+                "\\", "/"
+            ),
+            "config_comparison_size_bytes": comparison_path.stat().st_size,
+            "config_comparison_sha256": sha256_file(comparison_path),
+        })
+    atomic_write_json(run_dir / "run_manifest.json", manifest)
     if smoke_gate_evidence is not None:
         manifest["smoke_gate"] = smoke_gate_evidence
         atomic_write_json(run_dir / "run_manifest.json", manifest)
@@ -598,12 +695,6 @@ def run(args):
             ),
         })
         atomic_write_json(run_dir / "model_manifest.json", model_manifest)
-        train_command = [
-            sys.executable,
-            "tools/train.py",
-            "--config_file",
-            str(config_path),
-        ] + list(effective_opts)
         started = time.monotonic()
         completed = _launch_training_subprocess(
             train_command, training_env, run_dir / "console.log"

@@ -34,7 +34,7 @@ from utils.multigranular_signature import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 NOT_RECORDED = "not_recorded"
 MISSING_EVIDENCE = "missing_evidence"
 NOT_APPLICABLE = "not_applicable"
@@ -47,6 +47,16 @@ AUTO_CHECKPOINTS_END = "<!-- AUTO-CHECKPOINT-EVIDENCE:END -->"
 SOFT_LAMBDA_SWEEP_FAMILY = (
     "c2l03_soft_min_alignment_lambda_sweep_tau0p2"
 )
+SOFT_WARMUP_FAMILY = (
+    "c2l03_soft_min_alignment_warmup20_tau0p2_lambda0p05"
+)
+SOFT_WARMUP_BASELINE_EXPERIMENT_ID = (
+    "C2-L03-SOFTMIN-T0P2-LP0P05-S42"
+)
+STRICT_EVIDENCE_FAMILIES = {
+    SOFT_LAMBDA_SWEEP_FAMILY,
+    SOFT_WARMUP_FAMILY,
+}
 
 
 class EvidenceError(RuntimeError):
@@ -58,7 +68,8 @@ MAIN_FIELDS = (
     "run_kind", "method", "method_family", "method_variant", "dataset",
     "branch", "commit", "parent_branch", "parent_commit", "seed", "lambda",
     "cross_camera_positive_lambda",
-    "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
+    "pcc_lambda", "local_alignment_warmup_epochs", "pcc_enabled",
+    "pcc_parts", "pcc_mode",
     "alignment_strategy", "alignment_mode", "alignment_temperature",
     "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
@@ -114,7 +125,8 @@ PCC_FIELDS = (
     "method_family", "method_variant", "pcc_enabled",
     "alignment_strategy", "alignment_temperature", "gating_mode",
     "gating_temperature", "pcc_parts", "cross_camera_positive_lambda",
-    "pcc_lambda", "valid_pcc_pair_count",
+    "pcc_lambda", "local_alignment_warmup_epochs",
+    "valid_pcc_pair_count",
     "mean_fixed_index_part_distance", "hard_alignment_loss",
     "valid_alignment_pair_count", "mean_hard_path_cost",
     "mean_path_absolute_offset", "soft_alignment_loss",
@@ -126,7 +138,7 @@ ALIGNMENT_FIELDS = (
     "method_family", "method_variant", "alignment_mode",
     "alignment_temperature", "gating_mode", "gating_temperature",
     "multigranular_feature_signature_sha256", "parent_branch",
-    "parent_commit", "parts",
+    "parent_commit", "parts", "local_alignment_warmup_epochs",
     "cross_camera_positive_lambda", "alignment_lambda",
     "valid_alignment_pair_count", "hard_alignment_loss",
     "mean_hard_path_cost", "mean_path_absolute_offset",
@@ -140,12 +152,21 @@ SOFT_ALIGNMENT_LAMBDA_FIELDS = (
     "map", "best_epoch", "runtime", "checkpoint", "checkpoint_sha256",
     "commit", "output_dir",
 )
+SOFT_ALIGNMENT_WARMUP_FIELDS = (
+    "schema_version", "run_id", "experiment_id", "run_kind", "status",
+    "baseline_experiment_id", "alignment_mode", "alignment_temperature",
+    "pcc_lambda", "local_alignment_warmup_epochs", "parts", "seed",
+    "rank1", "rank5", "rank10", "map", "best_epoch",
+    "selected_epoch", "runtime", "checkpoint", "checkpoint_sha256",
+    "commit", "output_dir",
+)
 RUN_FIELDS = (
     "schema_version", "run_id", "experiment_id", "experiment_family",
     "run_kind", "method", "method_family", "method_variant", "dataset",
     "branch", "commit_id", "parent_branch", "parent_commit", "config_file",
     "seed", "lambda",
-    "cross_camera_positive_lambda", "pcc_lambda", "pcc_enabled",
+    "cross_camera_positive_lambda", "pcc_lambda",
+    "local_alignment_warmup_epochs", "pcc_enabled",
     "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode",
     "alignment_temperature", "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
@@ -183,6 +204,7 @@ TABLE_SCHEMAS = {
     "pcc_ablation": PCC_FIELDS,
     "alignment_ablation": ALIGNMENT_FIELDS,
     "soft_alignment_lambda_sensitivity": SOFT_ALIGNMENT_LAMBDA_FIELDS,
+    "soft_alignment_warmup_comparison": SOFT_ALIGNMENT_WARMUP_FIELDS,
 }
 
 PURE_EVIDENCE_PATHS = ("EXPERIMENTS.md", "experiment_records/")
@@ -446,6 +468,9 @@ def experiment_identity(configuration):
         if pcc_enabled else NOT_RECORDED,
         "pcc_lambda": nested_value(configuration, "MODEL.PCC_LAMBDA")
         if pcc_enabled else NOT_RECORDED,
+        "local_alignment_warmup_epochs": nested_value(
+            configuration, "MODEL.PCC_WARMUP_EPOCHS", 0
+        ) if pcc_enabled else NOT_RECORDED,
         "pcc_mode": pcc_mode if pcc_enabled else NOT_RECORDED,
         "alignment_strategy": pcc_mode if pcc_enabled else NOT_RECORDED,
         "alignment_mode": alignment_mode,
@@ -488,10 +513,62 @@ def _git_status_entries(repo_root):
     return entries
 
 
+def _git_status_porcelain_raw(repo_root):
+    try:
+        output = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "status", "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceError("Cannot read raw Git worktree status: {}".format(error))
+    return output.decode("utf-8", errors="surrogateescape")
+
+
+def _git_diff_empty(repo_root, cached=False):
+    command = ["git", "-C", str(repo_root), "diff", "--quiet"]
+    if cached:
+        command.insert(-1, "--cached")
+    completed = subprocess.run(command, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+    if completed.returncode not in (0, 1):
+        raise EvidenceError(
+            "Cannot inspect {} Git diff".format(
+                "staged" if cached else "unstaged"
+            )
+        )
+    return completed.returncode == 0
+
+
+def _git_operations_in_progress(repo_root):
+    operations = []
+    git_paths = {
+        "merge": "MERGE_HEAD",
+        "cherry_pick": "CHERRY_PICK_HEAD",
+        "revert": "REVERT_HEAD",
+        "rebase_merge": "rebase-merge",
+        "rebase_apply": "rebase-apply",
+    }
+    for operation, git_path in git_paths.items():
+        resolved = _git_output(repo_root, ["rev-parse", "--git-path", git_path])
+        candidate = Path(resolved)
+        if not candidate.is_absolute():
+            candidate = Path(repo_root) / candidate
+        if candidate.exists():
+            operations.append(operation)
+    return operations
+
+
 def git_metadata(repo_root):
     commit = _git_output(repo_root, ["rev-parse", "HEAD"])
     branch = _git_output(repo_root, ["branch", "--show-current"])
     status_entries = _git_status_entries(repo_root)
+    status_porcelain_raw = _git_status_porcelain_raw(repo_root)
+    staged_diff_empty = _git_diff_empty(repo_root, cached=True)
+    unstaged_diff_empty = _git_diff_empty(repo_root, cached=False)
+    operations_in_progress = _git_operations_in_progress(repo_root)
     dirty = bool(status_entries)
     if not re.match(r"^[0-9a-fA-F]{40}$", commit):
         raise EvidenceError("Git commit is not a full SHA: {}".format(commit))
@@ -515,6 +592,17 @@ def git_metadata(repo_root):
         "status_porcelain": [
             "{} {}".format(status, path) for status, path in status_entries
         ],
+        "status_porcelain_raw": status_porcelain_raw,
+        "staged_diff_empty": staged_diff_empty,
+        "unstaged_diff_empty": unstaged_diff_empty,
+        "operations_in_progress": operations_in_progress,
+        "preflight_checked_at_utc": utc_now(),
+        "commit_time": _git_output(
+            repo_root, ["show", "-s", "--format=%cI", commit]
+        ),
+        "commit_parents": _git_output(
+            repo_root, ["show", "-s", "--format=%P", commit]
+        ).split(),
         "tree": _git_output(repo_root, ["rev-parse", "HEAD^{tree}"]).lower(),
         "has_upstream": upstream != NOT_RECORDED,
         "upstream": upstream,
@@ -523,8 +611,16 @@ def git_metadata(repo_root):
 
 def validate_git_preflight(repo_root, expected_branch, expected_commit=None):
     metadata = git_metadata(repo_root)
-    if metadata["dirty"]:
+    if (metadata["dirty"] or metadata["status_porcelain_raw"]
+            or not metadata["staged_diff_empty"]
+            or not metadata["unstaged_diff_empty"]):
         raise EvidenceError("Formal training requires a clean Git worktree")
+    if metadata["operations_in_progress"]:
+        raise EvidenceError(
+            "Formal training forbids Git operations in progress: {}".format(
+                metadata["operations_in_progress"]
+            )
+        )
     if metadata["branch"] != expected_branch:
         raise EvidenceError(
             "Formal branch mismatch: expected {}, got {}".format(
@@ -640,13 +736,40 @@ def collect_environment(run_dir, repo_root, training_pythonhashseed=None,
                 "total_memory_bytes": int(properties.total_memory),
             })
     driver = NOT_RECORDED
+    nvidia_smi_gpus = []
     try:
-        driver = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        gpu_output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,driver_version,uuid",
+                "--format=csv,noheader",
+            ],
             stderr=subprocess.DEVNULL,
-        ).decode("utf-8", errors="replace").splitlines()[0].strip()
+        ).decode("utf-8", errors="replace")
+        for values in csv.reader(gpu_output.splitlines(), skipinitialspace=True):
+            if len(values) != 5:
+                continue
+            nvidia_smi_gpus.append({
+                "index": int(values[0]),
+                "name": values[1].strip(),
+                "memory_total": values[2].strip(),
+                "driver_version": values[3].strip(),
+                "uuid": values[4].strip(),
+            })
+        if nvidia_smi_gpus:
+            driver = nvidia_smi_gpus[0]["driver_version"]
     except (OSError, subprocess.CalledProcessError, IndexError):
         pass
+    by_index = {row["index"]: row for row in nvidia_smi_gpus}
+    for gpu in gpus:
+        if gpu["index"] in by_index:
+            gpu.update({
+                "uuid": by_index[gpu["index"]]["uuid"],
+                "driver_version": by_index[gpu["index"]]["driver_version"],
+                "nvidia_smi_memory_total": by_index[gpu["index"]][
+                    "memory_total"
+                ],
+            })
     metadata = validate_git_runtime_state(
         repo_root,
         run_dir,
@@ -666,6 +789,7 @@ def collect_environment(run_dir, repo_root, training_pythonhashseed=None,
         "nvidia_driver": driver,
         "gpu_count": len(gpus),
         "gpus": gpus,
+        "nvidia_smi_gpus": nvidia_smi_gpus,
         "CUDA_VISIBLE_DEVICES": os.environ.get(
             "CUDA_VISIBLE_DEVICES", NOT_RECORDED
         ),
@@ -676,6 +800,12 @@ def collect_environment(run_dir, repo_root, training_pythonhashseed=None,
         ),
         "git_branch": metadata["branch"],
         "git_commit": metadata["commit"],
+        "git_commit_time": metadata["commit_time"],
+        "git_commit_parents": metadata["commit_parents"],
+        "git_status_porcelain_raw": metadata["status_porcelain_raw"],
+        "git_staged_diff_empty": metadata["staged_diff_empty"],
+        "git_unstaged_diff_empty": metadata["unstaged_diff_empty"],
+        "git_operations_in_progress": metadata["operations_in_progress"],
         "git_controlled_evidence_dir": metadata["controlled_evidence_dir"],
         "git_controlled_evidence_only": metadata["controlled_evidence_only"],
         "environment_packages_path": normalized_path(packages_path),
@@ -816,9 +946,26 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "dataset": identity["dataset"],
         "branch": git_info["branch"],
         "commit_id": git_info["commit"],
+        "commit_time": git_info.get("commit_time", NOT_RECORDED),
+        "commit_parents": git_info.get("commit_parents", []),
         "commit_tree": git_info.get("tree", NOT_RECORDED),
         "git_preflight_clean": not git_info.get("dirty", True),
         "git_status_preflight": list(git_info.get("status_porcelain", [])),
+        "git_status_porcelain_raw": git_info.get(
+            "status_porcelain_raw", MISSING_EVIDENCE
+        ),
+        "git_staged_diff_empty": git_info.get(
+            "staged_diff_empty", False
+        ),
+        "git_unstaged_diff_empty": git_info.get(
+            "unstaged_diff_empty", False
+        ),
+        "git_operations_in_progress": git_info.get(
+            "operations_in_progress", [MISSING_EVIDENCE]
+        ),
+        "git_preflight_checked_at_utc": git_info.get(
+            "preflight_checked_at_utc", NOT_RECORDED
+        ),
         "has_upstream": bool(git_info.get("has_upstream", False)),
         "upstream": git_info.get("upstream", NOT_RECORDED),
         "parent_branch": parent_branch,
@@ -850,6 +997,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "pcc_enabled": identity["pcc_enabled"],
         "pcc_parts": identity["pcc_parts"],
         "pcc_lambda": identity["pcc_lambda"],
+        "local_alignment_warmup_epochs": identity[
+            "local_alignment_warmup_epochs"
+        ],
         "pcc_mode": identity["pcc_mode"],
         "alignment_strategy": identity["alignment_strategy"],
         "alignment_mode": identity["alignment_mode"],
@@ -1116,6 +1266,9 @@ def _run_row_from_manifest(run_dir, manifest, status_payload):
             "cross_camera_positive_lambda", NOT_RECORDED
         ),
         "pcc_lambda": manifest.get("pcc_lambda", NOT_RECORDED),
+        "local_alignment_warmup_epochs": manifest.get(
+            "local_alignment_warmup_epochs", NOT_RECORDED
+        ),
         "pcc_enabled": manifest.get("pcc_enabled", NOT_RECORDED),
         "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
         "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
@@ -1340,6 +1493,8 @@ def parse_training_log(log_path):
     pcc_epoch_summaries = []
     hard_alignment_epoch_summaries = []
     soft_alignment_epoch_summaries = []
+    local_alignment_gate_by_epoch = {}
+    checkpoint_evidence = []
     epoch_evidence = {}
     required_training_fields = {
         "loss_total": False,
@@ -1361,6 +1516,49 @@ def parse_training_log(log_path):
         required_training_fields["loss_id"] |= "loss_id:" in line
         required_training_fields["loss_triplet"] |= "loss_triplet:" in line
         required_training_fields["learning_rate"] |= "Base Lr:" in line
+        gate_match = re.search(
+            r"LOCAL_ALIGNMENT_GATE\s+epoch=(\d+)\s+"
+            r"configured_lambda=([0-9.eE+-]+)\s+"
+            r"effective_lambda=([0-9.eE+-]+)\s+"
+            r"warmup_epochs=(\d+)\s+active=(true|false)\s+"
+            r"alignment_temperature=([0-9.eE+-]+)\s+"
+            r"id_loss_enabled=(true|false)\s+"
+            r"triplet_loss_enabled=(true|false)\s+"
+            r"cross_camera_positive_enabled=(true|false)",
+            line,
+        )
+        if gate_match:
+            gate_epoch = int(gate_match.group(1))
+            if gate_epoch in local_alignment_gate_by_epoch:
+                raise EvidenceError(
+                    "Duplicate LOCAL_ALIGNMENT_GATE for epoch {}".format(
+                        gate_epoch
+                    )
+                )
+            local_alignment_gate_by_epoch[gate_epoch] = {
+                "epoch": gate_epoch,
+                "configured_lambda": float(gate_match.group(2)),
+                "effective_lambda": float(gate_match.group(3)),
+                "warmup_epochs": int(gate_match.group(4)),
+                "active": gate_match.group(5) == "true",
+                "alignment_temperature": float(gate_match.group(6)),
+                "id_loss_enabled": gate_match.group(7) == "true",
+                "triplet_loss_enabled": gate_match.group(8) == "true",
+                "cross_camera_positive_enabled": (
+                    gate_match.group(9) == "true"
+                ),
+            }
+        checkpoint_match = re.search(
+            r"CHECKPOINT_EVIDENCE\s+path=(.+?)\s+epoch=(\d+)\s+"
+            r"global_iteration=(\d+)",
+            line,
+        )
+        if checkpoint_match:
+            checkpoint_evidence.append({
+                "path": normalized_path(checkpoint_match.group(1)),
+                "epoch": int(checkpoint_match.group(2)),
+                "global_iteration": int(checkpoint_match.group(3)),
+            })
         pcc_summary = re.search(
             r"PCC Epoch Summary - Epoch:\s*(\d+)\s+"
             r"valid_pcc_pair_count:\s*(\d+)\s+"
@@ -1585,6 +1783,11 @@ def parse_training_log(log_path):
         "pcc_epoch_summaries": pcc_epoch_summaries,
         "hard_alignment_epoch_summaries": hard_alignment_epoch_summaries,
         "soft_alignment_epoch_summaries": soft_alignment_epoch_summaries,
+        "local_alignment_gates": [
+            local_alignment_gate_by_epoch[epoch]
+            for epoch in sorted(local_alignment_gate_by_epoch)
+        ],
+        "checkpoint_evidence": checkpoint_evidence,
         "valid_pcc_pair_count": (
             total_pcc_pairs if pcc_epoch_summaries
             else total_alignment_pairs if hard_alignment_epoch_summaries
@@ -1618,6 +1821,100 @@ def parse_training_log(log_path):
         ],
         "global_iteration_source": global_iteration_source,
         "validations": validations,
+    }
+
+
+def validate_local_alignment_warmup_evidence(log_info, configuration):
+    """Validate every epoch gate and return an immutable boundary report."""
+    identity = experiment_identity(configuration)
+    if not identity["pcc_enabled"]:
+        return None
+    try:
+        configured_lambda = float(identity["pcc_lambda"])
+        warmup_epochs = int(identity["local_alignment_warmup_epochs"])
+        max_epochs = int(nested_value(configuration, "SOLVER.MAX_EPOCHS"))
+        configured_tau = float(nested_value(
+            configuration, "MODEL.PCC_SOFTMIN_TAU"
+        ))
+    except (TypeError, ValueError):
+        raise EvidenceError("Local-alignment warm-up configuration is invalid")
+    if warmup_epochs < 0 or max_epochs <= 0:
+        raise EvidenceError("Local-alignment warm-up epoch bounds are invalid")
+    gates = list(log_info.get("local_alignment_gates", []))
+    by_epoch = {int(row["epoch"]): row for row in gates}
+    expected_epochs = set(range(1, max_epochs + 1))
+    if set(by_epoch) != expected_epochs:
+        missing = sorted(expected_epochs - set(by_epoch))
+        extra = sorted(set(by_epoch) - expected_epochs)
+        raise EvidenceError(
+            "LOCAL_ALIGNMENT_GATE epoch coverage differs; missing={} extra={}"
+            .format(missing, extra)
+        )
+    sampler = str(nested_value(configuration, "DATALOADER.SAMPLER"))
+    expected_flags = {
+        "id_loss_enabled": sampler in ("softmax", "softmax_triplet"),
+        "triplet_loss_enabled": sampler in ("triplet", "softmax_triplet"),
+        "cross_camera_positive_enabled": bool(nested_value(
+            configuration, "MODEL.CROSS_CAMERA_POSITIVE_ONLY", False
+        )),
+    }
+    for epoch in sorted(by_epoch):
+        row = by_epoch[epoch]
+        expected_effective = (
+            0.0 if epoch <= warmup_epochs else configured_lambda
+        )
+        expected_active = epoch <= warmup_epochs
+        numeric_values = (
+            row["configured_lambda"], row["effective_lambda"],
+            row["alignment_temperature"],
+        )
+        if not all(math.isfinite(float(value)) for value in numeric_values):
+            raise EvidenceError("Local-alignment gate contains non-finite values")
+        if abs(float(row["configured_lambda"]) - configured_lambda) > 1e-12:
+            raise EvidenceError(
+                "Configured local-alignment lambda changed at epoch {}".format(
+                    epoch
+                )
+            )
+        if abs(float(row["effective_lambda"]) - expected_effective) > 1e-12:
+            raise EvidenceError(
+                "Effective local-alignment lambda is wrong at epoch {}".format(
+                    epoch
+                )
+            )
+        if int(row["warmup_epochs"]) != warmup_epochs:
+            raise EvidenceError("Warm-up epoch setting changed during training")
+        if bool(row["active"]) != expected_active:
+            raise EvidenceError(
+                "Warm-up active flag is wrong at epoch {}".format(epoch)
+            )
+        if abs(float(row["alignment_temperature"]) - configured_tau) > 1e-12:
+            raise EvidenceError(
+                "Alignment temperature changed at epoch {}".format(epoch)
+            )
+        for flag, expected in expected_flags.items():
+            if bool(row[flag]) != expected:
+                raise EvidenceError(
+                    "{} changed at epoch {}".format(flag, epoch)
+                )
+    boundary_epochs = {1, max_epochs}
+    if 1 <= warmup_epochs <= max_epochs:
+        boundary_epochs.add(warmup_epochs)
+    if 1 <= warmup_epochs + 1 <= max_epochs:
+        boundary_epochs.add(warmup_epochs + 1)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "pass",
+        "configured_lambda": configured_lambda,
+        "warmup_epochs": warmup_epochs,
+        "alignment_temperature": configured_tau,
+        "max_epochs": max_epochs,
+        "default_zero_preserves_immediate_activation": warmup_epochs == 0,
+        "other_loss_flags": expected_flags,
+        "boundary_evidence": [
+            by_epoch[epoch] for epoch in sorted(boundary_epochs)
+        ],
+        "all_epoch_gate_count": len(gates),
     }
 
 
@@ -1736,7 +2033,7 @@ def _checkpoint_files(output_dir):
 
 
 def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
-                              destination):
+                              destination, checkpoint_evidence=None):
     sources = {
         row.get("global_iteration_source", "legacy_validation_history")
         for row in validation_rows
@@ -1773,12 +2070,49 @@ def build_checkpoint_manifest(output_dir, validation_rows, selected_epoch,
         validation_by_epoch[epoch] = row
         validation_by_iteration[global_iteration] = row
     rows = []
+    checkpoint_evidence = list(checkpoint_evidence or [])
+
+    def matching_checkpoint_evidence(path):
+        matches = []
+        for evidence in checkpoint_evidence:
+            evidence_path = Path(evidence["path"])
+            candidates = [evidence_path]
+            if not evidence_path.is_absolute():
+                candidates.append(Path(output_dir) / evidence_path)
+            if any(
+                    normalized_path(candidate.resolve())
+                    == normalized_path(path.resolve())
+                    for candidate in candidates):
+                matches.append(evidence)
+        if len(matches) != 1:
+            raise EvidenceError(
+                "Checkpoint {} must bind to exactly one CHECKPOINT_EVIDENCE "
+                "record; found {}".format(path, len(matches))
+            )
+        return matches[0]
+
     for path in _checkpoint_files(output_dir):
         global_iteration = NOT_RECORDED
         epoch = NOT_RECORDED
         iteration_match = re.search(r"checkpoint_(\d+)\.(?:pt|pth)$", path.name)
         legacy_epoch_match = re.search(r"model_(\d+)\.pth$", path.name)
-        if iteration_match:
+        if checkpoint_evidence:
+            evidence = matching_checkpoint_evidence(path)
+            epoch = int(evidence["epoch"])
+            global_iteration = int(evidence["global_iteration"])
+            if epoch not in validation_by_epoch:
+                raise EvidenceError(
+                    "Checkpoint event epoch {} has no authoritative epoch "
+                    "record".format(epoch)
+                )
+            validation = validation_by_epoch[epoch]
+            if int(validation["global_iteration"]) != global_iteration:
+                raise EvidenceError(
+                    "Checkpoint event iteration differs from Ignite epoch "
+                    "evidence"
+                )
+            mapping_source = "ignite_checkpoint_event_evidence"
+        elif iteration_match:
             global_iteration = int(iteration_match.group(1))
             if global_iteration in validation_by_iteration:
                 validation = validation_by_iteration[global_iteration]
@@ -2007,6 +2341,51 @@ def csv_to_markdown(csv_path, markdown_path):
     return rows
 
 
+def verify_generated_registries(records_root, experiments_path):
+    """Re-read machine tables and prove generated Markdown is exact/idempotent."""
+    records_root = Path(records_root)
+    verified = {}
+    for name, expected_fields in TABLE_SCHEMAS.items():
+        csv_path = records_root / "tables" / "{}.csv".format(name)
+        markdown_path = records_root / "tables" / "{}.md".format(name)
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = tuple(reader.fieldnames or ())
+            rows = list(reader)
+        if fields != tuple(expected_fields):
+            raise EvidenceError(
+                "Machine table header differs for {}".format(name)
+            )
+        lines = [
+            "| " + " | ".join(fields) + " |",
+            "|" + "|".join("---" for _ in fields) + "|",
+        ]
+        for row in rows:
+            values = [
+                str(row.get(field, "")).replace("|", "\\|").replace(
+                    "\n", " "
+                )
+                for field in fields
+            ]
+            lines.append("| " + " | ".join(values) + " |")
+        expected_markdown = "\n".join(lines) + "\n"
+        actual_markdown = markdown_path.read_text(encoding="utf-8")
+        if _normalized_text(actual_markdown) != expected_markdown:
+            raise EvidenceError(
+                "Generated Markdown differs from machine table {}".format(name)
+            )
+        verified[name] = len(rows)
+    experiments_path = Path(experiments_path)
+    before = experiments_path.read_text(encoding="utf-8")
+    counts = update_experiments_markdown(experiments_path, records_root)
+    after = experiments_path.read_text(encoding="utf-8")
+    if _normalized_text(before) != _normalized_text(after):
+        raise EvidenceError(
+            "EXPERIMENTS.md generation is not idempotent from machine tables"
+        )
+    return {"tables": verified, "experiments": counts, "status": "pass"}
+
+
 def ensure_record_layout(records_root):
     root = Path(records_root)
     (root / "runs").mkdir(parents=True, exist_ok=True)
@@ -2215,6 +2594,31 @@ def _soft_alignment_lambda_table_eligible(manifest):
     )
 
 
+def _soft_alignment_warmup_table_eligible(manifest):
+    try:
+        tau = float(manifest.get("alignment_temperature"))
+        alignment_lambda = float(manifest.get("pcc_lambda"))
+        warmup_epochs = int(manifest.get("local_alignment_warmup_epochs", 0))
+    except (TypeError, ValueError):
+        return False
+    is_baseline = (
+        manifest.get("experiment_id") == SOFT_WARMUP_BASELINE_EXPERIMENT_ID
+        and warmup_epochs == 0
+    )
+    is_warmup = (
+        manifest.get("experiment_family") == SOFT_WARMUP_FAMILY
+        and warmup_epochs == 20
+    )
+    return (
+        manifest.get("run_kind") == "formal"
+        and manifest.get("status", "success") == "success"
+        and manifest.get("alignment_mode") == "soft_min"
+        and tau == 0.2
+        and alignment_lambda == 0.05
+        and (is_baseline or is_warmup)
+    )
+
+
 def _read_tsv_rows(path):
     target = Path(path)
     if not target.is_file() or target.stat().st_size == 0:
@@ -2401,6 +2805,9 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
             "cross_camera_positive_lambda", manifest["lambda"]
         ),
         "pcc_lambda": manifest.get("pcc_lambda", NOT_RECORDED),
+        "local_alignment_warmup_epochs": manifest.get(
+            "local_alignment_warmup_epochs", NOT_RECORDED
+        ),
         "pcc_enabled": manifest.get("pcc_enabled", False),
         "pcc_parts": manifest.get("pcc_parts", NOT_RECORDED),
         "pcc_mode": manifest.get("pcc_mode", NOT_RECORDED),
@@ -2576,6 +2983,9 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "pcc_parts": common["pcc_parts"],
         "cross_camera_positive_lambda": common["cross_camera_positive_lambda"],
         "pcc_lambda": common["pcc_lambda"],
+        "local_alignment_warmup_epochs": common[
+            "local_alignment_warmup_epochs"
+        ],
         "valid_pcc_pair_count": common["valid_pcc_pair_count"],
         "mean_fixed_index_part_distance": common["mean_fixed_index_part_distance"],
         "hard_alignment_loss": common["hard_alignment_loss"],
@@ -2609,6 +3019,9 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "parent_branch": common["parent_branch"],
         "parent_commit": common["parent_commit"],
         "parts": common["pcc_parts"],
+        "local_alignment_warmup_epochs": common[
+            "local_alignment_warmup_epochs"
+        ],
         "cross_camera_positive_lambda": common[
             "cross_camera_positive_lambda"
         ],
@@ -2708,7 +3121,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     "Manifest/config identity conflict for {}".format(field)
                 )
         for field in (
-                "pcc_enabled", "pcc_parts", "pcc_lambda", "pcc_mode"):
+                "pcc_enabled", "pcc_parts", "pcc_lambda", "pcc_mode",
+                "local_alignment_warmup_epochs"):
             expected = identity[field]
             actual = manifest.get(field, expected)
             if actual != expected:
@@ -2887,13 +3301,16 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if manifest.get("dataset_manifest_sha256", NOT_RECORDED) not in (
                 NOT_RECORDED, dataset_manifest["dataset_manifest_sha256"]):
             raise EvidenceError("Dataset manifest signature differs")
-        if manifest.get("experiment_family") == SOFT_LAMBDA_SWEEP_FAMILY:
+        if manifest.get("experiment_family") in STRICT_EVIDENCE_FAMILIES:
             required_strict = (
                 "protocol_signature_sha256",
                 "implementation_signature_sha256", "merge_base",
                 "commit_tree", "has_upstream", "upstream",
                 "config_source_size_bytes", "config_resolved_size_bytes",
-                "dataset_manifest_sha256",
+                "dataset_manifest_sha256", "commit_time", "commit_parents",
+                "git_status_porcelain_raw", "git_staged_diff_empty",
+                "git_unstaged_diff_empty", "git_operations_in_progress",
+                "git_preflight_checked_at_utc",
             )
             missing_strict = [
                 field for field in required_strict
@@ -2908,7 +3325,15 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             if manifest.get("git_preflight_clean") is not True:
                 raise EvidenceError("Lambda sweep preflight was not clean")
             if manifest.get("git_status_preflight") != []:
-                raise EvidenceError("Lambda sweep preflight status is not empty")
+                raise EvidenceError("Strict preflight status is not empty")
+            if manifest.get("git_status_porcelain_raw") != "":
+                raise EvidenceError("Raw preflight porcelain is not empty")
+            if manifest.get("git_staged_diff_empty") is not True:
+                raise EvidenceError("Staged diff was not empty at preflight")
+            if manifest.get("git_unstaged_diff_empty") is not True:
+                raise EvidenceError("Unstaged diff was not empty at preflight")
+            if manifest.get("git_operations_in_progress") != []:
+                raise EvidenceError("Git operation was active at preflight")
             if len(str(manifest["protocol_signature_sha256"])) != 64:
                 raise EvidenceError("Protocol signature is invalid")
             if len(str(manifest["implementation_signature_sha256"])) != 64:
@@ -2933,6 +3358,76 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     )]
             ).lower() != manifest["commit_tree"]:
                 raise EvidenceError("Commit tree evidence differs")
+            if manifest.get("experiment_family") == SOFT_WARMUP_FAMILY:
+                expected_experiment_id = (
+                    "C2-L03-SOFTMIN-T0P2-LP0P05-WARMUP20-S42"
+                    + ("-SMOKE" if manifest.get("run_kind") == "smoke" else "")
+                )
+                expected_identity = {
+                    "experiment_id": expected_experiment_id,
+                    "seed": 42,
+                    "pcc_parts": 6,
+                    "pcc_lambda": 0.05,
+                    "alignment_temperature": 0.2,
+                    "local_alignment_warmup_epochs": 20,
+                }
+                conflicts = {
+                    field: (manifest.get(field), expected)
+                    for field, expected in expected_identity.items()
+                    if manifest.get(field) != expected
+                }
+                if conflicts:
+                    raise EvidenceError(
+                        "Warm-up experiment identity differs: {}".format(
+                            conflicts
+                        )
+                    )
+                protocol_cfg = (
+                    source_cfg if manifest.get("run_kind") == "smoke"
+                    else resolved_cfg
+                )
+                if int(nested_value(protocol_cfg, "SOLVER.MAX_EPOCHS")) != 120:
+                    raise EvidenceError("Warm-up source protocol must be 120 epochs")
+                if manifest.get("run_kind") == "formal":
+                    if manifest.get("commit_parents") != [
+                            manifest.get("parent_commit")]:
+                        raise EvidenceError(
+                            "Training commit is not one direct commit above "
+                            "the recorded baseline"
+                        )
+                comparison_path = run_dir / "config_comparison.json"
+                if not comparison_path.is_file():
+                    raise EvidenceError(
+                        "Warm-up config comparison evidence is missing"
+                    )
+                if comparison_path.stat().st_size != int(manifest.get(
+                        "config_comparison_size_bytes", -1)):
+                    raise EvidenceError("Warm-up config comparison size differs")
+                if sha256_file(comparison_path) != manifest.get(
+                        "config_comparison_sha256"):
+                    raise EvidenceError("Warm-up config comparison hash differs")
+                comparison = read_json(comparison_path)
+                if comparison.get("status") != "pass":
+                    raise EvidenceError("Warm-up config comparison did not pass")
+                expected_differences = {
+                    "MODEL.PCC_WARMUP_EPOCHS", "OUTPUT_DIR"
+                }
+                if set(comparison.get("observed_differences", [])) != (
+                        expected_differences):
+                    raise EvidenceError(
+                        "Warm-up resolved-config differences are not isolated"
+                    )
+                if set(comparison.get("expected_differences", [])) != (
+                        expected_differences):
+                    raise EvidenceError(
+                        "Warm-up config comparison allowlist differs"
+                    )
+                if (manifest.get("run_kind") == "formal"
+                        and comparison.get("candidate_resolved_sha256")
+                        != manifest.get("config_resolved_sha256")):
+                    raise EvidenceError(
+                        "Warm-up config comparison candidate hash differs"
+                    )
         if int(manifest.get("schema_version", 1)) >= 4:
             console_path = run_dir / "console.log"
             if not console_path.is_file() or console_path.stat().st_size <= 0:
@@ -2941,6 +3436,36 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             if console_sha != manifest.get("console_log_sha256"):
                 raise EvidenceError("Console log SHA256 differs")
         log_info = parse_training_log(output_dir / "log.txt")
+        if (manifest.get("experiment_family") == SOFT_WARMUP_FAMILY
+                and not log_info.get("checkpoint_evidence")):
+            raise EvidenceError(
+                "Warm-up formal lacks CHECKPOINT_EVIDENCE events"
+            )
+        warmup_evidence = None
+        if (int(manifest.get("schema_version", 1)) >= 5
+                and identity["pcc_enabled"]
+                and nested_value(
+                    resolved_cfg, "MODEL.PCC_WARMUP_EPOCHS",
+                    NOT_RECORDED,
+                ) != NOT_RECORDED):
+            warmup_evidence = validate_local_alignment_warmup_evidence(
+                log_info, resolved_cfg
+            )
+            warmup_path = atomic_write_json(
+                run_dir / "local_alignment_warmup_evidence.json",
+                warmup_evidence,
+            )
+            manifest.update({
+                "local_alignment_warmup_evidence_path": normalized_path(
+                    warmup_path.resolve()
+                ),
+                "local_alignment_warmup_evidence_size_bytes": (
+                    warmup_path.stat().st_size
+                ),
+                "local_alignment_warmup_evidence_sha256": sha256_file(
+                    warmup_path
+                ),
+            })
         required_iteration_source = manifest.get(
             "required_global_iteration_source", NOT_RECORDED
         )
@@ -3097,6 +3622,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             validation_rows,
             best["epoch"],
             run_dir / "checkpoint_manifest.tsv",
+            checkpoint_evidence=log_info.get("checkpoint_evidence"),
         )
         if run_analyses:
             _run_analysis_tools(repo_root, run_dir, manifest, selected)
@@ -3368,6 +3894,42 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                         "output_dir": common["output_dir"],
                     },
                 )
+            if _soft_alignment_warmup_table_eligible(manifest):
+                upsert_csv(
+                    tables_dir / "soft_alignment_warmup_comparison.csv",
+                    SOFT_ALIGNMENT_WARMUP_FIELDS,
+                    {
+                        "schema_version": common["schema_version"],
+                        "run_id": common["run_id"],
+                        "experiment_id": common["experiment_id"],
+                        "run_kind": common["run_kind"],
+                        "status": common["status"],
+                        "baseline_experiment_id": (
+                            SOFT_WARMUP_BASELINE_EXPERIMENT_ID
+                        ),
+                        "alignment_mode": common["alignment_mode"],
+                        "alignment_temperature": common[
+                            "alignment_temperature"
+                        ],
+                        "pcc_lambda": common["pcc_lambda"],
+                        "local_alignment_warmup_epochs": common[
+                            "local_alignment_warmup_epochs"
+                        ],
+                        "parts": common["pcc_parts"],
+                        "seed": common["seed"],
+                        "rank1": common["rank1"],
+                        "rank5": common["rank5"],
+                        "rank10": common["rank10"],
+                        "map": common["map"],
+                        "best_epoch": common["best_epoch"],
+                        "selected_epoch": common["selected_epoch"],
+                        "runtime": common["runtime_seconds"],
+                        "checkpoint": common["checkpoint"],
+                        "checkpoint_sha256": common["checkpoint_sha256"],
+                        "commit": common["commit"],
+                        "output_dir": common["output_dir"],
+                    },
+                )
             for table_name in TABLE_SCHEMAS:
                 csv_to_markdown(
                     tables_dir / "{}.csv".format(table_name),
@@ -3462,7 +4024,15 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 key_fields=("run_id", "path"),
             )
         update_experiments_markdown(experiments_path, records_root)
-        return {"manifest": manifest, "metrics": metrics, "status": final_status}
+        registry_verification = verify_generated_registries(
+            records_root, experiments_path
+        )
+        return {
+            "manifest": manifest,
+            "metrics": metrics,
+            "status": final_status,
+            "registry_verification": registry_verification,
+        }
     except BaseException as error:
         failure_status = "incomplete"
         try:

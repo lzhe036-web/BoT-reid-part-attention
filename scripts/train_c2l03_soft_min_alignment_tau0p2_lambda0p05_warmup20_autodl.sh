@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+EXPECTED_BRANCH="exp/c2l03-soft-min-alignment-warmup20-tau0p2-lambda0p05"
+PARENT_BRANCH="origin/exp/c2l03-soft-min-alignment-lambda-sweep-tau0p2"
+PARENT_COMMIT="67b7bbf528a0a6279a3f9ab86aed43ad91b1ef63"
+FEATURE_REFERENCE_BRANCH="origin/exp/c2l03-hard-shortest-path-alignment"
+FEATURE_REFERENCE_COMMIT="6b46f2c3747124b97d59ed5cf987f33efb82282b"
+BASELINE_CONFIG="configs/softmax_triplet_c2l03_soft_min_alignment_tau0p2_lambda0p05_autodl.yml"
+CONFIG="configs/softmax_triplet_c2l03_soft_min_alignment_tau0p2_lambda0p05_warmup20_autodl.yml"
+EXPECTED_OUTPUT_DIR="/root/autodl-tmp/experiments/BoT/c2l03_soft_min_alignment_tau0p2_lambda0p05_warmup20_seed42_market1501"
+
+CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
+if [[ -z "${CURRENT_BRANCH}" ]] || [[ "${CURRENT_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
+  echo "Refusing warmup20 formal from branch '${CURRENT_BRANCH:-detached HEAD}'; expected '${EXPECTED_BRANCH}'." >&2
+  exit 1
+fi
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "Refusing warmup20 formal from a dirty Git worktree." >&2
+  git status --short >&2
+  exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Refusing warmup20 formal because staged or unstaged diff is non-empty." >&2
+  exit 1
+fi
+for operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+  if [[ -e "$(git rev-parse --git-path "${operation}")" ]]; then
+    echo "Refusing warmup20 formal while ${operation} exists." >&2
+    exit 1
+  fi
+done
+if [[ -d "$(git rev-parse --git-path rebase-merge)" ]] || \
+   [[ -d "$(git rev-parse --git-path rebase-apply)" ]]; then
+  echo "Refusing warmup20 formal while rebase is in progress." >&2
+  exit 1
+fi
+if [[ "$(git rev-parse "${PARENT_BRANCH}")" != "${PARENT_COMMIT}" ]] || \
+   [[ "$(git merge-base "${PARENT_BRANCH}" HEAD)" != "${PARENT_COMMIT}" ]] || \
+   [[ "$(git rev-parse HEAD^)" != "${PARENT_COMMIT}" ]]; then
+  echo "Refusing warmup20 formal: training commit is not directly based on the fixed lambda=0.05 baseline SHA." >&2
+  exit 1
+fi
+if [[ "$(git rev-parse "${FEATURE_REFERENCE_BRANCH}")" != "${FEATURE_REFERENCE_COMMIT}" ]]; then
+  echo "Refusing warmup20 formal: fixed Hard feature reference differs." >&2
+  exit 1
+fi
+if [[ -e "${EXPECTED_OUTPUT_DIR}" ]] && \
+   { [[ ! -d "${EXPECTED_OUTPUT_DIR}" ]] || [[ -n "$(find "${EXPECTED_OUTPUT_DIR}" -mindepth 1 -print -quit)" ]]; }; then
+  echo "Refusing to overwrite non-empty warmup20 formal OUTPUT_DIR: ${EXPECTED_OUTPUT_DIR}" >&2
+  exit 1
+fi
+
+python tools/validate_c2l03_soft_min_alignment_warmup.py \
+  --config-file "${CONFIG}" \
+  --baseline-config "${BASELINE_CONFIG}"
+
+CURRENT_COMMIT="$(git rev-parse HEAD)"
+export CUDA_VISIBLE_DEVICES=0
+python tools/run_experiment.py \
+  --config "${CONFIG}" \
+  --experiment-id C2-L03-SOFTMIN-T0P2-LP0P05-WARMUP20-S42 \
+  --experiment-family c2l03_soft_min_alignment_warmup20_tau0p2_lambda0p05 \
+  --run-kind formal \
+  --expected-branch "${EXPECTED_BRANCH}" \
+  --expected-commit "${CURRENT_COMMIT}" \
+  --parent-branch "${PARENT_BRANCH}" \
+  --parent-commit "${PARENT_COMMIT}" \
+  --feature-reference-commit "${FEATURE_REFERENCE_COMMIT}" \
+  --reference-config "${BASELINE_CONFIG}" \
+  --expected-config-difference MODEL.PCC_WARMUP_EPOCHS \
+  --expected-config-difference OUTPUT_DIR \
+  --notes "C2-L03 Soft-Min local-alignment warmup20 formal; tau=0.2; lambda_p=0.05 fixed; K=6; Seed=42; 120 epochs; baseline C2-L03-SOFTMIN-T0P2-LP0P05-S42."

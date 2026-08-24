@@ -17,14 +17,17 @@ This directory is maintained by `tools/run_experiment.py` and
   `{0.05, 0.1, 0.3}`.  It records both `pcc_lambda` and the equivalent
   `alignment_lambda`; the legacy generic `lambda` remains reserved for the
   cross-camera-positive coefficient.
+- `tables/soft_alignment_warmup_comparison.csv` is the machine-generated
+  comparison view for the fixed `tau=0.2`, `PCC_LAMBDA=0.05`, seed-42
+  baseline and its local-alignment-only `warmup20` control.
 
-Registry schema version 4 retains the version-3 Soft-Min and multigranular
-fields and adds hashed console/config/feature/artifact evidence. Existing
-version-1/version-2/version-3 CSV/TSV rows are migrated losslessly: historical
+Registry schema version 5 retains the version-4 hashed evidence fields and adds
+the explicit `local_alignment_warmup_epochs` protocol field plus the dedicated
+warm-up comparison view. Existing version-1/version-2/version-3/version-4
+CSV/TSV rows are migrated losslessly: historical
 fields and rows are retained, legacy runs default to `run_kind=formal`, and
 unavailable evidence remains explicitly marked as `not_recorded` or
-`not_applicable` by semantics. The lambda-sensitivity view reuses schema 4 and
-does not rewrite any existing registry schema or historical row.
+`not_applicable` by semantics.
 
 Failed or incomplete runs remain under `runs/` and are indexed with their
 available hashes in `runs.csv` and `evidence_manifest.tsv`, but they are never
@@ -38,7 +41,10 @@ constructing DataLoaders, models, or optimizers, then writes the actual receipt
 to `OUTPUT_DIR/reproducibility.json`. The recorder remains fail-closed: it only
 copies and validates that training-produced evidence and never infers a seed.
 
-The runner requires a completely clean worktree before initialization. After it
+The runner requires raw porcelain, staged diff, and unstaged diff to all be
+empty, and rejects merge/rebase/cherry-pick/revert state before initialization.
+The exact preflight output, commit parents/time, and check timestamp are stored
+in the run manifest. After it
 creates `runs/<run_id>/`, Git verification permits only new files beneath that
 exact run directory until finalization; tracked changes or any other untracked
 path still fail closed.

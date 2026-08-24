@@ -67,6 +67,9 @@ _C.MODEL.PCC_PARTS = 6
 _C.MODEL.PCC_LAMBDA = 0.1
 _C.MODEL.PCC_MODE = "fixed_index"
 _C.MODEL.PCC_SOFTMIN_TAU = 0.1
+# Number of initial epochs for which only the local-alignment contribution is
+# gated off.  Zero preserves the historical behavior for every existing config.
+_C.MODEL.PCC_WARMUP_EPOCHS = 0
 
 
 # -----------------------------------------------------------------------------

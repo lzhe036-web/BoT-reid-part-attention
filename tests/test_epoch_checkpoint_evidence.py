@@ -13,6 +13,7 @@ from ignite.engine import Engine
 from engine.trainer import _attach_epoch_evidence_logging
 from utils.experiment_recording import (
     EvidenceError,
+    SCHEMA_VERSION,
     build_checkpoint_manifest,
     parse_training_log,
 )
@@ -79,6 +80,31 @@ def _checkpoint(directory, iteration):
 
 
 class EpochCheckpointEvidenceTest(unittest.TestCase):
+    def test_checkpoint_event_evidence_overrides_filename_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_info = _parse(directory, [(1, 186, 186)], denominator=183)
+            checkpoint = Path(directory) / "resnet50_model_final.pth"
+            checkpoint.write_bytes(b"synthetic checkpoint")
+            rows, selected = build_checkpoint_manifest(
+                directory,
+                log_info["validations"],
+                selected_epoch=1,
+                destination=Path(directory) / "checkpoint_manifest.tsv",
+                checkpoint_evidence=[{
+                    "path": str(checkpoint.resolve()),
+                    "epoch": 1,
+                    "global_iteration": 186,
+                }],
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["epoch"], 1)
+            self.assertEqual(rows[0]["global_iteration"], 186)
+            self.assertEqual(
+                rows[0]["global_iteration_source"],
+                "ignite_checkpoint_event_evidence",
+            )
+            self.assertEqual(selected["filename"], checkpoint.name)
+
     def test_real_183_log_denominator_binds_checkpoint_186_to_epoch_one(self):
         with tempfile.TemporaryDirectory() as directory:
             log_info = _parse(directory, [(1, 186, 186)], denominator=183)
@@ -91,7 +117,7 @@ class EpochCheckpointEvidenceTest(unittest.TestCase):
             )
             self.assertEqual(rows[0]["epoch"], 1)
             self.assertEqual(rows[0]["global_iteration"], 186)
-            self.assertEqual(rows[0]["schema_version"], 4)
+            self.assertEqual(rows[0]["schema_version"], SCHEMA_VERSION)
             self.assertEqual(Path(rows[0]["path"]).name, selected["filename"])
             self.assertEqual(
                 rows[0]["global_iteration_source"],

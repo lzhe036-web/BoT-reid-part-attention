@@ -46,6 +46,10 @@ def _loss_output_to_dict(loss_output):
         'soft_alignment_loss': loss_output.new_tensor(0.0),
         'mean_soft_path_cost': loss_output.new_tensor(0.0),
         'alignment_temperature': None,
+        'pcc_configured_lambda': 0.0,
+        'pcc_effective_lambda': 0.0,
+        'pcc_warmup_epochs': 0,
+        'pcc_warmup_active': False,
     }
 
 
@@ -177,10 +181,27 @@ def create_supervised_trainer(model, optimizer, loss_fn,
             'alignment_temperature': loss_dict.get(
                 'alignment_temperature'
             ),
+            'pcc_configured_lambda': loss_dict.get(
+                'pcc_configured_lambda', 0.0
+            ),
+            'pcc_effective_lambda': loss_dict.get(
+                'pcc_effective_lambda', 0.0
+            ),
+            'pcc_warmup_epochs': loss_dict.get('pcc_warmup_epochs', 0),
+            'pcc_warmup_active': loss_dict.get(
+                'pcc_warmup_active', False
+            ),
             'acc': acc.item(),
         }
 
-    return Engine(_update)
+    trainer = Engine(_update)
+
+    if hasattr(loss_fn, 'set_epoch'):
+        @trainer.on(Events.EPOCH_STARTED)
+        def set_loss_epoch(engine):
+            loss_fn.set_epoch(int(engine.state.epoch))
+
+    return trainer
 
 
 def create_supervised_trainer_with_center(model, center_criterion, optimizer, optimizer_center, loss_fn, cetner_loss_weight,
@@ -313,6 +334,23 @@ def do_train(
         checkpointer,
         {'model': model, 'optimizer': optimizer}
     )
+
+    @trainer.on(Events.EPOCH_COMPLETED(every=checkpoint_period))
+    def log_checkpoint_evidence(engine):
+        checkpoint_path = checkpointer.last_checkpoint
+        if not checkpoint_path:
+            raise RuntimeError(
+                "Checkpoint handler completed without an authoritative path"
+            )
+        logger.info(
+            "CHECKPOINT_EVIDENCE path={} epoch={} global_iteration={}"
+            .format(
+                checkpoint_path,
+                int(engine.state.epoch),
+                int(engine.state.iteration),
+            )
+        )
+
     epoch_log_state = _attach_epoch_evidence_logging(trainer, logger)
     timer = Timer(average=True)
 
@@ -341,6 +379,29 @@ def do_train(
     def adjust_learning_rate(engine):
         scheduler.step()
         if cfg.MODEL.PART_CORRESPONDENCE_CONSISTENCY:
+            configured_lambda = float(cfg.MODEL.PCC_LAMBDA)
+            effective_lambda = float(loss_fn.pcc_effective_lambda)
+            warmup_epochs = int(cfg.MODEL.PCC_WARMUP_EPOCHS)
+            warmup_active = int(engine.state.epoch) <= warmup_epochs
+            logger.info(
+                "LOCAL_ALIGNMENT_GATE epoch={} configured_lambda={:.12g} "
+                "effective_lambda={:.12g} warmup_epochs={} active={} "
+                "alignment_temperature={:.12g} id_loss_enabled={} "
+                "triplet_loss_enabled={} cross_camera_positive_enabled={}"
+                .format(
+                    int(engine.state.epoch), configured_lambda,
+                    effective_lambda, warmup_epochs,
+                    str(warmup_active).lower(),
+                    float(cfg.MODEL.PCC_SOFTMIN_TAU),
+                    str(cfg.DATALOADER.SAMPLER in (
+                        'softmax', 'softmax_triplet'
+                    )).lower(),
+                    str(cfg.DATALOADER.SAMPLER in (
+                        'triplet', 'softmax_triplet'
+                    )).lower(),
+                    str(bool(cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY)).lower(),
+                )
+            )
             engine.state.pcc_epoch_pair_count = 0
             if cfg.MODEL.PCC_MODE == 'fixed_index':
                 engine.state.pcc_epoch_distance_sum = 0.0
