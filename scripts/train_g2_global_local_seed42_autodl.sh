@@ -5,6 +5,7 @@ EXPECTED_BRANCH="codex/g2-global-local-gating"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${REPO_ROOT}/configs/softmax_triplet_c2_l03_multi_granularity_dynamic_gating_g2_global_local_autodl.yml"
 OUTPUT_DIR="/root/autodl-tmp/experiments/BoT/c2_l03_mgdg_g2_global_local_tau1_seed42_market1501"
+CONSOLE_LOG="${OUTPUT_DIR}.console.log"
 
 cd "${REPO_ROOT}"
 CURRENT_BRANCH="$(git branch --show-current)"
@@ -35,11 +36,30 @@ if [[ -e "${OUTPUT_DIR}" ]]; then
   printf 'Refusing to reuse formal output directory: %s\n' "${OUTPUT_DIR}" >&2
   exit 1
 fi
+if [[ -e "${CONSOLE_LOG}" ]]; then
+  printf 'Refusing to reuse formal console log: %s\n' "${CONSOLE_LOG}" >&2
+  exit 1
+fi
 
 export PYTHONHASHSEED=42
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-python tools/train.py --config_file "${CONFIG}"
-python tools/finalize_g2_global_local_experiment.py \
+RUN_STARTED_EPOCH="$(date +%s)"
+RUN_STARTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+  python tools/train.py --config_file "${CONFIG}"
+  python tools/finalize_g2_global_local_experiment.py \
+    --config-file "${CONFIG}" \
+    --output-dir "${OUTPUT_DIR}"
+} 2>&1 | tee "${CONSOLE_LOG}"
+RUN_ENDED_EPOCH="$(date +%s)"
+RUN_ENDED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_RUNTIME_SECONDS="$((RUN_ENDED_EPOCH - RUN_STARTED_EPOCH))"
+
+python tools/recover_g2_global_local_experiment.py \
   --config-file "${CONFIG}" \
-  --output-dir "${OUTPUT_DIR}"
+  --output-dir "${OUTPUT_DIR}" \
+  --console-log "${CONSOLE_LOG}" \
+  --started-at-utc "${RUN_STARTED_UTC}" \
+  --ended-at-utc "${RUN_ENDED_UTC}" \
+  --runtime-seconds "${RUN_RUNTIME_SECONDS}"
