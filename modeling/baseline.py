@@ -202,15 +202,25 @@ class MultiGranularityPartHead(nn.Module):
 
 
 class MultiGranularityDynamicGate(nn.Module):
-    """Per-sample scaled-softmax controller for existing scale descriptors."""
+    """Per-sample scaled-softmax controller for existing scale descriptors.
+
+    ``global`` (G1) feeds the global descriptor ``g`` to the controller.  The
+    ``concat_global_local`` variant (G2) feeds ``[g, z2, z4, z6]`` before the
+    same controller.  In both cases the controller still produces three
+    weights, one for each existing local scale descriptor; it does not add a
+    fourth global-feature gate.
+    """
+
+    VALID_GATING_INPUTS = ('global', 'concat_global_local')
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
-                 gating_input='global', normalization='scaled_softmax'):
+                 gating_input='global', normalization='scaled_softmax',
+                 local_feature_dim=None):
         super(MultiGranularityDynamicGate, self).__init__()
-        if gating_input != 'global':
+        if gating_input not in self.VALID_GATING_INPUTS:
             raise ValueError(
-                "MULTI_GRANULARITY_GATING_INPUT must be 'global', got {!r}"
-                .format(gating_input)
+                "MULTI_GRANULARITY_GATING_INPUT must be one of {}, got {!r}"
+                .format(self.VALID_GATING_INPUTS, gating_input)
             )
         if normalization != 'scaled_softmax':
             raise ValueError(
@@ -234,18 +244,55 @@ class MultiGranularityDynamicGate(nn.Module):
         self.temperature = float(temperature)
         self.gating_input = gating_input
         self.normalization = normalization
-        self.controller = nn.Linear(self.in_planes, self.num_scales)
+        self.local_feature_dim = (
+            None if local_feature_dim is None else int(local_feature_dim)
+        )
+        if self.gating_input == 'concat_global_local':
+            if self.local_feature_dim is None or self.local_feature_dim <= 0:
+                raise ValueError(
+                    'concat_global_local gating requires a positive '
+                    'local_feature_dim'
+                )
+            self.controller_input_dim = (
+                self.in_planes + self.num_scales * self.local_feature_dim
+            )
+        else:
+            self.controller_input_dim = self.in_planes
+        self.controller = nn.Linear(self.controller_input_dim, self.num_scales)
         nn.init.constant_(self.controller.weight, 0.0)
         nn.init.constant_(self.controller.bias, 0.0)
 
-    def forward(self, global_feat):
+    def controller_input(self, global_feat, scale_features=None):
+        """Return the configured controller input without changing descriptors."""
         if global_feat.dim() != 2 or global_feat.size(1) != self.in_planes:
             raise ValueError(
-                'Dynamic gate expects [B,{}], got {}'.format(
+                'Dynamic gate expects global_feat [B,{}], got {}'.format(
                     self.in_planes, tuple(global_feat.shape)
                 )
             )
-        logits = self.controller(global_feat)
+        if self.gating_input == 'global':
+            return global_feat
+        if scale_features is None or len(scale_features) != self.num_scales:
+            received = 0 if scale_features is None else len(scale_features)
+            raise ValueError(
+                'concat_global_local gating expects {} local scale features, '
+                'got {}'.format(self.num_scales, received)
+            )
+        checked = []
+        for index, feature in enumerate(scale_features):
+            expected = (global_feat.size(0), self.local_feature_dim)
+            if feature.dim() != 2 or tuple(feature.shape) != expected:
+                raise ValueError(
+                    'Local scale feature {} must have shape {}, got {}'.format(
+                        index, expected, tuple(feature.shape)
+                    )
+                )
+            checked.append(feature)
+        return torch.cat((global_feat,) + tuple(checked), dim=1)
+
+    def forward(self, global_feat, scale_features=None):
+        controller_input = self.controller_input(global_feat, scale_features)
+        logits = self.controller(controller_input)
         probabilities = F.softmax(logits / self.temperature, dim=1)
         weights = float(self.num_scales) * probabilities
         return logits, probabilities, weights
@@ -416,6 +463,7 @@ class Baseline(nn.Module):
                     normalization=str(
                         multi_granularity_gating_normalization
                     ).lower(),
+                    local_feature_dim=self.multi_granularity_part_head.projection_dim,
                 )
 
         if self.neck == 'no':
@@ -442,7 +490,7 @@ class Baseline(nn.Module):
             scale_features = self.multi_granularity_part_head(feature_map)
             if self.multi_granularity_dynamic_gating:
                 gate_logits, probabilities, weights = (
-                    self.multi_granularity_dynamic_gate(global_feat)
+                    self.multi_granularity_dynamic_gate(global_feat, scale_features)
                 )
                 scale_features = tuple(
                     scale_feature * weights[:, index:index + 1]
@@ -475,11 +523,11 @@ class Baseline(nn.Module):
                 # print("Test with feature before BN")
                 return fused_pre_bn
 
-    def dynamic_gating_values(self, global_feat):
+    def dynamic_gating_values(self, global_feat, scale_features=None):
         """Expose differentiable controller values for validation/evidence."""
         if not self.multi_granularity_dynamic_gating:
             raise RuntimeError('Dynamic multi-granularity gating is disabled')
-        return self.multi_granularity_dynamic_gate(global_feat)
+        return self.multi_granularity_dynamic_gate(global_feat, scale_features)
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

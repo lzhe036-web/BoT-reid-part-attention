@@ -41,8 +41,22 @@ def configuration(dynamic):
     return result
 
 
+def global_local_configuration():
+    result = configuration(True).clone()
+    result.defrost()
+    result.MODEL.MULTI_GRANULARITY_GATING_INPUT = "concat_global_local"
+    result.freeze()
+    return result
+
+
 def model(dynamic, num_classes=3):
     result = build_model(configuration(dynamic), num_classes)
+    result.base = CountingBackbone()
+    return result
+
+
+def global_local_model(num_classes=3):
+    result = build_model(global_local_configuration(), num_classes)
     result.base = CountingBackbone()
     return result
 
@@ -77,6 +91,34 @@ class DynamicGatingTest(unittest.TestCase):
         self.assertTrue(torch.allclose(probabilities.sum(1), torch.ones(5)))
         self.assertTrue(torch.allclose(weights, 3.0 * probabilities))
         self.assertTrue(torch.allclose(weights.sum(1), torch.full((5,), 3.0)))
+
+    def test_global_local_gate_uses_declared_concat_input(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, temperature=1.0,
+            gating_input="concat_global_local", local_feature_dim=256,
+        )
+        global_features = torch.randn(2, 2048)
+        local_features = tuple(torch.randn(2, 256) for _ in range(3))
+        controller_input = gate.controller_input(global_features, local_features)
+        self.assertEqual(tuple(controller_input.shape), (2, 2816))
+        self.assertTrue(torch.equal(controller_input[:, :2048], global_features))
+        self.assertTrue(torch.equal(controller_input[:, 2048:2304], local_features[0]))
+        self.assertTrue(torch.equal(controller_input[:, 2304:2560], local_features[1]))
+        self.assertTrue(torch.equal(controller_input[:, 2560:2816], local_features[2]))
+        self.assertEqual(gate.controller.in_features, 2816)
+
+    def test_global_local_model_keeps_descriptor_contract_and_gate_outputs(self):
+        network = global_local_model()
+        network.eval()
+        with torch.no_grad():
+            descriptor = network(torch.randn(2, 3, 8, 4))
+        self.assertEqual(tuple(descriptor.shape), (2, 2816))
+        self.assertEqual(
+            network.multi_granularity_dynamic_gate.controller.in_features, 2816
+        )
+        self.assertEqual(
+            tuple(network._last_dynamic_gating["weights"].shape), (2, 3)
+        )
 
     def test_controller_is_zero_initialized(self):
         gate = MultiGranularityDynamicGate(2048, 3)
