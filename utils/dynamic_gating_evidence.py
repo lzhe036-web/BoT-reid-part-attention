@@ -69,9 +69,14 @@ class GatingEpochAccumulator(object):
             raise DynamicGatingEvidenceError("Gating probabilities must be non-negative")
         row_sums = values.sum(dim=1)
         if not torch.allclose(
-                row_sums, torch.ones_like(row_sums), rtol=1e-7, atol=1e-9):
+                row_sums, torch.ones_like(row_sums),
+                rtol=GATING_VALUE_RTOL, atol=GATING_VALUE_ATOL):
+            max_abs_error = float((row_sums - 1.0).abs().max().item())
             raise DynamicGatingEvidenceError(
-                "Gating probabilities must sum to one for every sample"
+                "Gating probabilities must sum to one for every sample; "
+                "max_abs_error={:.12g}, rtol={}, atol={}".format(
+                    max_abs_error, GATING_VALUE_RTOL, GATING_VALUE_ATOL
+                )
             )
 
         weights = values * 3.0

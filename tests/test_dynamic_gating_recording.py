@@ -15,6 +15,7 @@ from tools.run_experiment import (
     launch_training_subprocess,
 )
 from utils.dynamic_gating_evidence import (
+    DynamicGatingEvidenceError,
     GatingEpochAccumulator,
     append_gating_epoch_record,
     read_gating_epoch_records,
@@ -409,6 +410,17 @@ class RegistryTest(unittest.TestCase):
 
 
 class GatingEpochStatisticsTest(unittest.TestCase):
+    def test_float32_softmax_roundoff_is_accepted(self):
+        accumulator = GatingEpochAccumulator(1.0)
+        accumulator.update([[0.5, 0.25, 0.25000011920928955]])
+        self.assertEqual(accumulator.summary()["gating_sample_count"], 1)
+
+    def test_material_probability_sum_error_is_rejected(self):
+        accumulator = GatingEpochAccumulator(1.0)
+        with self.assertRaisesRegex(
+                DynamicGatingEvidenceError, "max_abs_error"):
+            accumulator.update([[0.5, 0.25, 0.251]])
+
     def test_sample_weighted_statistics_are_saved_and_read(self):
         accumulator = GatingEpochAccumulator(1.0)
         accumulator.update([[0.1, 0.2, 0.7]])
