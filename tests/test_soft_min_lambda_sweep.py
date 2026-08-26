@@ -215,16 +215,19 @@ class LambdaSweepProtocolTest(unittest.TestCase):
             with _formal_gpu_lock("smoke") as lock:
                 self.assertEqual(lock, "not_recorded")
 
-    def test_parent_algorithms_model_descriptor_data_and_eval_are_unchanged(self):
+    def test_windowed_extension_changes_only_alignment_loss_and_logging(self):
         protected = (
             "layers", "modeling", "data", "engine", "solver",
             "tools/train.py", "tools/test.py",
         )
-        changed = subprocess.check_output(
+        changed = set(subprocess.check_output(
             ["git", "diff", "--name-only", PARENT_SHA, "--"] + list(protected),
             cwd=str(REPO_ROOT), text=True,
-        ).strip()
-        self.assertEqual(changed, "")
+        ).splitlines())
+        self.assertEqual(changed, {
+            "engine/trainer.py", "layers/__init__.py",
+            "layers/part_correspondence_consistency.py",
+        })
 
 
 class StrictLambdaSmokeGateTest(unittest.TestCase):
@@ -342,6 +345,10 @@ class StrictLambdaSmokeGateTest(unittest.TestCase):
             "merge_base": PARENT_SHA,
             "git_preflight_clean": True,
             "git_status_preflight": [],
+            "git_status_porcelain_raw": "",
+            "git_staged_diff_empty": True,
+            "git_unstaged_diff_empty": True,
+            "git_operations_in_progress": [],
             "config_source_sha256": sha256_file(source),
             "config_source_size_bytes": source.stat().st_size,
             "config_resolved_sha256": sha256_file(resolved),
@@ -355,6 +362,7 @@ class StrictLambdaSmokeGateTest(unittest.TestCase):
             "pcc_parts": 6,
             "pcc_mode": "soft_min",
             "alignment_temperature": 0.2,
+            "alignment_window": "not_applicable",
             "protocol_signature_sha256": protocol_signature,
             "implementation_signature_sha256": implementation_signature,
             "dataset_manifest_sha256": dataset_manifest[
@@ -512,7 +520,7 @@ class StrictLambdaSmokeGateTest(unittest.TestCase):
 
 class LambdaTableSchemaTest(unittest.TestCase):
     def test_view_schema_is_explicit_and_uses_pcc_lambda(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(SCHEMA_VERSION, 5)
         self.assertEqual(
             TABLE_SCHEMAS["soft_alignment_lambda_sensitivity"],
             SOFT_ALIGNMENT_LAMBDA_FIELDS,

@@ -210,6 +210,7 @@ class FormalSmokeGateTest(unittest.TestCase):
             "pcc_parts": 6,
             "pcc_mode": "soft_min",
             "alignment_temperature": case["tau"],
+            "alignment_window": "not_applicable",
         }
         manifest.update(feature)
         _write_json(run_dir / "run_manifest.json", manifest)

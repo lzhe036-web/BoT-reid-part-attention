@@ -302,6 +302,16 @@ def _validate_candidate(
             manifest.get("git_status_preflight") == [],
             "smoke preflight Git status is not empty",
         )
+        _require(
+            manifest.get("git_status_porcelain_raw") == "",
+            "smoke raw preflight porcelain is not empty",
+        )
+        _require(
+            manifest.get("git_staged_diff_empty") is True
+            and manifest.get("git_unstaged_diff_empty") is True
+            and manifest.get("git_operations_in_progress") == [],
+            "smoke strict Git preflight evidence is incomplete",
+        )
 
     model = formal_configuration.get("MODEL", {})
     expected_fields = {
@@ -310,6 +320,11 @@ def _validate_candidate(
         "pcc_parts": model.get("PCC_PARTS"),
         "pcc_mode": model.get("PCC_MODE"),
         "alignment_temperature": model.get("PCC_SOFTMIN_TAU"),
+        "alignment_window": (
+            model.get("PCC_SOFTMIN_WINDOW")
+            if model.get("PCC_MODE") == "windowed_soft_min"
+            else "not_applicable"
+        ),
     }
     if expected_protocol_signature is not None:
         expected_fields["cross_camera_positive_lambda"] = model.get(

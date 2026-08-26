@@ -18,6 +18,7 @@ from .part_correspondence_consistency import (
     SUPPORTED_ALIGNMENT_MODES,
     part_alignment_loss,
     validate_softmin_tau,
+    validate_softmin_window,
 )
 
 
@@ -44,8 +45,12 @@ def make_loss(cfg, num_classes):    # modified by gu
                 cfg.MODEL.PCC_MODE, ", ".join(SUPPORTED_ALIGNMENT_MODES)
             )
         )
-    if pcc_enabled and cfg.MODEL.PCC_MODE == 'soft_min':
+    if pcc_enabled and cfg.MODEL.PCC_MODE in ('soft_min', 'windowed_soft_min'):
         validate_softmin_tau(cfg.MODEL.PCC_SOFTMIN_TAU)
+    if pcc_enabled and cfg.MODEL.PCC_MODE == 'windowed_soft_min':
+        validate_softmin_window(
+            cfg.MODEL.PCC_SOFTMIN_WINDOW, cfg.MODEL.PCC_PARTS
+        )
     if cfg.MODEL.CROSS_CAMERA_POSITIVE_ONLY:
         if cfg.MODEL.CAMERA_AWARE_TRIPLET:
             print("CROSS_CAMERA_POSITIVE_ONLY is enabled; skip CAMERA_AWARE_TRIPLET auxiliary loss.")
@@ -104,6 +109,9 @@ def make_loss(cfg, num_classes):    # modified by gu
         mean_path_absolute_offset = zero
         soft_alignment_loss = zero
         mean_soft_path_cost = zero
+        windowed_soft_alignment_loss = zero
+        mean_windowed_soft_path_cost = zero
+        alignment_window = None
         if pcc_enabled:
             if pcc_local_features is None:
                 raise RuntimeError(
@@ -124,6 +132,7 @@ def make_loss(cfg, num_classes):    # modified by gu
                 camids,
                 cfg.MODEL.PCC_MODE,
                 softmin_tau=cfg.MODEL.PCC_SOFTMIN_TAU,
+                softmin_window=cfg.MODEL.PCC_SOFTMIN_WINDOW,
             )
             loss_pcc = alignment['loss_pcc']
             valid_pcc_pair_count = alignment['valid_pcc_pair_count']
@@ -140,6 +149,13 @@ def make_loss(cfg, num_classes):    # modified by gu
             ]
             soft_alignment_loss = alignment['soft_alignment_loss']
             mean_soft_path_cost = alignment['mean_soft_path_cost']
+            windowed_soft_alignment_loss = alignment[
+                'windowed_soft_alignment_loss'
+            ]
+            mean_windowed_soft_path_cost = alignment[
+                'mean_windowed_soft_path_cost'
+            ]
+            alignment_window = alignment['alignment_window']
             total_loss = total_loss + cfg.MODEL.PCC_LAMBDA * loss_pcc
 
         return {
@@ -158,9 +174,12 @@ def make_loss(cfg, num_classes):    # modified by gu
             'mean_path_absolute_offset': mean_path_absolute_offset,
             'soft_alignment_loss': soft_alignment_loss,
             'mean_soft_path_cost': mean_soft_path_cost,
+            'windowed_soft_alignment_loss': windowed_soft_alignment_loss,
+            'mean_windowed_soft_path_cost': mean_windowed_soft_path_cost,
+            'alignment_window': alignment_window,
             'alignment_temperature': (
                 cfg.MODEL.PCC_SOFTMIN_TAU
-                if cfg.MODEL.PCC_MODE == 'soft_min' else None
+                if cfg.MODEL.PCC_MODE in ('soft_min', 'windowed_soft_min') else None
             ),
         }
 

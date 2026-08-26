@@ -9,7 +9,10 @@ import torch
 import torch.nn.functional as F
 
 
-SUPPORTED_ALIGNMENT_MODES = ("fixed_index", "hard_shortest_path", "soft_min")
+SUPPORTED_ALIGNMENT_MODES = (
+    "fixed_index", "hard_shortest_path", "soft_min",
+    "windowed_soft_min",
+)
 
 
 def validate_softmin_tau(tau):
@@ -23,6 +26,21 @@ def validate_softmin_tau(tau):
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError("PCC_SOFTMIN_TAU must be finite and greater than zero")
     return value
+
+
+def validate_softmin_window(window, num_parts):
+    """Validate a discrete Soft-Min diagonal-band width."""
+    if (isinstance(window, bool) or not isinstance(window, int)
+            or isinstance(num_parts, bool) or not isinstance(num_parts, int)
+            or num_parts <= 0):
+        raise ValueError("PCC_SOFTMIN_WINDOW and num_parts must be integers")
+    if window < 0:
+        raise ValueError("PCC_SOFTMIN_WINDOW must be non-negative")
+    if num_parts > 1 and window == 0:
+        raise ValueError(
+            "PCC_SOFTMIN_WINDOW=0 cannot connect K>1 with right/down paths"
+        )
+    return window
 
 
 def horizontal_part_bounds(height, num_parts):
@@ -259,6 +277,59 @@ def soft_min_path_cost(distance_matrix, tau):
     return soft_min_path_costs(distance_matrix.unsqueeze(0), tau)[0]
 
 
+def windowed_soft_min_path_costs(distance_matrix, tau, window):
+    """Return Soft-Min costs restricted to ``abs(row-column) <= window``.
+
+    Invalid cells have no dynamic-programming state at all. This deliberately
+    avoids finite penalties and never evaluates Soft-Min with invalid inputs.
+    """
+    _validate_square_distance_matrix(distance_matrix)
+    tau_value = validate_softmin_tau(tau)
+    num_parts = int(distance_matrix.size(1))
+    window_value = validate_softmin_window(window, num_parts)
+    if window_value >= num_parts - 1:
+        return soft_min_path_costs(distance_matrix, tau_value)
+    accumulated = [[None for _ in range(num_parts)] for _ in range(num_parts)]
+    for row in range(num_parts):
+        for column in range(num_parts):
+            if abs(row - column) > window_value:
+                continue
+            if row == 0 and column == 0:
+                accumulated[row][column] = distance_matrix[:, row, column]
+                continue
+            predecessors = []
+            if row > 0 and accumulated[row - 1][column] is not None:
+                predecessors.append(accumulated[row - 1][column])
+            if column > 0 and accumulated[row][column - 1] is not None:
+                predecessors.append(accumulated[row][column - 1])
+            if len(predecessors) == 1:
+                previous = predecessors[0]
+            elif len(predecessors) == 2:
+                previous = softmin_two_predecessors(
+                    predecessors[0], predecessors[1], tau_value
+                )
+            else:
+                raise RuntimeError(
+                    "Windowed Soft-Min encountered an unreachable band cell"
+                )
+            accumulated[row][column] = (
+                distance_matrix[:, row, column] + previous
+            )
+    result = accumulated[-1][-1]
+    if result is None:
+        raise RuntimeError("Windowed Soft-Min cannot reach the terminal cell")
+    return result
+
+
+def windowed_soft_min_path_cost(distance_matrix, tau, window):
+    """Return a windowed Soft-Min cost for one ``[K, K]`` matrix."""
+    if distance_matrix.dim() != 2:
+        raise ValueError("distance_matrix must have shape [K, K]")
+    return windowed_soft_min_path_costs(
+        distance_matrix.unsqueeze(0), tau, window
+    )[0]
+
+
 def fixed_index_pcc_loss(local_features, pids, camids):
     """Compute PCC over unique same-PID, different-camera pairs."""
     pair_indices = build_cross_camera_positive_pairs(pids, camids)
@@ -311,8 +382,30 @@ def soft_min_alignment_loss(local_features, pids, camids, tau):
     return soft_alignment_loss, pair_count, raw_costs.detach().mean()
 
 
+def windowed_soft_min_alignment_loss(local_features, pids, camids, tau,
+                                     window):
+    """Compute normalized diagonal-band Soft-Min alignment over camera pairs."""
+    tau_value = validate_softmin_tau(tau)
+    pair_indices = build_cross_camera_positive_pairs(pids, camids)
+    pair_count = int(pair_indices.size(0))
+    if pair_count == 0:
+        zero = local_features.sum() * 0.0
+        return zero, pair_count, zero
+    local_a, local_b = select_pair_local_features(local_features, pair_indices)
+    distance_matrix = pairwise_local_distance_matrix(local_a, local_b)
+    window_value = validate_softmin_window(
+        window, int(distance_matrix.size(1))
+    )
+    raw_costs = windowed_soft_min_path_costs(
+        distance_matrix, tau_value, window_value
+    )
+    path_length = 2 * int(distance_matrix.size(1)) - 1
+    loss = (raw_costs / float(path_length)).mean()
+    return loss, pair_count, raw_costs.detach().mean()
+
+
 def part_alignment_loss(local_features, pids, camids, mode,
-                        softmin_tau=None):
+                        softmin_tau=None, softmin_window=None):
     """Dispatch a supported alignment mode and expose compatible statistics."""
     zero = local_features.sum() * 0.0
     if mode == "fixed_index":
@@ -329,6 +422,9 @@ def part_alignment_loss(local_features, pids, camids, mode,
             "mean_path_absolute_offset": zero,
             "soft_alignment_loss": zero,
             "mean_soft_path_cost": zero,
+            "windowed_soft_alignment_loss": zero,
+            "mean_windowed_soft_path_cost": zero,
+            "alignment_window": None,
         }
     if mode == "hard_shortest_path":
         loss, pair_count, mean_cost, mean_offset = (
@@ -344,6 +440,9 @@ def part_alignment_loss(local_features, pids, camids, mode,
             "mean_path_absolute_offset": mean_offset,
             "soft_alignment_loss": zero,
             "mean_soft_path_cost": zero,
+            "windowed_soft_alignment_loss": zero,
+            "mean_windowed_soft_path_cost": zero,
+            "alignment_window": None,
         }
     if mode == "soft_min":
         loss, pair_count, mean_cost = soft_min_alignment_loss(
@@ -359,6 +458,29 @@ def part_alignment_loss(local_features, pids, camids, mode,
             "mean_path_absolute_offset": zero,
             "soft_alignment_loss": loss,
             "mean_soft_path_cost": mean_cost,
+            "windowed_soft_alignment_loss": zero,
+            "mean_windowed_soft_path_cost": zero,
+            "alignment_window": None,
+        }
+    if mode == "windowed_soft_min":
+        loss, pair_count, mean_cost = windowed_soft_min_alignment_loss(
+            local_features, pids, camids, softmin_tau, softmin_window
+        )
+        return {
+            "loss_pcc": loss,
+            "valid_pcc_pair_count": pair_count,
+            "mean_fixed_index_part_distance": zero,
+            "hard_alignment_loss": zero,
+            "valid_alignment_pair_count": pair_count,
+            "mean_hard_path_cost": zero,
+            "mean_path_absolute_offset": zero,
+            "soft_alignment_loss": zero,
+            "mean_soft_path_cost": zero,
+            "windowed_soft_alignment_loss": loss,
+            "mean_windowed_soft_path_cost": mean_cost,
+            "alignment_window": validate_softmin_window(
+                softmin_window, int(local_features.size(1))
+            ),
         }
     raise ValueError(
         "Unsupported PCC_MODE {!r}; expected one of {}".format(

@@ -67,6 +67,7 @@ _C.MODEL.PCC_PARTS = 6
 _C.MODEL.PCC_LAMBDA = 0.1
 _C.MODEL.PCC_MODE = "fixed_index"
 _C.MODEL.PCC_SOFTMIN_TAU = 0.1
+_C.MODEL.PCC_SOFTMIN_WINDOW = 5
 
 
 # -----------------------------------------------------------------------------

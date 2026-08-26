@@ -26,6 +26,7 @@ from utils.experiment_recording import (
     NOT_RECORDED,
     atomic_write_json,
     atomic_write_text,
+    config_protocol_signature,
     config_modules,
     csv_to_markdown,
     experiment_identity,
@@ -56,7 +57,8 @@ def _read_tsv(path):
 
 
 def _base_config(output_dir, variant="cross", seed=42,
-                 pcc_mode="fixed_index"):
+                 pcc_mode="fixed_index", pcc_lambda=0.1,
+                 pcc_softmin_tau=0.1, pcc_softmin_window=1):
     model = {
         "NAME": "resnet50",
         "NECK": "bnneck",
@@ -68,9 +70,10 @@ def _base_config(output_dir, variant="cross", seed=42,
         "CROSS_CAMERA_POSITIVE_MODE": "mean",
         "PART_CORRESPONDENCE_CONSISTENCY": False,
         "PCC_PARTS": 6,
-        "PCC_LAMBDA": 0.1,
+        "PCC_LAMBDA": pcc_lambda,
         "PCC_MODE": pcc_mode,
-        "PCC_SOFTMIN_TAU": 0.1,
+        "PCC_SOFTMIN_TAU": pcc_softmin_tau,
+        "PCC_SOFTMIN_WINDOW": pcc_softmin_window,
     }
     if variant == "cross":
         model["CROSS_CAMERA_POSITIVE_ONLY"] = True
@@ -105,11 +108,14 @@ def _training_log(config_text):
     pcc_enabled = "PART_CORRESPONDENCE_CONSISTENCY: true" in config_text
     hard_enabled = pcc_enabled and "PCC_MODE: hard_shortest_path" in config_text
     soft_enabled = pcc_enabled and "PCC_MODE: soft_min" in config_text
+    windowed_soft_enabled = (
+        pcc_enabled and "PCC_MODE: windowed_soft_min" in config_text
+    )
     first_pcc = ""
     second_pcc = ""
     first_summary = []
     second_summary = []
-    if pcc_enabled and not hard_enabled and not soft_enabled:
+    if pcc_enabled and not hard_enabled and not soft_enabled and not windowed_soft_enabled:
         first_pcc = ", loss_pcc: 0.2, valid_pcc_pair_count: 12.0, mean_fixed_index_part_distance: 0.2"
         second_pcc = ", loss_pcc: 0.1, valid_pcc_pair_count: 14.0, mean_fixed_index_part_distance: 0.1"
         first_summary = [
@@ -140,6 +146,20 @@ def _training_log(config_text):
             "2026-08-07 10:59:59 reid_baseline.train INFO: Soft Alignment Batch - Epoch: 2 Iteration: 100 soft_alignment_loss: 0.200000 valid_alignment_pair_count: 14 mean_soft_path_cost: 2.200000 alignment_temperature: 0.1",
             "2026-08-07 11:00:00 reid_baseline.train INFO: Soft Alignment Epoch Summary - Epoch: 2 soft_alignment_loss: 0.200000 valid_alignment_pair_count: 1400 mean_soft_path_cost: 2.200000 alignment_temperature: 0.1",
         ]
+    elif windowed_soft_enabled:
+        windowed_tau = (
+            "0.2" if "PCC_SOFTMIN_TAU: 0.2" in config_text else "0.1"
+        )
+        first_pcc = ", loss_pcc: 0.2"
+        second_pcc = ", loss_pcc: 0.1"
+        first_summary = [
+            "2026-08-07 10:09:59 reid_baseline.train INFO: Windowed Soft Alignment Batch - Epoch: 1 Iteration: 100 window: 1 alignment_temperature: {} windowed_soft_alignment_loss: 0.200000 valid_alignment_pair_count: 12 mean_windowed_soft_path_cost: 2.200000".format(windowed_tau),
+            "2026-08-07 10:10:00 reid_baseline.train INFO: Windowed Soft Alignment Epoch Summary - Epoch: 1 window: 1 alignment_temperature: {} windowed_soft_alignment_loss: 0.200000 valid_alignment_pair_count: 1200 mean_windowed_soft_path_cost: 2.200000".format(windowed_tau),
+        ]
+        second_summary = [
+            "2026-08-07 10:59:59 reid_baseline.train INFO: Windowed Soft Alignment Batch - Epoch: 2 Iteration: 100 window: 1 alignment_temperature: {} windowed_soft_alignment_loss: 0.100000 valid_alignment_pair_count: 14 mean_windowed_soft_path_cost: 1.100000".format(windowed_tau),
+            "2026-08-07 11:00:00 reid_baseline.train INFO: Windowed Soft Alignment Epoch Summary - Epoch: 2 window: 1 alignment_temperature: {} windowed_soft_alignment_loss: 0.100000 valid_alignment_pair_count: 1400 mean_windowed_soft_path_cost: 1.100000".format(windowed_tau),
+        ]
     return "\n".join([
         "2026-08-07 10:00:00 reid_baseline.train INFO: Start training",
         "2026-08-07 10:00:00 reid_baseline.train INFO: Loaded configuration file configs/synthetic.yml",
@@ -168,7 +188,9 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
                  experiment_id="C2-L03", seed=42, include_log=True,
                  include_checkpoint=True, applied_seed=None,
                  training_exit_code=0, include_efficiency=True,
-                 pcc_mode="fixed_index", run_kind="formal"):
+                 pcc_mode="fixed_index", run_kind="formal",
+                 pcc_lambda=0.1, pcc_softmin_tau=0.1,
+                 pcc_softmin_window=1):
     root = Path(root)
     records = root / "experiment_records"
     run_dir = records / "runs" / run_id
@@ -176,7 +198,9 @@ def make_fixture(root, run_id="run-001", variant="cross", family="c2_lambda",
     run_dir.mkdir(parents=True)
     output.mkdir(parents=True)
     config = _base_config(
-        output, variant=variant, seed=seed, pcc_mode=pcc_mode
+        output, variant=variant, seed=seed, pcc_mode=pcc_mode,
+        pcc_lambda=pcc_lambda, pcc_softmin_tau=pcc_softmin_tau,
+        pcc_softmin_window=pcc_softmin_window,
     )
     config_text = yaml.safe_dump(config, sort_keys=True)
     source = run_dir / "config_source.yml"
@@ -361,19 +385,29 @@ class ExperimentRecordingTest(unittest.TestCase):
             metadata = git_metadata(repo)
             self.assertEqual(set(metadata), {
                 "commit", "branch", "dirty", "status_porcelain", "tree",
+                "status_porcelain_raw", "staged_diff_empty",
+                "unstaged_diff_empty", "operations_in_progress",
+                "preflight_checked_at_utc", "commit_time", "commit_parents",
                 "has_upstream", "upstream",
             })
             self.assertEqual(metadata["status_porcelain"], [])
+            self.assertEqual(metadata["status_porcelain_raw"], "")
+            self.assertTrue(metadata["staged_diff_empty"])
+            self.assertTrue(metadata["unstaged_diff_empty"])
+            self.assertEqual(metadata["operations_in_progress"], [])
             self.assertEqual(len(metadata["tree"]), 40)
             self.assertFalse(metadata["has_upstream"])
             self.assertRegex(metadata["commit"], r"^[0-9a-f]{40}$")
             self.assertEqual(metadata["branch"], "metadata-test")
             self.assertFalse(metadata["dirty"])
+            validated = validate_git_preflight(
+                repo, "metadata-test", metadata["commit"]
+            )
             self.assertEqual(
-                validate_git_preflight(
-                    repo, "metadata-test", metadata["commit"]
-                ),
-                metadata,
+                {key: value for key, value in validated.items()
+                 if key != "preflight_checked_at_utc"},
+                {key: value for key, value in metadata.items()
+                 if key != "preflight_checked_at_utc"},
             )
 
             tracked.write_text("dirty\n", encoding="utf-8")
@@ -389,6 +423,30 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(rows[0]["rank1"], "95")
             self.assertEqual(rows[0]["log_sha256"], sha256_file(output / "log.txt"))
             self.assertEqual(result["status"]["status"], "success")
+
+    def test_successful_retry_moves_prior_failure_to_manifest_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(directory)
+            status_path = run_dir / "run_status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status.update({
+                "error": "earlier finalizer issue",
+                "error_type": "EvidenceError",
+                "traceback": "synthetic traceback",
+            })
+            atomic_write_json(status_path, status)
+            finalize_fixture(records, run_dir, experiments)
+            final_status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(final_status["status"], "success")
+            for field in ("error", "error_type", "traceback"):
+                self.assertNotIn(field, final_status)
+            manifest = json.loads(
+                (run_dir / "run_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["finalization_provenance"][-1]["prior_failure"]["error"],
+                "earlier finalizer issue",
+            )
 
     def test_lambda_experiment_writes_lambda_table(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -776,6 +834,65 @@ class ExperimentRecordingTest(unittest.TestCase):
             self.assertEqual(len(
                 row["multigranular_feature_signature_sha256"]
             ), 64)
+
+    def test_windowed_soft_finalizer_writes_machine_window_table(self):
+        family = "c2l03_windowed_soft_min_alignment_tau0p2_lambda0p05"
+        with tempfile.TemporaryDirectory() as directory:
+            records, run_dir, _output, experiments = make_fixture(
+                directory,
+                variant="pcc", family=family,
+                experiment_id="C2-L03-WSOFTMIN-W1-T0P2-LP0P05-S42",
+                pcc_mode="windowed_soft_min", pcc_lambda=0.05,
+                pcc_softmin_tau=0.2, pcc_softmin_window=1,
+            )
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            resolved = yaml.safe_load(
+                (run_dir / "config_resolved.yml").read_text(encoding="utf-8")
+            )
+            manifest.update({
+                "schema_version": 3,
+                "alignment_window": 1,
+                "protocol_signature_sha256": config_protocol_signature(resolved),
+                "implementation_signature_sha256": "d" * 64,
+                "merge_base": "e" * 40,
+                "commit_tree": "f" * 40,
+                "has_upstream": False,
+                "upstream": NOT_RECORDED,
+                "config_source_size_bytes": (
+                    run_dir / "config_source.yml"
+                ).stat().st_size,
+                "config_resolved_size_bytes": (
+                    run_dir / "config_resolved.yml"
+                ).stat().st_size,
+                "dataset_manifest_sha256": "b" * 64,
+                "commit_time": "2026-08-27T00:00:00Z",
+                "commit_parents": ["e" * 40],
+                "git_status_porcelain_raw": "",
+                "git_staged_diff_empty": True,
+                "git_unstaged_diff_empty": True,
+                "git_operations_in_progress": [],
+                "git_preflight_checked_at_utc": "2026-08-27T00:00:00Z",
+                "git_preflight_clean": True,
+                "git_status_preflight": [],
+            })
+            atomic_write_json(manifest_path, manifest)
+            with mock.patch(
+                    "utils.experiment_recording.git_implementation_signature",
+                    return_value="d" * 64), mock.patch(
+                    "utils.experiment_recording._git_output",
+                    return_value="f" * 40):
+                finalize_fixture(records, run_dir, experiments)
+            rows = _read_csv(
+                records / "tables" / "windowed_soft_alignment_sensitivity.csv"
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["alignment_window"], "1")
+            self.assertEqual(rows[0]["alignment_mode"], "windowed_soft_min")
+            markdown = (records / "tables" / (
+                "windowed_soft_alignment_sensitivity.md"
+            )).read_text(encoding="utf-8")
+            self.assertIn(rows[0]["experiment_id"], markdown)
 
     def test_soft_zero_pair_and_missing_signature_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -427,6 +427,7 @@ def _model_manifest(configuration, method=None,
             "alignment_strategy": identity["alignment_strategy"],
             "alignment_mode": identity["alignment_mode"],
             "alignment_temperature": identity["alignment_temperature"],
+            "alignment_window": identity["alignment_window"],
             "gating_mode": identity["gating_mode"],
             "gating_temperature": identity["gating_temperature"],
             "lambda": identity["pcc_lambda"],
@@ -472,11 +473,11 @@ def run(args):
         git_info["merge_base"] = lineage["merge_base"]
     feature_compatibility = None
     alignment_mode = configuration.get("MODEL", {}).get("PCC_MODE")
-    if (alignment_mode == "soft_min"
+    if (alignment_mode in ("soft_min", "windowed_soft_min")
             and args.feature_reference_commit.lower()
             != FIXED_HARD_FEATURE_REFERENCE_COMMIT):
         raise RuntimeError(
-            "Soft-Min feature reference must be the fixed Hard commit {}"
+            "Soft-Min alignment feature reference must be the fixed Hard commit {}"
             .format(FIXED_HARD_FEATURE_REFERENCE_COMMIT)
         )
     if args.feature_reference_commit != NOT_RECORDED:
@@ -490,9 +491,9 @@ def run(args):
                 git_info["commit"], reference_configuration, configuration,
             )
         )
-    elif alignment_mode == "soft_min":
+    elif alignment_mode in ("soft_min", "windowed_soft_min"):
         raise RuntimeError(
-            "Soft-Min requires --feature-reference-commit"
+            "Soft-Min alignment requires --feature-reference-commit"
         )
     source_seed = _load_explicit_source_seed(config_path)
     resolved_seed = validate_seed(configuration.get("SEED", NOT_RECORDED))

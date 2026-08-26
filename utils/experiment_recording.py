@@ -34,7 +34,7 @@ from utils.multigranular_signature import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 NOT_RECORDED = "not_recorded"
 MISSING_EVIDENCE = "missing_evidence"
 NOT_APPLICABLE = "not_applicable"
@@ -47,10 +47,66 @@ AUTO_CHECKPOINTS_END = "<!-- AUTO-CHECKPOINT-EVIDENCE:END -->"
 SOFT_LAMBDA_SWEEP_FAMILY = (
     "c2l03_soft_min_alignment_lambda_sweep_tau0p2"
 )
+WINDOWED_SOFT_ALIGNMENT_FAMILY = (
+    "c2l03_windowed_soft_min_alignment_tau0p2_lambda0p05"
+)
+STRICT_EVIDENCE_FAMILIES = {
+    SOFT_LAMBDA_SWEEP_FAMILY,
+    WINDOWED_SOFT_ALIGNMENT_FAMILY,
+}
+STRICT_MANIFEST_REQUIRED_FIELDS = (
+    "protocol_signature_sha256",
+    "implementation_signature_sha256", "merge_base",
+    "commit_tree", "has_upstream", "upstream",
+    "config_source_size_bytes", "config_resolved_size_bytes",
+    "dataset_manifest_sha256", "commit_time", "commit_parents",
+    "git_status_porcelain_raw", "git_staged_diff_empty",
+    "git_unstaged_diff_empty", "git_operations_in_progress",
+    "git_preflight_checked_at_utc",
+)
 
 
 class EvidenceError(RuntimeError):
     pass
+
+
+def _strict_manifest_missing_fields(manifest):
+    """Return strict fields that are absent or hold invalid sentinels."""
+    missing = []
+    for field in STRICT_MANIFEST_REQUIRED_FIELDS:
+        if field not in manifest:
+            missing.append(field)
+            continue
+        value = manifest[field]
+        # Existing upstream sentinels explicitly represent "no upstream".
+        if field == "upstream":
+            continue
+        # Empty porcelain is the recorded proof of a clean Git worktree.
+        invalid = ((None, NOT_RECORDED, MISSING_EVIDENCE)
+                   if field == "git_status_porcelain_raw"
+                   else (None, "", NOT_RECORDED, MISSING_EVIDENCE))
+        if value in invalid:
+            missing.append(field)
+    return missing
+
+
+def validate_strict_manifest_preflight(manifest):
+    """Validate strict evidence shared by lambda and windowed sweeps."""
+    missing = _strict_manifest_missing_fields(manifest)
+    if missing:
+        raise EvidenceError("Strict experiment manifest lacks {}".format(missing))
+    if manifest.get("git_preflight_clean") is not True:
+        raise EvidenceError("Strict experiment preflight was not clean")
+    if manifest.get("git_status_preflight") != []:
+        raise EvidenceError("Strict preflight status is not empty")
+    if manifest.get("git_status_porcelain_raw") != "":
+        raise EvidenceError("Raw preflight porcelain is not empty")
+    if manifest.get("git_staged_diff_empty") is not True:
+        raise EvidenceError("Staged diff was not empty at preflight")
+    if manifest.get("git_unstaged_diff_empty") is not True:
+        raise EvidenceError("Unstaged diff was not empty at preflight")
+    if manifest.get("git_operations_in_progress") != []:
+        raise EvidenceError("Git operation was active at preflight")
 
 
 MAIN_FIELDS = (
@@ -60,6 +116,7 @@ MAIN_FIELDS = (
     "cross_camera_positive_lambda",
     "pcc_lambda", "pcc_enabled", "pcc_parts", "pcc_mode",
     "alignment_strategy", "alignment_mode", "alignment_temperature",
+    "alignment_window",
     "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
     "multigranular_feature_signature_sha256",
@@ -112,7 +169,7 @@ ANCHOR_FIELDS = (
 PCC_FIELDS = (
     "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
     "method_family", "method_variant", "pcc_enabled",
-    "alignment_strategy", "alignment_temperature", "gating_mode",
+    "alignment_strategy", "alignment_temperature", "alignment_window", "gating_mode",
     "gating_temperature", "pcc_parts", "cross_camera_positive_lambda",
     "pcc_lambda", "valid_pcc_pair_count",
     "mean_fixed_index_part_distance", "hard_alignment_loss",
@@ -124,7 +181,7 @@ PCC_FIELDS = (
 ALIGNMENT_FIELDS = (
     "schema_version", "run_id", "experiment_id", "run_kind", "baseline",
     "method_family", "method_variant", "alignment_mode",
-    "alignment_temperature", "gating_mode", "gating_temperature",
+    "alignment_temperature", "alignment_window", "gating_mode", "gating_temperature",
     "multigranular_feature_signature_sha256", "parent_branch",
     "parent_commit", "parts",
     "cross_camera_positive_lambda", "alignment_lambda",
@@ -140,6 +197,13 @@ SOFT_ALIGNMENT_LAMBDA_FIELDS = (
     "map", "best_epoch", "runtime", "checkpoint", "checkpoint_sha256",
     "commit", "output_dir",
 )
+WINDOWED_SOFT_ALIGNMENT_FIELDS = (
+    "schema_version", "run_id", "experiment_id", "run_kind", "status",
+    "dataset", "method_variant", "alignment_mode", "alignment_window",
+    "alignment_temperature", "pcc_lambda", "parts", "seed", "rank1",
+    "rank5", "rank10", "map", "best_epoch", "runtime", "checkpoint",
+    "checkpoint_sha256", "commit", "output_dir",
+)
 RUN_FIELDS = (
     "schema_version", "run_id", "experiment_id", "experiment_family",
     "run_kind", "method", "method_family", "method_variant", "dataset",
@@ -147,7 +211,7 @@ RUN_FIELDS = (
     "seed", "lambda",
     "cross_camera_positive_lambda", "pcc_lambda", "pcc_enabled",
     "pcc_parts", "pcc_mode", "alignment_strategy", "alignment_mode",
-    "alignment_temperature", "gating_mode", "gating_temperature",
+    "alignment_temperature", "alignment_window", "gating_mode", "gating_temperature",
     "multigranular_feature_signature",
     "multigranular_feature_signature_sha256",
     "feature_reference_commit", "feature_reference_signature_sha256",
@@ -183,6 +247,7 @@ TABLE_SCHEMAS = {
     "pcc_ablation": PCC_FIELDS,
     "alignment_ablation": ALIGNMENT_FIELDS,
     "soft_alignment_lambda_sensitivity": SOFT_ALIGNMENT_LAMBDA_FIELDS,
+    "windowed_soft_alignment_sensitivity": WINDOWED_SOFT_ALIGNMENT_FIELDS,
 }
 
 PURE_EVIDENCE_PATHS = ("EXPERIMENTS.md", "experiment_records/")
@@ -399,13 +464,18 @@ def experiment_identity(configuration):
             variant = "soft_min"
             method_variant = "soft_min"
             relation = "same_pid_different_camera_soft_monotonic_paths"
+        elif pcc_mode == "windowed_soft_min":
+            method = "C2-L03 + Windowed Soft-Min Part Alignment"
+            variant = "windowed_soft_min"
+            method_variant = "windowed_soft_min"
+            relation = "same_pid_different_camera_windowed_soft_paths"
         else:
             raise EvidenceError(
                 "Unsupported enabled PCC_MODE: {!r}".format(pcc_mode)
             )
         method_family = "part_alignment"
         alignment_mode = pcc_mode
-        if pcc_mode == "soft_min":
+        if pcc_mode in ("soft_min", "windowed_soft_min"):
             from layers.part_correspondence_consistency import (
                 validate_softmin_tau,
             )
@@ -414,6 +484,16 @@ def experiment_identity(configuration):
             )
         else:
             alignment_temperature = NOT_APPLICABLE
+        if pcc_mode == "windowed_soft_min":
+            from layers.part_correspondence_consistency import (
+                validate_softmin_window,
+            )
+            alignment_window = validate_softmin_window(
+                nested_value(configuration, "MODEL.PCC_SOFTMIN_WINDOW"),
+                int(nested_value(configuration, "MODEL.PCC_PARTS")),
+            )
+        else:
+            alignment_window = NOT_APPLICABLE
         gating_mode = NOT_APPLICABLE
         gating_temperature = NOT_APPLICABLE
     else:
@@ -421,6 +501,7 @@ def experiment_identity(configuration):
         method_variant = variant
         alignment_mode = NOT_APPLICABLE
         alignment_temperature = NOT_APPLICABLE
+        alignment_window = NOT_APPLICABLE
         gating_mode = NOT_APPLICABLE
         gating_temperature = NOT_APPLICABLE
     dataset = nested_value(configuration, "DATASETS.NAMES")
@@ -450,6 +531,7 @@ def experiment_identity(configuration):
         "alignment_strategy": pcc_mode if pcc_enabled else NOT_RECORDED,
         "alignment_mode": alignment_mode,
         "alignment_temperature": alignment_temperature,
+        "alignment_window": alignment_window,
         "gating_mode": gating_mode,
         "gating_temperature": gating_temperature,
     }
@@ -488,10 +570,60 @@ def _git_status_entries(repo_root):
     return entries
 
 
+def _git_status_porcelain_raw(repo_root):
+    try:
+        output = subprocess.check_output(
+            [
+                "git", "-C", str(repo_root), "status", "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise EvidenceError("Cannot read raw Git worktree status: {}".format(error))
+    return output.decode("utf-8", errors="surrogateescape")
+
+
+def _git_diff_empty(repo_root, cached=False):
+    command = ["git", "-C", str(repo_root), "diff", "--quiet"]
+    if cached:
+        command.insert(-1, "--cached")
+    completed = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if completed.returncode not in (0, 1):
+        raise EvidenceError(
+            "Cannot inspect {} Git diff".format(
+                "staged" if cached else "unstaged"
+            )
+        )
+    return completed.returncode == 0
+
+
+def _git_operations_in_progress(repo_root):
+    operations = []
+    for operation, git_path in {
+            "merge": "MERGE_HEAD", "cherry_pick": "CHERRY_PICK_HEAD",
+            "revert": "REVERT_HEAD", "rebase_merge": "rebase-merge",
+            "rebase_apply": "rebase-apply",
+    }.items():
+        resolved = _git_output(repo_root, ["rev-parse", "--git-path", git_path])
+        candidate = Path(resolved)
+        if not candidate.is_absolute():
+            candidate = Path(repo_root) / candidate
+        if candidate.exists():
+            operations.append(operation)
+    return operations
+
+
 def git_metadata(repo_root):
     commit = _git_output(repo_root, ["rev-parse", "HEAD"])
     branch = _git_output(repo_root, ["branch", "--show-current"])
     status_entries = _git_status_entries(repo_root)
+    status_porcelain_raw = _git_status_porcelain_raw(repo_root)
+    staged_diff_empty = _git_diff_empty(repo_root, cached=True)
+    unstaged_diff_empty = _git_diff_empty(repo_root, cached=False)
+    operations_in_progress = _git_operations_in_progress(repo_root)
     dirty = bool(status_entries)
     if not re.match(r"^[0-9a-fA-F]{40}$", commit):
         raise EvidenceError("Git commit is not a full SHA: {}".format(commit))
@@ -515,6 +647,17 @@ def git_metadata(repo_root):
         "status_porcelain": [
             "{} {}".format(status, path) for status, path in status_entries
         ],
+        "status_porcelain_raw": status_porcelain_raw,
+        "staged_diff_empty": staged_diff_empty,
+        "unstaged_diff_empty": unstaged_diff_empty,
+        "operations_in_progress": operations_in_progress,
+        "preflight_checked_at_utc": utc_now(),
+        "commit_time": _git_output(
+            repo_root, ["show", "-s", "--format=%cI", commit]
+        ),
+        "commit_parents": _git_output(
+            repo_root, ["show", "-s", "--format=%P", commit]
+        ).split(),
         "tree": _git_output(repo_root, ["rev-parse", "HEAD^{tree}"]).lower(),
         "has_upstream": upstream != NOT_RECORDED,
         "upstream": upstream,
@@ -523,8 +666,16 @@ def git_metadata(repo_root):
 
 def validate_git_preflight(repo_root, expected_branch, expected_commit=None):
     metadata = git_metadata(repo_root)
-    if metadata["dirty"]:
+    if (metadata["dirty"] or metadata["status_porcelain_raw"]
+            or not metadata["staged_diff_empty"]
+            or not metadata["unstaged_diff_empty"]):
         raise EvidenceError("Formal training requires a clean Git worktree")
+    if metadata["operations_in_progress"]:
+        raise EvidenceError(
+            "Formal training forbids Git operations in progress: {}".format(
+                metadata["operations_in_progress"]
+            )
+        )
     if metadata["branch"] != expected_branch:
         raise EvidenceError(
             "Formal branch mismatch: expected {}, got {}".format(
@@ -676,6 +827,12 @@ def collect_environment(run_dir, repo_root, training_pythonhashseed=None,
         ),
         "git_branch": metadata["branch"],
         "git_commit": metadata["commit"],
+        "git_commit_time": metadata["commit_time"],
+        "git_commit_parents": metadata["commit_parents"],
+        "git_status_porcelain_raw": metadata["status_porcelain_raw"],
+        "git_staged_diff_empty": metadata["staged_diff_empty"],
+        "git_unstaged_diff_empty": metadata["unstaged_diff_empty"],
+        "git_operations_in_progress": metadata["operations_in_progress"],
         "git_controlled_evidence_dir": metadata["controlled_evidence_dir"],
         "git_controlled_evidence_only": metadata["controlled_evidence_only"],
         "environment_packages_path": normalized_path(packages_path),
@@ -798,9 +955,9 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         feature_path_value = normalized_path(feature_path.resolve())
         feature_size = feature_path.stat().st_size
         feature_sha256 = sha256_file(feature_path)
-    elif identity["alignment_mode"] == "soft_min":
+    elif identity["alignment_mode"] in ("soft_min", "windowed_soft_min"):
         raise EvidenceError(
-            "Soft-Min runs require parent-bound feature compatibility evidence"
+            "Soft-Min alignment runs require parent-bound feature compatibility evidence"
         )
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -819,6 +976,23 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "commit_tree": git_info.get("tree", NOT_RECORDED),
         "git_preflight_clean": not git_info.get("dirty", True),
         "git_status_preflight": list(git_info.get("status_porcelain", [])),
+        "git_status_porcelain_raw": git_info.get(
+            "status_porcelain_raw", MISSING_EVIDENCE
+        ),
+        "git_staged_diff_empty": git_info.get(
+            "staged_diff_empty", MISSING_EVIDENCE
+        ),
+        "git_unstaged_diff_empty": git_info.get(
+            "unstaged_diff_empty", MISSING_EVIDENCE
+        ),
+        "git_operations_in_progress": git_info.get(
+            "operations_in_progress", [MISSING_EVIDENCE]
+        ),
+        "git_preflight_checked_at_utc": git_info.get(
+            "preflight_checked_at_utc", NOT_RECORDED
+        ),
+        "commit_time": git_info.get("commit_time", NOT_RECORDED),
+        "commit_parents": git_info.get("commit_parents", NOT_RECORDED),
         "has_upstream": bool(git_info.get("has_upstream", False)),
         "upstream": git_info.get("upstream", NOT_RECORDED),
         "parent_branch": parent_branch,
@@ -854,6 +1028,7 @@ def initialize_run(records_root, experiment_id, experiment_family, run_id,
         "alignment_strategy": identity["alignment_strategy"],
         "alignment_mode": identity["alignment_mode"],
         "alignment_temperature": identity["alignment_temperature"],
+        "alignment_window": identity["alignment_window"],
         "gating_mode": identity["gating_mode"],
         "gating_temperature": identity["gating_temperature"],
         "multigranular_feature_signature": feature_signature,
@@ -1122,6 +1297,7 @@ def _run_row_from_manifest(run_dir, manifest, status_payload):
         "alignment_strategy": manifest.get("alignment_strategy", NOT_RECORDED),
         "alignment_mode": manifest.get("alignment_mode", NOT_RECORDED),
         "alignment_temperature": manifest.get("alignment_temperature", NOT_RECORDED),
+        "alignment_window": manifest.get("alignment_window", NOT_RECORDED),
         "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
         "gating_temperature": manifest.get("gating_temperature", NOT_RECORDED),
         "multigranular_feature_signature": manifest.get(
@@ -1340,6 +1516,7 @@ def parse_training_log(log_path):
     pcc_epoch_summaries = []
     hard_alignment_epoch_summaries = []
     soft_alignment_epoch_summaries = []
+    windowed_soft_alignment_epoch_summaries = []
     epoch_evidence = {}
     required_training_fields = {
         "loss_total": False,
@@ -1410,6 +1587,37 @@ def parse_training_log(log_path):
                     "alignment_temperature")):
                 raise EvidenceError("Soft alignment summary is non-finite")
             soft_alignment_epoch_summaries.append(values)
+        windowed_soft_summary = re.search(
+            r"Windowed Soft Alignment Epoch Summary - Epoch:\s*(\d+)\s+"
+            r"window:\s*(\d+)\s+alignment_temperature:\s*([0-9.eE+-]+)\s+"
+            r"windowed_soft_alignment_loss:\s*([0-9.eE+-]+)\s+"
+            r"valid_alignment_pair_count:\s*(\d+)\s+"
+            r"mean_windowed_soft_path_cost:\s*([0-9.eE+-]+)",
+            line,
+        )
+        if windowed_soft_summary:
+            values = {
+                "epoch": int(windowed_soft_summary.group(1)),
+                "alignment_window": int(windowed_soft_summary.group(2)),
+                "alignment_temperature": float(windowed_soft_summary.group(3)),
+                "windowed_soft_alignment_loss": float(
+                    windowed_soft_summary.group(4)
+                ),
+                "valid_alignment_pair_count": int(
+                    windowed_soft_summary.group(5)
+                ),
+                "mean_windowed_soft_path_cost": float(
+                    windowed_soft_summary.group(6)
+                ),
+            }
+            if values["alignment_window"] <= 0 or not all(
+                    math.isfinite(values[field]) for field in (
+                        "alignment_temperature",
+                        "windowed_soft_alignment_loss",
+                        "mean_windowed_soft_path_cost",
+                    )):
+                raise EvidenceError("Windowed soft alignment summary is invalid")
+            windowed_soft_alignment_epoch_summaries.append(values)
         iteration_match = re.search(
             r"Epoch\[(\d+)\]\s+Iteration\[(\d+)/(\d+)\]", line
         )
@@ -1568,6 +1776,37 @@ def parse_training_log(log_path):
     soft_temperature = (
         next(iter(soft_temperatures)) if soft_temperatures else NOT_RECORDED
     )
+    total_windowed_soft_alignment_pairs = sum(
+        row["valid_alignment_pair_count"]
+        for row in windowed_soft_alignment_epoch_summaries
+    )
+
+    def pair_weighted_windowed_soft_value(field):
+        if total_windowed_soft_alignment_pairs:
+            return sum(
+                row["valid_alignment_pair_count"] * row[field]
+                for row in windowed_soft_alignment_epoch_summaries
+            ) / float(total_windowed_soft_alignment_pairs)
+        if windowed_soft_alignment_epoch_summaries:
+            return 0.0
+        return NOT_RECORDED
+
+    windowed_soft_temperatures = {
+        row["alignment_temperature"]
+        for row in windowed_soft_alignment_epoch_summaries
+    }
+    windowed_soft_windows = {
+        row["alignment_window"]
+        for row in windowed_soft_alignment_epoch_summaries
+    }
+    if len(windowed_soft_temperatures) > 1:
+        raise EvidenceError(
+            "Windowed soft alignment temperature changed across summaries"
+        )
+    if len(windowed_soft_windows) > 1:
+        raise EvidenceError(
+            "Windowed soft alignment window changed across summaries"
+        )
 
     return {
         "path": normalized_path(path.resolve()),
@@ -1582,13 +1821,21 @@ def parse_training_log(log_path):
         "has_pcc_loss": "loss_pcc:" in raw_text,
         "has_hard_alignment_loss": "hard_alignment_loss:" in raw_text,
         "has_soft_alignment_loss": "soft_alignment_loss:" in raw_text,
+        "has_windowed_soft_alignment_loss": (
+            "windowed_soft_alignment_loss:" in raw_text
+        ),
         "pcc_epoch_summaries": pcc_epoch_summaries,
         "hard_alignment_epoch_summaries": hard_alignment_epoch_summaries,
         "soft_alignment_epoch_summaries": soft_alignment_epoch_summaries,
+        "windowed_soft_alignment_epoch_summaries": (
+            windowed_soft_alignment_epoch_summaries
+        ),
         "valid_pcc_pair_count": (
             total_pcc_pairs if pcc_epoch_summaries
             else total_alignment_pairs if hard_alignment_epoch_summaries
             else total_soft_alignment_pairs if soft_alignment_epoch_summaries
+            else total_windowed_soft_alignment_pairs
+            if windowed_soft_alignment_epoch_summaries
             else NOT_RECORDED
         ),
         "mean_fixed_index_part_distance": mean_pcc_distance,
@@ -1598,7 +1845,9 @@ def parse_training_log(log_path):
         "valid_alignment_pair_count": (
             total_alignment_pairs if hard_alignment_epoch_summaries
             else total_soft_alignment_pairs
-            if soft_alignment_epoch_summaries else NOT_RECORDED
+            if soft_alignment_epoch_summaries
+            else total_windowed_soft_alignment_pairs
+            if windowed_soft_alignment_epoch_summaries else NOT_RECORDED
         ),
         "mean_hard_path_cost": pair_weighted_hard_value(
             "mean_hard_path_cost"
@@ -1613,6 +1862,20 @@ def parse_training_log(log_path):
             "mean_soft_path_cost"
         ),
         "alignment_temperature": soft_temperature,
+        "windowed_soft_alignment_loss": pair_weighted_windowed_soft_value(
+            "windowed_soft_alignment_loss"
+        ),
+        "mean_windowed_soft_path_cost": pair_weighted_windowed_soft_value(
+            "mean_windowed_soft_path_cost"
+        ),
+        "windowed_alignment_temperature": (
+            next(iter(windowed_soft_temperatures))
+            if windowed_soft_temperatures else NOT_RECORDED
+        ),
+        "alignment_window": (
+            next(iter(windowed_soft_windows))
+            if windowed_soft_windows else NOT_RECORDED
+        ),
         "epoch_evidence": [
             epoch_evidence[epoch] for epoch in sorted(epoch_evidence)
         ],
@@ -1891,6 +2154,8 @@ def _legacy_field_value(row, field):
         return pcc_mode or NOT_RECORDED
     if field == "alignment_mode":
         return pcc_mode or NOT_APPLICABLE
+    if field == "alignment_window":
+        return NOT_RECORDED if pcc_mode == "windowed_soft_min" else NOT_APPLICABLE
     if field in (
             "alignment_temperature", "gating_mode", "gating_temperature"):
         return NOT_APPLICABLE if pcc_enabled or pcc_mode else NOT_RECORDED
@@ -2411,6 +2676,7 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "alignment_temperature": manifest.get(
             "alignment_temperature", NOT_RECORDED
         ),
+        "alignment_window": manifest.get("alignment_window", NOT_RECORDED),
         "gating_mode": manifest.get("gating_mode", NOT_RECORDED),
         "gating_temperature": manifest.get(
             "gating_temperature", NOT_RECORDED
@@ -2571,6 +2837,7 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "pcc_enabled": common["pcc_enabled"],
         "alignment_strategy": common["alignment_strategy"],
         "alignment_temperature": common["alignment_temperature"],
+        "alignment_window": common["alignment_window"],
         "gating_mode": common["gating_mode"],
         "gating_temperature": common["gating_temperature"],
         "pcc_parts": common["pcc_parts"],
@@ -2601,6 +2868,7 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
         "method_variant": common["method_variant"],
         "alignment_mode": common["alignment_mode"],
         "alignment_temperature": common["alignment_temperature"],
+        "alignment_window": common["alignment_window"],
         "gating_mode": common["gating_mode"],
         "gating_temperature": common["gating_temperature"],
         "multigranular_feature_signature_sha256": common[
@@ -2632,7 +2900,46 @@ def _prepare_table_rows(manifest, metrics, environment, efficiency,
     }
     return (
         common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-        pcc_row, alignment_row,
+        pcc_row, alignment_row, {
+            "schema_version": common["schema_version"],
+            "run_id": common["run_id"],
+            "experiment_id": common["experiment_id"],
+            "run_kind": common["run_kind"],
+            "status": common["status"],
+            "dataset": common["dataset"],
+            "method_variant": common["method_variant"],
+            "alignment_mode": common["alignment_mode"],
+            "alignment_window": common["alignment_window"],
+            "alignment_temperature": common["alignment_temperature"],
+            "pcc_lambda": common["pcc_lambda"],
+            "parts": common["pcc_parts"],
+            "seed": common["seed"],
+            "rank1": common["rank1"], "rank5": common["rank5"],
+            "rank10": common["rank10"], "map": common["map"],
+            "best_epoch": common["best_epoch"],
+            "runtime": common["runtime_seconds"],
+            "checkpoint": common["checkpoint"],
+            "checkpoint_sha256": common["checkpoint_sha256"],
+            "commit": common["commit"], "output_dir": common["output_dir"],
+        },
+    )
+
+
+def _windowed_soft_alignment_table_eligible(manifest):
+    try:
+        tau = float(manifest.get("alignment_temperature"))
+        alignment_lambda = float(manifest.get("pcc_lambda"))
+        window = int(manifest.get("alignment_window"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        manifest.get("experiment_family") == WINDOWED_SOFT_ALIGNMENT_FAMILY
+        and manifest.get("run_kind") == "formal"
+        and manifest.get("status", "success") == "success"
+        and manifest.get("alignment_mode") == "windowed_soft_min"
+        and tau == 0.2
+        and alignment_lambda == 0.05
+        and window in (1, 2)
     )
 
 
@@ -2700,7 +3007,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             raise EvidenceError("Manifest run_kind is invalid")
         for field in (
                 "method_family", "method_variant", "alignment_mode",
-                "alignment_temperature", "gating_mode",
+                "alignment_temperature", "alignment_window", "gating_mode",
                 "gating_temperature"):
             manifest.setdefault(field, identity[field])
             if manifest[field] != identity[field]:
@@ -2734,7 +3041,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                 raise EvidenceError(
                     "Multigranular feature signature SHA256 conflict"
                 )
-        if identity["alignment_mode"] == "soft_min":
+        if identity["alignment_mode"] in ("soft_min", "windowed_soft_min"):
             if recorded_signature in (
                     NOT_RECORDED, MISSING_EVIDENCE, "", None):
                 raise EvidenceError(
@@ -2887,28 +3194,8 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if manifest.get("dataset_manifest_sha256", NOT_RECORDED) not in (
                 NOT_RECORDED, dataset_manifest["dataset_manifest_sha256"]):
             raise EvidenceError("Dataset manifest signature differs")
-        if manifest.get("experiment_family") == SOFT_LAMBDA_SWEEP_FAMILY:
-            required_strict = (
-                "protocol_signature_sha256",
-                "implementation_signature_sha256", "merge_base",
-                "commit_tree", "has_upstream", "upstream",
-                "config_source_size_bytes", "config_resolved_size_bytes",
-                "dataset_manifest_sha256",
-            )
-            missing_strict = [
-                field for field in required_strict
-                if field not in manifest or manifest[field] in (
-                    None, "", NOT_RECORDED, MISSING_EVIDENCE
-                ) and field not in ("upstream",)
-            ]
-            if missing_strict:
-                raise EvidenceError(
-                    "Lambda sweep manifest lacks {}".format(missing_strict)
-                )
-            if manifest.get("git_preflight_clean") is not True:
-                raise EvidenceError("Lambda sweep preflight was not clean")
-            if manifest.get("git_status_preflight") != []:
-                raise EvidenceError("Lambda sweep preflight status is not empty")
+        if manifest.get("experiment_family") in STRICT_EVIDENCE_FAMILIES:
+            validate_strict_manifest_preflight(manifest)
             if len(str(manifest["protocol_signature_sha256"])) != 64:
                 raise EvidenceError("Protocol signature is invalid")
             if len(str(manifest["implementation_signature_sha256"])) != 64:
@@ -3073,6 +3360,82 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                     raise EvidenceError(
                         "Soft alignment loss is inconsistent with raw cost"
                     )
+            elif alignment_mode == "windowed_soft_min":
+                if log_info["hard_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Windowed soft alignment must not record a unique Hard path"
+                    )
+                if log_info["soft_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Windowed soft alignment must not use unrestricted summaries"
+                    )
+                if not log_info["has_windowed_soft_alignment_loss"]:
+                    raise EvidenceError(
+                        "Windowed soft alignment loss evidence is absent from log"
+                    )
+                if not log_info["windowed_soft_alignment_epoch_summaries"]:
+                    raise EvidenceError(
+                        "Windowed soft alignment has no epoch pair statistics"
+                    )
+                required_windowed = (
+                    "windowed_soft_alignment_loss",
+                    "valid_alignment_pair_count",
+                    "mean_windowed_soft_path_cost",
+                    "windowed_alignment_temperature", "alignment_window",
+                )
+                missing_windowed = [
+                    field for field in required_windowed
+                    if log_info[field] in (
+                        NOT_RECORDED, MISSING_EVIDENCE, None, ""
+                    )
+                ]
+                if missing_windowed:
+                    raise EvidenceError(
+                        "Windowed soft alignment evidence lacks {}".format(
+                            missing_windowed
+                        )
+                    )
+                parts = int(manifest.get("pcc_parts", 0))
+                if parts != 6:
+                    raise EvidenceError(
+                        "Windowed soft alignment evidence requires K=6"
+                    )
+                if int(log_info["valid_alignment_pair_count"]) <= 0:
+                    raise EvidenceError(
+                        "Windowed soft alignment cannot succeed with zero pairs"
+                    )
+                configured_window = manifest.get("alignment_window")
+                if int(log_info["alignment_window"]) != int(configured_window):
+                    raise EvidenceError(
+                        "Logged/configured alignment windows differ"
+                    )
+                windowed_loss = float(
+                    log_info["windowed_soft_alignment_loss"]
+                )
+                windowed_cost = float(
+                    log_info["mean_windowed_soft_path_cost"]
+                )
+                logged_tau = float(log_info["windowed_alignment_temperature"])
+                configured_tau = float(manifest["alignment_temperature"])
+                if not all(math.isfinite(value) for value in (
+                        windowed_loss, windowed_cost, logged_tau,
+                        configured_tau)):
+                    raise EvidenceError(
+                        "Windowed soft alignment evidence is non-finite"
+                    )
+                if logged_tau <= 0 or configured_tau <= 0:
+                    raise EvidenceError(
+                        "Windowed soft alignment temperature must be positive"
+                    )
+                if abs(logged_tau - configured_tau) > 1e-12:
+                    raise EvidenceError(
+                        "Logged/configured alignment temperatures differ"
+                    )
+                expected_loss = windowed_cost / float(2 * parts - 1)
+                if abs(windowed_loss - expected_loss) > 2e-5:
+                    raise EvidenceError(
+                        "Windowed soft alignment loss is inconsistent with raw cost"
+                    )
             else:
                 raise EvidenceError(
                     "Unsupported alignment mode in run manifest: {!r}"
@@ -3109,7 +3472,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
         if not efficiency_path.is_file():
             atomic_write_json(efficiency_path, efficiency)
         model_manifest = read_json(run_dir / "model_manifest.json")
-        if identity["alignment_mode"] == "soft_min":
+        if identity["alignment_mode"] in ("soft_min", "windowed_soft_min"):
             if model_manifest.get(
                     "multigranular_feature_signature_sha256"
             ) != manifest["multigranular_feature_signature_sha256"]:
@@ -3179,6 +3542,18 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             mean_path_absolute_offset = NOT_APPLICABLE
             soft_alignment_loss = log_info["soft_alignment_loss"]
             mean_soft_path_cost = log_info["mean_soft_path_cost"]
+        elif alignment_mode == "windowed_soft_min":
+            mean_fixed_index_part_distance = NOT_APPLICABLE
+            hard_alignment_loss = NOT_APPLICABLE
+            valid_alignment_pair_count = log_info[
+                "valid_alignment_pair_count"
+            ]
+            mean_hard_path_cost = NOT_APPLICABLE
+            mean_path_absolute_offset = NOT_APPLICABLE
+            # Existing columns denote unrestricted Soft-Min only.  The
+            # windowed values remain in the dedicated sensitivity table.
+            soft_alignment_loss = NOT_APPLICABLE
+            mean_soft_path_cost = NOT_APPLICABLE
         elif alignment_mode == "fixed_index":
             mean_fixed_index_part_distance = log_info[
                 "mean_fixed_index_part_distance"
@@ -3248,7 +3623,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             manifest, metrics, environment, efficiency, distance, anchor
         )
         (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-         pcc_row, alignment_row) = rows
+         pcc_row, alignment_row, windowed_row) = rows
         final_status = dict(status)
         final_status.update({
             "status": "success",
@@ -3258,6 +3633,21 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             "selected_epoch": metrics["selected_epoch"],
             "updated_at_utc": utc_now(),
         })
+        previous_failure = {
+            field: status[field] for field in (
+                "error", "error_type", "traceback"
+            ) if field in status
+        }
+        if previous_failure:
+            history = list(manifest.get("finalization_provenance", []))
+            history.append({
+                "recorded_at_utc": utc_now(),
+                "event": "successful_finalization_after_prior_failure",
+                "prior_failure": previous_failure,
+            })
+            manifest["finalization_provenance"] = history
+        for field in ("error", "error_type", "traceback"):
+            final_status.pop(field, None)
         artifact_rows = _artifact_rows(
             run_dir, log_info, checkpoint_rows, final_status
         )
@@ -3300,7 +3690,7 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
             manifest, metrics, environment, efficiency, distance, anchor
         )
         (common, lambda_row, same_row, caat_row, distance_row, anchor_row,
-         pcc_row, alignment_row) = rows
+         pcc_row, alignment_row, windowed_row) = rows
         tables_dir = records_root / "tables"
         main_rows = _read_csv(tables_dir / "main_results.csv")
         if manifest["run_kind"] == "formal":
@@ -3367,6 +3757,12 @@ def finalize_run(run_dir, records_root, repo_root, experiments_path,
                         "commit": common["commit"],
                         "output_dir": common["output_dir"],
                     },
+                )
+            if _windowed_soft_alignment_table_eligible(manifest):
+                upsert_csv(
+                    tables_dir / "windowed_soft_alignment_sensitivity.csv",
+                    WINDOWED_SOFT_ALIGNMENT_FIELDS,
+                    windowed_row,
                 )
             for table_name in TABLE_SCHEMAS:
                 csv_to_markdown(
