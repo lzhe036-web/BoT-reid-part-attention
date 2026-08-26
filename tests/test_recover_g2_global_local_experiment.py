@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import yaml
+from yacs.config import CfgNode
 
 from tools.recover_g2_global_local_experiment import (
     EXPECTED_BRANCH,
@@ -15,6 +16,7 @@ from tools.recover_g2_global_local_experiment import (
     G2RecoveryError,
     recover,
 )
+from utils.config_serialization import serialize_cfg_node_yaml
 from utils.experiment_schema import GATING_STAT_FIELDS, SCHEMA_VERSION
 
 
@@ -92,7 +94,9 @@ class G2RecoveryTest(unittest.TestCase):
         config_text = yaml.safe_dump(config, sort_keys=False)
         self.config.write_text(config_text, encoding="utf-8")
         resolved = self.output / "config_resolved.yml"
-        resolved.write_text(config_text, encoding="utf-8")
+        resolved.write_text(
+            serialize_cfg_node_yaml(CfgNode(config)), encoding="utf-8"
+        )
 
         (self.output / "log.txt").write_text("formal training log\n", encoding="utf-8")
         validations = []

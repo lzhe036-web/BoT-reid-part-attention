@@ -36,6 +36,7 @@ from utils.dynamic_experiment_registry import (
     _refresh_partial_artifact_manifest,
     register_dynamic_run_state,
 )
+from utils.config_serialization import deserialize_cfg_node_yaml
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import atomic_write_json, read_validation_history, sha256_file
 from utils.experiment_schema import (
@@ -119,7 +120,7 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
     with config_path.open("r", encoding="utf-8") as handle:
         source = yaml.safe_load(handle)
     with resolved_path.open("r", encoding="utf-8") as handle:
-        resolved = yaml.safe_load(handle)
+        resolved = deserialize_cfg_node_yaml(handle.read())
     if not isinstance(source, dict) or not isinstance(resolved, dict):
         raise G2RecoveryError("Source and resolved configs must be YAML mappings")
 
