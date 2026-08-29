@@ -207,12 +207,16 @@ class MultiGranularityDynamicGate(nn.Module):
     ``global`` (G1) feeds the global descriptor ``g`` to the controller.  The
     ``concat_global_local`` variant (G2-global-local) feeds
     ``[g, z2, z4, z6]`` before the same controller.  ``concat_local``
-    (G2-local-only) feeds only ``[z2, z4, z6]``.  Every mode still produces
-    exactly three weights, one for each existing local scale descriptor; it
-    never adds a fourth global-feature gate.
+    (G2-local-only) feeds only ``[z2, z4, z6]``.  The ``concat_z2_z4``
+    ablation feeds ``[z2, z4]`` and produces exactly two normalized weights.
+    Its z6 descriptor is still computed by the part head, but deliberately
+    excluded from both the controller and the gated fusion.  No mode adds a
+    fourth global-feature gate.
     """
 
-    VALID_GATING_INPUTS = ('global', 'concat_global_local', 'concat_local')
+    VALID_GATING_INPUTS = (
+        'global', 'concat_global_local', 'concat_local', 'concat_z2_z4'
+    )
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
                  gating_input='global', normalization='scaled_softmax',
@@ -242,19 +246,29 @@ class MultiGranularityDynamicGate(nn.Module):
 
         self.in_planes = int(in_planes)
         self.num_scales = int(num_scales)
+        self.active_scale_indices = (
+            (0, 1) if gating_input == 'concat_z2_z4'
+            else tuple(range(self.num_scales))
+        )
+        if gating_input == 'concat_z2_z4' and self.num_scales < 2:
+            raise ValueError(
+                'concat_z2_z4 gating requires at least z2 and z4 features'
+            )
+        self.gate_count = len(self.active_scale_indices)
         self.temperature = float(temperature)
         self.gating_input = gating_input
         self.normalization = normalization
         self.local_feature_dim = (
             None if local_feature_dim is None else int(local_feature_dim)
         )
-        if self.gating_input in ('concat_global_local', 'concat_local'):
+        if self.gating_input in (
+                'concat_global_local', 'concat_local', 'concat_z2_z4'):
             if self.local_feature_dim is None or self.local_feature_dim <= 0:
                 raise ValueError(
                     '{} gating requires a positive '
                     'local_feature_dim'.format(self.gating_input)
                 )
-            local_input_dim = self.num_scales * self.local_feature_dim
+            local_input_dim = self.gate_count * self.local_feature_dim
             self.controller_input_dim = (
                 self.in_planes + local_input_dim
                 if self.gating_input == 'concat_global_local'
@@ -262,7 +276,7 @@ class MultiGranularityDynamicGate(nn.Module):
             )
         else:
             self.controller_input_dim = self.in_planes
-        self.controller = nn.Linear(self.controller_input_dim, self.num_scales)
+        self.controller = nn.Linear(self.controller_input_dim, self.gate_count)
         nn.init.constant_(self.controller.weight, 0.0)
         nn.init.constant_(self.controller.bias, 0.0)
 
@@ -295,13 +309,21 @@ class MultiGranularityDynamicGate(nn.Module):
             checked.append(feature)
         if self.gating_input == 'concat_local':
             return torch.cat(tuple(checked), dim=1)
+        if self.gating_input == 'concat_z2_z4':
+            return torch.cat(
+                tuple(checked[index] for index in self.active_scale_indices),
+                dim=1,
+            )
         return torch.cat((global_feat,) + tuple(checked), dim=1)
 
     def forward(self, global_feat, scale_features=None):
         controller_input = self.controller_input(global_feat, scale_features)
         logits = self.controller(controller_input)
         probabilities = F.softmax(logits / self.temperature, dim=1)
-        weights = float(self.num_scales) * probabilities
+        weights = (
+            probabilities if self.gating_input == 'concat_z2_z4'
+            else float(self.gate_count) * probabilities
+        )
         return logits, probabilities, weights
 
 
@@ -472,6 +494,14 @@ class Baseline(nn.Module):
                     ).lower(),
                     local_feature_dim=self.multi_granularity_part_head.projection_dim,
                 )
+                excluded_scale_count = (
+                    len(self.multi_granularity_part_head.scales)
+                    - len(self.multi_granularity_dynamic_gate.active_scale_indices)
+                )
+                self.feature_dim -= (
+                    excluded_scale_count
+                    * self.multi_granularity_part_head.projection_dim
+                )
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.feature_dim, self.num_classes)
@@ -499,14 +529,19 @@ class Baseline(nn.Module):
                 gate_logits, probabilities, weights = (
                     self.multi_granularity_dynamic_gate(global_feat, scale_features)
                 )
+                active_indices = self.multi_granularity_dynamic_gate.active_scale_indices
                 scale_features = tuple(
-                    scale_feature * weights[:, index:index + 1]
-                    for index, scale_feature in enumerate(scale_features)
+                    scale_features[scale_index] * weights[:, gate_index:gate_index + 1]
+                    for gate_index, scale_index in enumerate(active_indices)
                 )
                 self._last_dynamic_gating = {
                     'logits': gate_logits.detach(),
                     'probabilities': probabilities.detach(),
                     'weights': weights.detach(),
+                    'scales': tuple(
+                        self.multi_granularity_part_head.scales[index]
+                        for index in active_indices
+                    ),
                 }
             else:
                 self._last_dynamic_gating = None

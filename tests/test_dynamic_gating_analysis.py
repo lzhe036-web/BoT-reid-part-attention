@@ -20,6 +20,10 @@ from utils.experiment_recording import sha256_file
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG = REPO_ROOT / "configs" / "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_autodl.yml"
+WITHOUT_Z6_CONFIG = REPO_ROOT / "configs" / (
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_without_z6_autodl.yml"
+)
 
 
 class SyntheticImages(Dataset):
@@ -56,8 +60,36 @@ class SyntheticModel(object):
         self._last_dynamic_gating = {
             "probabilities": probabilities,
             "weights": 3.0 * probabilities,
+            "scales": (2, 4, 6),
         }
         return torch.zeros(count, 2816, device=images.device)
+
+
+class SyntheticTwoWayModel(object):
+    def __init__(self):
+        self._last_dynamic_gating = None
+
+    def load_state_dict(self, state, strict=True):
+        self.state = state
+        self.strict = strict
+
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, images):
+        count = int(images.size(0))
+        base = torch.arange(1, count + 1, device=images.device, dtype=torch.float64)
+        probabilities = torch.stack((base, base + 1), dim=1)
+        probabilities = probabilities / probabilities.sum(dim=1, keepdim=True)
+        self._last_dynamic_gating = {
+            "probabilities": probabilities,
+            "weights": probabilities,
+            "scales": (2, 4),
+        }
+        return torch.zeros(count, 2560, device=images.device)
 
 
 class DynamicGatingAnalysisTest(unittest.TestCase):
@@ -112,6 +144,63 @@ class DynamicGatingAnalysisTest(unittest.TestCase):
                 dataset_validator=lambda _cfg, _manifest: None,
             )
             self.assertEqual(validated["sample_count"], 4)
+
+    def test_two_way_gate_evidence_has_no_z6_columns_and_weights_sum_to_one(self):
+        configuration = cfg.clone()
+        configuration.merge_from_file(str(WITHOUT_Z6_CONFIG))
+        configuration.defrost()
+        configuration.MODEL.DEVICE = "cpu"
+        configuration.DATALOADER.NUM_WORKERS = 0
+        configuration.freeze()
+        selected = [
+            ("key{:02d}".format(index), "query" if index < 2 else "gallery",
+             "image{}.jpg".format(index), index, index % 2)
+            for index in range(4)
+        ]
+        selected.sort(
+            key=lambda item: hashlib.sha256(item[0].encode("utf-8")).hexdigest()
+        )
+        accumulator = GatingEpochAccumulator(1.0, scales=(2, 4), weight_sum=1.0)
+        accumulator.update([[0.5, 0.5]] * 4)
+        epoch_statistics = accumulator.summary()
+        self.assertNotIn("p6_mean", epoch_statistics)
+        self.assertNotIn("applied_w6_mean", epoch_statistics)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "selected.pt"
+            torch.save({"weight": torch.tensor([1.0])}, checkpoint)
+            with mock.patch(
+                    "tools.analyze_dynamic_gating.select_samples",
+                    return_value=(selected, 2)), mock.patch(
+                    "tools.analyze_dynamic_gating.ImageDataset", SyntheticImages), mock.patch(
+                    "tools.analyze_dynamic_gating.build_transforms", return_value=None), mock.patch(
+                    "tools.analyze_dynamic_gating.build_model", return_value=SyntheticTwoWayModel()):
+                summary_path, samples_path, summary = generate_dynamic_gating_evidence(
+                    configuration, checkpoint, root / "evidence", epoch_statistics,
+                    device="cpu",
+                )
+            with samples_path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual(
+                tuple(rows[0]), (
+                    "stable_sample_key", "dataset_split", "pid", "camid",
+                    "p2", "p4", "w2", "w4", "entropy", "dominant_k",
+                    "checkpoint_sha256",
+                )
+            )
+            for row in rows:
+                self.assertNotIn("p6", row)
+                self.assertNotIn("w6", row)
+                self.assertAlmostEqual(float(row["p2"]) + float(row["p4"]), 1.0)
+                self.assertAlmostEqual(float(row["w2"]) + float(row["w4"]), 1.0)
+            validated = validate_dynamic_gating_evidence(
+                summary_path, samples_path, sha256_file(checkpoint),
+                configuration, epoch_statistics, {},
+                selection_resolver=lambda _cfg: selected,
+                dataset_validator=lambda _cfg, _manifest: None,
+            )
+            self.assertEqual(validated["sample_count"], 4)
+            self.assertNotIn("p6_mean", summary["deterministic_sample_statistics"])
 
 
 if __name__ == "__main__":

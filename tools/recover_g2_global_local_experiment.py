@@ -37,7 +37,11 @@ from utils.dynamic_experiment_registry import (
     register_dynamic_run_state,
 )
 from utils.config_serialization import deserialize_cfg_node_yaml
-from utils.dynamic_gating_evidence import read_gating_epoch_records
+from utils.dynamic_gating_evidence import (
+    dynamic_gating_sample_fields,
+    gating_stat_fields,
+    read_gating_epoch_records,
+)
 from utils.experiment_recording import atomic_write_json, read_validation_history, sha256_file
 from utils.experiment_schema import (
     GATING_STAT_FIELDS,
@@ -242,7 +246,7 @@ def _validate_result(output_dir, result, commit, validation_records,
         raise G2RecoveryError("G2 result does not record Seed=42")
     if result.get("gating_input") != profile.gating_input_semantics:
         raise G2RecoveryError("G2 result has the wrong controller input")
-    if result.get("gate_outputs") != ["w2", "w4", "w6"]:
+    if result.get("gate_outputs") != ["w{}".format(scale) for scale in profile.active_scales]:
         raise G2RecoveryError("G2 result has the wrong gate-output semantics")
 
     observed_validation_epochs = tuple(int(row["epoch"]) for row in validation_records)
@@ -287,8 +291,18 @@ def _validate_result(output_dir, result, commit, validation_records,
     selected_gate = [row for row in gate_records if int(row["epoch"]) == int(best["epoch"])]
     if len(selected_gate) != 1:
         raise G2RecoveryError("Selected epoch has no unique gate-statistics row")
+    if profile.active_scales == (2, 4):
+        forbidden = (
+            "p6_mean", "p6_std", "p6_min", "p6_max",
+            "applied_w6_mean", "applied_w6_std", "dominant_k6_ratio",
+        )
+        for row in gate_records:
+            if row.get("gating_scales") != [2, 4]:
+                raise G2RecoveryError("G2-without-z6 gate scales must be [2, 4]")
+            if any(field in row for field in forbidden):
+                raise G2RecoveryError("G2-without-z6 gate evidence must not record z6")
     result_gate = result.get("selected_epoch_gate_statistics", {})
-    for field in GATING_STAT_FIELDS:
+    for field in gating_stat_fields(profile.active_scales):
         value = selected_gate[0].get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)) \
                 or not math.isfinite(float(value)):
@@ -317,6 +331,8 @@ def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
     if sha256_file(analysis_manifest_path) != evidence.get("analysis_manifest_sha256"):
         raise G2RecoveryError("G2 analysis manifest SHA256 binding is inconsistent")
     analysis = _read_json(analysis_manifest_path, "G2 analysis manifest")
+    if analysis.get("gating_input") != profile.gating_input_semantics:
+        raise G2RecoveryError("G2 analysis has the wrong controller input")
     if analysis.get("checkpoint_sha256") != checkpoint_sha:
         raise G2RecoveryError("G2 analysis is bound to a different checkpoint")
     if analysis.get("config_sha256") != sha256_file(config_path):
@@ -342,6 +358,12 @@ def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
         )
     summary_path = analysis_files["dynamic_gating_summary_json"]
     samples_path = analysis_files["test_gate_samples_tsv"]
+    if profile.active_scales == (2, 4):
+        with samples_path.open("r", encoding="utf-8", newline="") as handle:
+            sample_reader = csv.DictReader(handle, delimiter="\t")
+            if tuple(sample_reader.fieldnames or ()) != dynamic_gating_sample_fields(
+                    profile.active_scales):
+                raise G2RecoveryError("G2 analysis has the wrong gate-sample schema")
     summary = _read_json(summary_path, "dynamic gating summary")
     if summary.get("source_checkpoint_sha256") != checkpoint_sha:
         raise G2RecoveryError("Dynamic gating summary is bound to a different checkpoint")
@@ -633,8 +655,10 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "gating_input": profile.gating_input,
             "gating_temperature": 1.0,
             "gating_normalization": "scaled_softmax",
-            "scale_order": "2,4,6",
-            "gate_outputs": ["w2", "w4", "w6"],
+            "scale_order": ",".join(
+                str(scale) for scale in profile.active_scales
+            ),
+            "gate_outputs": ["w{}".format(scale) for scale in profile.active_scales],
             "metrics": {
                 "rank1_percent": float(best["rank1_percent"]),
                 "rank5_percent": float(best["rank5_percent"]),
@@ -689,7 +713,12 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
 
 
 def main_for_profile(profile, argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Recover and register machine-generated {} evidence without retraining."
+            .format(profile.experiment_label)
+        )
+    )
     default_config = REPO_ROOT / "configs" / profile.config_filename
     parser.add_argument("--config-file", default=str(default_config))
     parser.add_argument("--output-dir", required=True)

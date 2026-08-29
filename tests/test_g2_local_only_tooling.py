@@ -11,8 +11,11 @@ from yacs.config import CfgNode
 from config import cfg
 from tests.test_recover_g2_global_local_experiment import G2RecoveryTest, _sha, _write_json
 from tools.analyze_g2_global_local_gating import _block_rows, _load_configuration
-from tools.g2_dynamic_gating_profiles import G2_LOCAL_ONLY_PROFILE
-from tools.recover_g2_global_local_experiment import recover
+from tools.g2_dynamic_gating_profiles import (
+    G2_LOCAL_ONLY_PROFILE,
+    G2_WITHOUT_Z6_PROFILE,
+)
+from tools.recover_g2_global_local_experiment import G2RecoveryError, recover
 from utils.config_serialization import serialize_cfg_node_yaml
 
 
@@ -24,6 +27,10 @@ GLOBAL_CONFIG = REPO_ROOT / "configs" / (
 LOCAL_CONFIG = REPO_ROOT / "configs" / (
     "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
     "g2_local_only_autodl.yml"
+)
+WITHOUT_Z6_CONFIG = REPO_ROOT / "configs" / (
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_without_z6_autodl.yml"
 )
 
 
@@ -68,6 +75,50 @@ class G2LocalOnlyAnalyzerTest(unittest.TestCase):
         self.assertIn('git rev-parse --verify "origin/${EXPECTED_BRANCH}"', formal)
         self.assertIn("finalize_g2_local_only_experiment.py", formal)
         self.assertIn("recover_g2_local_only_experiment.py", formal)
+
+
+class G2WithoutZ6AnalyzerTest(unittest.TestCase):
+    def _configuration(self):
+        configuration = cfg.clone()
+        configuration.merge_from_file(str(WITHOUT_Z6_CONFIG))
+        configuration.freeze()
+        return configuration
+
+    def test_without_z6_controller_blocks_are_exactly_z2_z4(self):
+        state = {
+            "multi_granularity_dynamic_gate.controller.weight": torch.randn(2, 512)
+        }
+        rows, boundaries = _block_rows(
+            state, self._configuration(), "c" * 64,
+            profile=G2_WITHOUT_Z6_PROFILE,
+        )
+        self.assertEqual(boundaries, (("z2", 0, 256), ("z4", 256, 512)))
+        self.assertEqual({row["input_block"] for row in rows}, {"z2", "z4"})
+        self.assertEqual({row["target_gate"] for row in rows}, {"w2", "w4"})
+        self.assertEqual(len(rows), 4)
+
+    def test_without_z6_analyzer_rejects_z6_width_or_wrong_mode(self):
+        with self.assertRaisesRegex(ValueError, "must be 512"):
+            _block_rows(
+                {"multi_granularity_dynamic_gate.controller.weight": torch.randn(2, 768)},
+                self._configuration(), "d" * 64,
+                profile=G2_WITHOUT_Z6_PROFILE,
+            )
+        with self.assertRaisesRegex(ValueError, "concat_z2_z4"):
+            _load_configuration(LOCAL_CONFIG, profile=G2_WITHOUT_Z6_PROFILE)
+
+    def test_without_z6_scripts_are_independent_and_fail_closed(self):
+        smoke = (REPO_ROOT / "scripts" / "test_g2_without_z6_gating_1epoch_autodl.sh").read_text(encoding="utf-8")
+        formal = (REPO_ROOT / "scripts" / "train_g2_without_z6_seed42_autodl.sh").read_text(encoding="utf-8")
+        for text in (smoke, formal):
+            self.assertIn('EXPECTED_BRANCH="codex/g2-without-z6"', text)
+            self.assertIn("g2_without_z6_tau1_seed42_market1501", text)
+            self.assertIn("PYTHONHASHSEED=42", text)
+            self.assertIn("CUBLAS_WORKSPACE_CONFIG=:4096:8", text)
+            self.assertNotIn("g2_local_only_tau1_seed42_market1501", text)
+        self.assertIn('git rev-parse --verify "origin/${EXPECTED_BRANCH}"', formal)
+        self.assertIn("finalize_g2_without_z6_experiment.py", formal)
+        self.assertIn("recover_g2_without_z6_experiment.py", formal)
 
 
 class G2LocalOnlyRecoveryTest(G2RecoveryTest):
@@ -145,3 +196,147 @@ class G2LocalOnlyRecoveryTest(G2RecoveryTest):
     def test_recovery_registers_g2_once_and_is_idempotent(self):
         """Override the inherited global-identity assertion for concat_local."""
         self.test_local_only_recovery_is_idempotent_and_registers_one_row()
+
+
+class G2WithoutZ6RecoveryTest(G2LocalOnlyRecoveryTest):
+    """Recovery accepts only two-way machine evidence for the new ablation."""
+
+    def _build_fixture(self):
+        super(G2WithoutZ6RecoveryTest, self)._build_fixture()
+
+        source = yaml.safe_load(self.config.read_text(encoding="utf-8"))
+        source["MODEL"]["MULTI_GRANULARITY_GATING_INPUT"] = "concat_z2_z4"
+        self.config.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+        resolved = self.output / "config_resolved.yml"
+        resolved.write_text(serialize_cfg_node_yaml(CfgNode(source)), encoding="utf-8")
+
+        gate_path = self.output / "dynamic_gating_epoch_stats.jsonl"
+        gate_rows = [
+            json.loads(line) for line in gate_path.read_text(encoding="utf-8").splitlines()
+        ]
+        forbidden = (
+            "p6_mean", "p6_std", "p6_min", "p6_max",
+            "applied_w6_mean", "applied_w6_std", "dominant_k6_ratio",
+        )
+        for row in gate_rows:
+            for field in forbidden:
+                row.pop(field, None)
+            row["gating_scales"] = [2, 4]
+        gate_path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in gate_rows),
+            encoding="utf-8",
+        )
+
+        reproducibility_path = self.output / "reproducibility.json"
+        reproducibility = json.loads(reproducibility_path.read_text(encoding="utf-8"))
+        reproducibility["configuration"]["source_file_sha256"] = _sha(self.config)
+        reproducibility["configuration"]["resolved_file_sha256"] = _sha(resolved)
+        reproducibility["code"]["branch"] = G2_WITHOUT_Z6_PROFILE.expected_branch
+        _write_json(reproducibility_path, reproducibility)
+
+        analysis_dir = self.output / "g2_gating_analysis"
+        samples_path = analysis_dir / "gating_samples.tsv"
+        selected_checkpoint = self.output / "resnet50_checkpoint_14880.pt"
+        selected_sha = _sha(selected_checkpoint)
+        samples_path.write_text(
+            "stable_sample_key\tdataset_split\tpid\tcamid\tp2\tp4\tw2\tw4\tentropy\tdominant_k\tcheckpoint_sha256\n"
+            "q:1\tquery\t1\t0\t0.4\t0.6\t0.4\t0.6\t0.673011667009\t4\t{}\n".format(selected_sha),
+            encoding="utf-8",
+        )
+        summary_path = analysis_dir / "dynamic_gating_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["training_epoch_statistics"] = gate_rows[79]
+        summary["deterministic_sample_statistics"] = {
+            key: value for key, value in gate_rows[79].items()
+            if key not in ("epoch", "global_iteration", "epoch_length", "gating_scales")
+        }
+        summary["gating_samples"].update({
+            "path": str(samples_path.resolve()),
+            "size_bytes": samples_path.stat().st_size,
+            "sha256": _sha(samples_path),
+            "source_checkpoint_sha256": selected_sha,
+        })
+        _write_json(summary_path, summary)
+
+        old_manifest_path = self.output / "g2_gating_analysis_manifest.json"
+        analysis = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+        analysis["analysis_type"] = "G2-without-z6 Dynamic Gating observation"
+        analysis["config_sha256"] = _sha(self.config)
+        analysis["epoch_statistics_sha256"] = _sha(gate_path)
+        analysis["gating_input"] = G2_WITHOUT_Z6_PROFILE.gating_input_semantics
+        analysis["files"]["test_gate_samples_tsv"] = {
+            "path": str(samples_path.resolve()), "sha256": _sha(samples_path),
+        }
+        analysis["files"]["dynamic_gating_summary_json"] = {
+            "path": str(summary_path.resolve()), "sha256": _sha(summary_path),
+        }
+        analysis_manifest_path = self.output / G2_WITHOUT_Z6_PROFILE.analysis_manifest_filename
+        _write_json(analysis_manifest_path, analysis)
+
+        result = json.loads((
+            self.output / G2_LOCAL_ONLY_PROFILE.formal_result_filename
+        ).read_text(encoding="utf-8"))
+        result["experiment"] = G2_WITHOUT_Z6_PROFILE.experiment_label
+        result["branch"] = G2_WITHOUT_Z6_PROFILE.expected_branch
+        result["gating_input"] = G2_WITHOUT_Z6_PROFILE.gating_input_semantics
+        result["gate_outputs"] = ["w2", "w4"]
+        result["selected_epoch_gate_statistics"] = gate_rows[79]
+        result["evidence"].update({
+            "config_sha256": _sha(self.config),
+            "epoch_gate_statistics_sha256": _sha(gate_path),
+            "analysis_manifest": str(analysis_manifest_path.resolve()),
+            "analysis_manifest_sha256": _sha(analysis_manifest_path),
+        })
+        _write_json(
+            self.output / G2_WITHOUT_Z6_PROFILE.formal_result_filename, result
+        )
+
+    def _recover(self):
+        with mock.patch(
+                "tools.recover_g2_global_local_experiment._lineage",
+                return_value={
+                    "parent_branch": G2_WITHOUT_Z6_PROFILE.expected_parent_branch,
+                    "parent_commit": "a" * 40,
+                    "merge_base": "a" * 40,
+                }):
+            return recover(
+                self.config, self.output, self.console, self.records,
+                self.experiments,
+                started_at_utc="2026-08-27T00:00:00Z",
+                ended_at_utc="2026-08-27T01:00:00Z",
+                runtime_seconds=3600,
+                profile=G2_WITHOUT_Z6_PROFILE,
+            )
+
+    def test_without_z6_recovery_is_idempotent_and_registers_two_way_profile(self):
+        run_dir, row, created = self._recover()
+        self.assertTrue(created)
+        self.assertEqual(row["experiment_id"], G2_WITHOUT_Z6_PROFILE.experiment_id)
+        self.assertEqual(row["gating_input"], "concat_z2_z4")
+        self.assertEqual(row["scale_order"], "2,4")
+        self.assertEqual(row["p6_mean"], "not_recorded")
+        second_dir, second_row, created = self._recover()
+        self.assertFalse(created)
+        self.assertEqual(second_dir, run_dir)
+        self.assertEqual(second_row["run_id"], row["run_id"])
+
+    def test_local_only_recovery_is_idempotent_and_registers_one_row(self):
+        """Override inherited local-only identity coverage for this profile."""
+        self.test_without_z6_recovery_is_idempotent_and_registers_two_way_profile()
+
+    def test_recovery_registers_g2_once_and_is_idempotent(self):
+        """Override inherited concat_local compatibility coverage."""
+        self.test_without_z6_recovery_is_idempotent_and_registers_two_way_profile()
+
+    def test_without_z6_recovery_rejects_epoch_z6_statistics(self):
+        gate_path = self.output / "dynamic_gating_epoch_stats.jsonl"
+        rows = [
+            json.loads(line) for line in gate_path.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[0]["p6_mean"] = 0.0
+        gate_path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(G2RecoveryError, "must not record z6"):
+            self._recover()

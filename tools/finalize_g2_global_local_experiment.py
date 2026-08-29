@@ -121,6 +121,16 @@ def finalize(config_path, output_dir, profile=G2_GLOBAL_LOCAL_PROFILE):
                 profile.experiment_label
             )
         )
+    if profile.active_scales == (2, 4):
+        forbidden = (
+            "p6_mean", "p6_std", "p6_min", "p6_max",
+            "applied_w6_mean", "applied_w6_std", "dominant_k6_ratio",
+        )
+        for row in epoch_records:
+            if row.get("gating_scales") != [2, 4]:
+                raise ValueError("G2-without-z6 gate scales must be [2, 4]")
+            if any(field in row for field in forbidden):
+                raise ValueError("G2-without-z6 gate evidence must not record z6")
     selected_epoch = int(selected_validation["epoch"])
     selected_gate_rows = [
         row for row in epoch_records if int(row["epoch"]) == selected_epoch
@@ -163,7 +173,7 @@ def finalize(config_path, output_dir, profile=G2_GLOBAL_LOCAL_PROFILE):
         "commit": commit,
         "seed": 42,
         "gating_input": profile.gating_input_semantics,
-        "gate_outputs": ["w2", "w4", "w6"],
+        "gate_outputs": ["w{}".format(scale) for scale in profile.active_scales],
         "checkpoint_selection_rule": (
             "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
         ),
@@ -199,7 +209,12 @@ def finalize(config_path, output_dir, profile=G2_GLOBAL_LOCAL_PROFILE):
 
 
 def main_for_profile(profile, argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Select and seal a formal {} experiment without retraining."
+            .format(profile.experiment_label)
+        )
+    )
     parser.add_argument("--config-file", required=True)
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args(argv)

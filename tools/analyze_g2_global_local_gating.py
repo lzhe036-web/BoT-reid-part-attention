@@ -86,7 +86,7 @@ def _block_rows(state, configuration, checkpoint_sha256,
         raise ValueError("Checkpoint has no dynamic-gate controller weight")
     controller = state[key].detach().to(dtype=torch.float64, device="cpu")
     local_dim = int(configuration.MODEL.MULTI_GRANULARITY_PART_DIM)
-    if controller.dim() != 2 or controller.size(0) != len(SCALES):
+    if controller.dim() != 2 or controller.size(0) != len(profile.active_scales):
         raise ValueError(
             "Unexpected {} controller shape {}".format(
                 profile.experiment_label, tuple(controller.shape)
@@ -115,6 +115,18 @@ def _block_rows(state, configuration, checkpoint_sha256,
             ("z{}".format(scale), index * local_dim, (index + 1) * local_dim)
             for index, scale in enumerate(SCALES)
         )
+    elif profile.gating_input == "concat_z2_z4":
+        expected = len(profile.active_scales) * local_dim
+        if controller.size(1) != expected:
+            raise ValueError(
+                "G2-without-z6 controller input width must be {}, got {}".format(
+                    expected, controller.size(1)
+                )
+            )
+        boundaries = tuple(
+            ("z{}".format(scale), index * local_dim, (index + 1) * local_dim)
+            for index, scale in enumerate(profile.active_scales)
+        )
     else:
         raise ValueError("Unsupported G2 profile gating input {!r}".format(
             profile.gating_input
@@ -124,7 +136,7 @@ def _block_rows(state, configuration, checkpoint_sha256,
             profile.experiment_label
         ))
     rows = []
-    for target_index, target_scale in enumerate(SCALES):
+    for target_index, target_scale in enumerate(profile.active_scales):
         for block, start, end in boundaries:
             values = controller[target_index, start:end]
             l2_norm = float(torch.linalg.vector_norm(values).item())
@@ -146,7 +158,8 @@ def _plot_block_magnitudes(rows, output_path, profile=G2_GLOBAL_LOCAL_PROFILE):
     positions = np.arange(len(labels), dtype=np.float64)
     width = 0.22
     figure, axis = plt.subplots(figsize=(8.2, 4.8), dpi=180)
-    for index, scale in enumerate(SCALES):
+    center = (len(profile.active_scales) - 1) / 2.0
+    for index, scale in enumerate(profile.active_scales):
         values = [
             next(
                 row["rms_weight"] for row in rows
@@ -155,7 +168,7 @@ def _plot_block_magnitudes(rows, output_path, profile=G2_GLOBAL_LOCAL_PROFILE):
             )
             for label in labels
         ]
-        axis.bar(positions + (index - 1) * width, values, width,
+        axis.bar(positions + (index - center) * width, values, width,
                  label="controller output w{}".format(scale))
     axis.set_xticks(positions)
     axis.set_xticklabels(labels)
@@ -171,23 +184,23 @@ def _plot_block_magnitudes(rows, output_path, profile=G2_GLOBAL_LOCAL_PROFILE):
     plt.close(figure)
 
 
-def _history_rows(records):
+def _history_rows(records, profile=G2_GLOBAL_LOCAL_PROFILE):
     fields = [
         "epoch", "gating_sample_count", "mean_gate_entropy",
-        "p2_mean", "p4_mean", "p6_mean",
-        "applied_w2_mean", "applied_w4_mean", "applied_w6_mean",
-        "dominant_k2_ratio", "dominant_k4_ratio", "dominant_k6_ratio",
+        *["p{}_mean".format(scale) for scale in profile.active_scales],
+        *["applied_w{}_mean".format(scale) for scale in profile.active_scales],
+        *["dominant_k{}_ratio".format(scale) for scale in profile.active_scales],
     ]
     return [{field: record.get(field, "not_recorded") for field in fields}
             for record in records], fields
 
 
-def _plot_history(rows, output_path):
+def _plot_history(rows, output_path, profile=G2_GLOBAL_LOCAL_PROFILE):
     if not rows:
         return False
     epochs = [int(row["epoch"]) for row in rows]
     figure, axes = plt.subplots(1, 2, figsize=(10.4, 4.3), dpi=180)
-    for scale in SCALES:
+    for scale in profile.active_scales:
         axes[0].plot(epochs, [float(row["p{}_mean".format(scale)]) for row in rows],
                      label="p{} mean".format(scale))
         axes[1].plot(epochs, [float(row["applied_w{}_mean".format(scale)]) for row in rows],
@@ -208,14 +221,14 @@ def _plot_history(rows, output_path):
     return True
 
 
-def _sample_weight_rows(samples_path):
+def _sample_weight_rows(samples_path, scales=SCALES):
     with Path(samples_path).open("r", encoding="utf-8", newline="") as handle:
         samples = list(csv.DictReader(handle, delimiter="\t"))
     if not samples:
         raise ValueError("No deterministic G2 gating samples were exported")
     rows = []
     series = []
-    for scale in SCALES:
+    for scale in scales:
         values = np.asarray([float(row["w{}".format(scale)]) for row in samples])
         series.append(values)
         rows.append({
@@ -237,7 +250,7 @@ def _sample_weight_rows(samples_path):
 def _plot_sample_weight_distribution(series, output_path, pdf_path=None,
                                      profile=G2_GLOBAL_LOCAL_PROFILE):
     figure, axis = plt.subplots(figsize=(7.2, 4.8), dpi=180)
-    axis.boxplot(series, labels=["w2", "w4", "w6"], showmeans=True)
+    axis.boxplot(series, labels=["w{}".format(scale) for scale in profile.active_scales], showmeans=True)
     axis.set_xlabel("Applied local-scale gate weight")
     axis.set_ylabel("Weight across deterministic test samples")
     axis.set_title("{} test-stage applied gate-weight distribution".format(
@@ -285,17 +298,19 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     epoch_records = read_gating_epoch_records(epoch_stats_path)
     if not epoch_records:
         raise ValueError("No Dynamic Gating epoch records found")
-    history_rows, history_fields = _history_rows(epoch_records)
+    history_rows, history_fields = _history_rows(epoch_records, profile=profile)
     history_csv = _analysis_path(output_dir, profile, "gate_training_history.csv")
     _write_csv(history_csv, history_fields, history_rows)
     history_png = _analysis_path(output_dir, profile, "gate_training_history.png")
-    _plot_history(history_rows, history_png)
+    _plot_history(history_rows, history_png, profile=profile)
 
     summary_path, samples_path, evidence_summary = generate_dynamic_gating_evidence(
         configuration, checkpoint_path, output_dir,
         epoch_records[-1], limit=sample_limit, device=device,
     )
-    weight_rows, series = _sample_weight_rows(samples_path)
+    if evidence_summary["deterministic_sample_statistics"]["gating_sample_count"] <= 0:
+        raise ValueError("Dynamic Gating analysis selected no samples")
+    weight_rows, series = _sample_weight_rows(samples_path, scales=profile.active_scales)
     weights_csv = _analysis_path(output_dir, profile, "gate_test_weight_summary.csv")
     _write_csv(weights_csv, list(weight_rows[0].keys()), weight_rows)
     weights_png = _analysis_path(output_dir, profile, "gate_test_weight_distribution.png")
@@ -318,6 +333,8 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         "epoch_statistics_sha256": sha256_file(epoch_stats_path),
         "gating_input": profile.gating_input_semantics,
         "controller_output_semantics": (
+            "two softmax-normalized weights applied to z2 and z4; z6 is excluded"
+            if profile.gating_input == "concat_z2_z4" else
             "three scaled-softmax weights applied to z2, z4, z6; no direct g weight"
         ),
         "controller_block_plot_semantics": (
@@ -347,7 +364,16 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
 
 
 def main_for_profile(profile, argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export observation-only gate evidence for {}: {} -> {}."
+            .format(
+                profile.experiment_label,
+                profile.gating_input_semantics,
+                ", ".join("w{}".format(scale) for scale in profile.active_scales),
+            )
+        )
+    )
     parser.add_argument("--config-file", required=True)
     parser.add_argument("--weight", required=True)
     parser.add_argument("--output-dir", required=True)
