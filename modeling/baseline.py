@@ -205,13 +205,14 @@ class MultiGranularityDynamicGate(nn.Module):
     """Per-sample scaled-softmax controller for existing scale descriptors.
 
     ``global`` (G1) feeds the global descriptor ``g`` to the controller.  The
-    ``concat_global_local`` variant (G2) feeds ``[g, z2, z4, z6]`` before the
-    same controller.  In both cases the controller still produces three
-    weights, one for each existing local scale descriptor; it does not add a
-    fourth global-feature gate.
+    ``concat_global_local`` variant (G2-global-local) feeds
+    ``[g, z2, z4, z6]`` before the same controller.  ``concat_local``
+    (G2-local-only) feeds only ``[z2, z4, z6]``.  Every mode still produces
+    exactly three weights, one for each existing local scale descriptor; it
+    never adds a fourth global-feature gate.
     """
 
-    VALID_GATING_INPUTS = ('global', 'concat_global_local')
+    VALID_GATING_INPUTS = ('global', 'concat_global_local', 'concat_local')
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
                  gating_input='global', normalization='scaled_softmax',
@@ -247,14 +248,17 @@ class MultiGranularityDynamicGate(nn.Module):
         self.local_feature_dim = (
             None if local_feature_dim is None else int(local_feature_dim)
         )
-        if self.gating_input == 'concat_global_local':
+        if self.gating_input in ('concat_global_local', 'concat_local'):
             if self.local_feature_dim is None or self.local_feature_dim <= 0:
                 raise ValueError(
-                    'concat_global_local gating requires a positive '
-                    'local_feature_dim'
+                    '{} gating requires a positive '
+                    'local_feature_dim'.format(self.gating_input)
                 )
+            local_input_dim = self.num_scales * self.local_feature_dim
             self.controller_input_dim = (
-                self.in_planes + self.num_scales * self.local_feature_dim
+                self.in_planes + local_input_dim
+                if self.gating_input == 'concat_global_local'
+                else local_input_dim
             )
         else:
             self.controller_input_dim = self.in_planes
@@ -275,8 +279,9 @@ class MultiGranularityDynamicGate(nn.Module):
         if scale_features is None or len(scale_features) != self.num_scales:
             received = 0 if scale_features is None else len(scale_features)
             raise ValueError(
-                'concat_global_local gating expects {} local scale features, '
-                'got {}'.format(self.num_scales, received)
+                '{} gating expects {} local scale features, got {}'.format(
+                    self.gating_input, self.num_scales, received
+                )
             )
         checked = []
         for index, feature in enumerate(scale_features):
@@ -288,6 +293,8 @@ class MultiGranularityDynamicGate(nn.Module):
                     )
                 )
             checked.append(feature)
+        if self.gating_input == 'concat_local':
+            return torch.cat(tuple(checked), dim=1)
         return torch.cat((global_feat,) + tuple(checked), dim=1)
 
     def forward(self, global_feat, scale_features=None):

@@ -45,19 +45,20 @@ from utils.experiment_schema import (
     NOT_RECORDED,
     SCHEMA_VERSION,
 )
+from tools.g2_dynamic_gating_profiles import G2_GLOBAL_LOCAL_PROFILE
 
 
-EXPERIMENT_ID = "C2-L03-MGDG-G2-GL-T1-S42"
-EXPECTED_BRANCH = "codex/g2-global-local-gating"
-EXPECTED_PARENT_BRANCH = "exp/c2-l03-multi-granularity-dynamic-gating"
+EXPERIMENT_ID = G2_GLOBAL_LOCAL_PROFILE.experiment_id
+EXPECTED_BRANCH = G2_GLOBAL_LOCAL_PROFILE.expected_branch
+EXPECTED_PARENT_BRANCH = G2_GLOBAL_LOCAL_PROFILE.expected_parent_branch
 EXPECTED_EPOCHS = (40, 80, 120)
 EXPECTED_GATE_EPOCHS = tuple(range(1, 121))
-EXPECTED_GATING_INPUT = "concat_global_local"
+EXPECTED_GATING_INPUT = G2_GLOBAL_LOCAL_PROFILE.gating_input
 SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
 DEFAULT_CONFIG = (
     REPO_ROOT
     / "configs"
-    / "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_g2_global_local_autodl.yml"
+    / G2_GLOBAL_LOCAL_PROFILE.config_filename
 )
 
 
@@ -114,7 +115,8 @@ def _nested(mapping, *keys):
     return value
 
 
-def _validate_configuration(config_path, resolved_path, output_dir, reproducibility):
+def _validate_configuration(config_path, resolved_path, output_dir, reproducibility,
+                            profile=G2_GLOBAL_LOCAL_PROFILE):
     config_path = _require_file(config_path, "source config")
     resolved_path = _require_file(resolved_path, "resolved config")
     with config_path.open("r", encoding="utf-8") as handle:
@@ -127,7 +129,7 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
     checks = (
         (("SEED",), 42),
         (("MODEL", "MULTI_GRANULARITY_DYNAMIC_GATING"), True),
-        (("MODEL", "MULTI_GRANULARITY_GATING_INPUT"), EXPECTED_GATING_INPUT),
+        (("MODEL", "MULTI_GRANULARITY_GATING_INPUT"), profile.gating_input),
         (("MODEL", "MULTI_GRANULARITY_GATING_TAU"), 1.0),
         (("MODEL", "MULTI_GRANULARITY_GATING_NORMALIZATION"), "scaled_softmax"),
         (("MODEL", "MULTI_GRANULARITY_PART_SCALES"), [2, 4, 6]),
@@ -140,8 +142,9 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
             actual = _nested(payload, *keys)
             if actual != expected:
                 raise G2RecoveryError(
-                    "G2 {} config mismatch {}: {!r} != {!r}".format(
-                        label, ".".join(keys), actual, expected
+                    "{} {} config mismatch {}: {!r} != {!r}".format(
+                        profile.experiment_label, label, ".".join(keys),
+                        actual, expected
                     )
                 )
     for label, payload in (("source", source), ("resolved", resolved)):
@@ -165,7 +168,8 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
     return source, resolved
 
 
-def _validate_reproducibility(reproducibility):
+def _validate_reproducibility(reproducibility,
+                              profile=G2_GLOBAL_LOCAL_PROFILE):
     chain = reproducibility.get("seed_chain", {})
     seed_values = {
         "seed": reproducibility.get("seed"),
@@ -180,10 +184,10 @@ def _validate_reproducibility(reproducibility):
     if reproducibility.get("seed_applied_before_data_loading") is not True:
         raise G2RecoveryError("Seed was not recorded before data loading")
     code = reproducibility.get("code", {})
-    if code.get("branch") != EXPECTED_BRANCH:
+    if code.get("branch") != profile.expected_branch:
         raise G2RecoveryError(
             "Training branch mismatch: {!r} != {!r}".format(
-                code.get("branch"), EXPECTED_BRANCH
+                code.get("branch"), profile.expected_branch
             )
         )
     commit = code.get("commit")
@@ -230,12 +234,13 @@ def _same_number(left, right):
 
 
 def _validate_result(output_dir, result, commit, validation_records,
-                     checkpoint_rows, gate_records):
-    if result.get("branch") != EXPECTED_BRANCH or result.get("commit") != commit:
+                     checkpoint_rows, gate_records,
+                     profile=G2_GLOBAL_LOCAL_PROFILE):
+    if result.get("branch") != profile.expected_branch or result.get("commit") != commit:
         raise G2RecoveryError("G2 result branch/commit does not match training evidence")
     if result.get("seed") != 42:
         raise G2RecoveryError("G2 result does not record Seed=42")
-    if result.get("gating_input") != "concat([g, z2, z4, z6])":
+    if result.get("gating_input") != profile.gating_input_semantics:
         raise G2RecoveryError("G2 result has the wrong controller input")
     if result.get("gate_outputs") != ["w2", "w4", "w6"]:
         raise G2RecoveryError("G2 result has the wrong gate-output semantics")
@@ -294,7 +299,8 @@ def _validate_result(output_dir, result, commit, validation_records,
 
 
 def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
-                       validation_path, gate_stats_path):
+                       validation_path, gate_stats_path,
+                       profile=G2_GLOBAL_LOCAL_PROFILE):
     evidence = result.get("evidence", {})
     bindings = (
         (config_path, evidence.get("config_sha256"), "result config"),
@@ -327,14 +333,7 @@ def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
             raise G2RecoveryError("Analysis artifact SHA256 mismatch: {}".format(artifact_path))
         analysis_files[artifact_type] = artifact_path
 
-    required = {
-        "controller_block_norms_csv",
-        "controller_block_norms_png",
-        "test_gate_samples_tsv",
-        "test_weight_summary_csv",
-        "test_weight_distribution_png",
-        "dynamic_gating_summary_json",
-    }
+    required = set(profile.required_analysis_artifacts)
     if not required.issubset(set(analysis_files)):
         raise G2RecoveryError(
             "G2 analysis is missing required artifacts: {}".format(
@@ -389,7 +388,7 @@ def _timing(reproducibility, result_path, started_at_utc=None,
     )
 
 
-def _lineage(commit):
+def _lineage(commit, profile=G2_GLOBAL_LOCAL_PROFILE):
     """Return only lineage that can be derived from the recorded Git object."""
     import subprocess
 
@@ -403,9 +402,9 @@ def _lineage(commit):
             return NOT_RECORDED
         return output.decode("utf-8", errors="replace").strip() or NOT_RECORDED
 
-    parent_commit = git("merge-base", commit, EXPECTED_PARENT_BRANCH)
+    parent_commit = git("merge-base", commit, profile.expected_parent_branch)
     return {
-        "parent_branch": EXPECTED_PARENT_BRANCH,
+        "parent_branch": profile.expected_parent_branch,
         "parent_commit": parent_commit,
         "merge_base": parent_commit,
     }
@@ -422,7 +421,8 @@ def _environment_payload(reproducibility, reproducibility_sha):
     }
 
 
-def _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha):
+def _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha,
+                         profile=G2_GLOBAL_LOCAL_PROFILE):
     manifest = _read_json(run_dir / "run_manifest.json", "recovered run manifest")
     status = _read_json(run_dir / "run_status.json", "recovered run status")
     expected = {
@@ -430,7 +430,7 @@ def _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha):
         "status": "success",
         "commit": commit,
         "output_dir": str(output_dir),
-        "gating_input": EXPECTED_GATING_INPUT,
+        "gating_input": profile.gating_input,
     }
     for key, value in expected.items():
         if manifest.get(key) != value:
@@ -456,7 +456,8 @@ def _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha):
 
 
 def recover(config_path, output_dir, console_log, records_root, experiments_path,
-            started_at_utc=None, ended_at_utc=None, runtime_seconds=None):
+            started_at_utc=None, ended_at_utc=None, runtime_seconds=None,
+            profile=G2_GLOBAL_LOCAL_PROFILE):
     config_path = _require_file(config_path, "source config")
     output_dir = Path(output_dir).resolve()
     if not output_dir.is_dir():
@@ -479,34 +480,42 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
     checkpoint_manifest_path = _require_file(
         output_dir / "checkpoint_manifest.tsv", "checkpoint manifest"
     )
-    result_path = _require_file(output_dir / "g2_formal_result.json", "G2 formal result")
+    result_path = _require_file(
+        output_dir / profile.formal_result_filename,
+        "{} formal result".format(profile.experiment_label),
+    )
 
     reproducibility = _read_json(reproducibility_path, "reproducibility record")
-    commit = _validate_reproducibility(reproducibility)
+    commit = _validate_reproducibility(reproducibility, profile=profile)
     source_config, _resolved_config = _validate_configuration(
-        config_path, resolved_path, output_dir, reproducibility
+        config_path, resolved_path, output_dir, reproducibility, profile=profile
     )
     validation_records = read_validation_history(validation_path)
     gate_records = read_gating_epoch_records(gate_stats_path)
     checkpoint_rows = _read_checkpoint_manifest(checkpoint_manifest_path)
     result = _read_json(result_path, "G2 formal result")
     best, selected_row, gating_statistics, checkpoint_path, checkpoint_sha = _validate_result(
-        output_dir, result, commit, validation_records, checkpoint_rows, gate_records
+        output_dir, result, commit, validation_records, checkpoint_rows,
+        gate_records, profile=profile
     )
     analysis_manifest_path, analysis_files, summary_path, samples_path, summary = \
         _validate_analysis(
             output_dir, result, checkpoint_sha, config_path,
-            validation_path, gate_stats_path
+            validation_path, gate_stats_path, profile=profile
         )
     started, ended, runtime = _timing(
         reproducibility, result_path, started_at_utc, ended_at_utc, runtime_seconds
     )
 
-    run_id = "{}-{}-{}".format(EXPERIMENT_ID, commit[:10], checkpoint_sha[:10])
+    run_id = "{}-{}-{}".format(
+        profile.experiment_id, commit[:10], checkpoint_sha[:10]
+    )
     runs_root = records_root / "runs"
     run_dir = runs_root / run_id
     if run_dir.exists():
-        row = _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha)
+        row = _verify_existing_run(
+            run_dir, output_dir, commit, checkpoint_sha, profile=profile
+        )
         return run_dir, row, False
 
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -522,9 +531,12 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
         checkpoint_manifest_snapshot = _copy_atomic(
             checkpoint_manifest_path, temporary_dir / "checkpoint_manifest.tsv"
         )
-        result_snapshot = _copy_atomic(result_path, temporary_dir / "g2_formal_result.json")
+        result_snapshot = _copy_atomic(
+            result_path, temporary_dir / profile.formal_result_filename
+        )
         analysis_manifest_snapshot = _copy_atomic(
-            analysis_manifest_path, temporary_dir / "g2_gating_analysis_manifest.json"
+            analysis_manifest_path,
+            temporary_dir / profile.analysis_manifest_filename,
         )
         summary_snapshot = _copy_atomic(summary_path, temporary_dir / "dynamic_gating_summary.json")
         samples_snapshot = _copy_atomic(samples_path, temporary_dir / "gating_samples.tsv")
@@ -535,7 +547,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             _environment_payload(reproducibility, reproducibility_sha),
         )
 
-        lineage = _lineage(commit)
+        lineage = _lineage(commit, profile=profile)
         env = reproducibility.get("environment", {})
         gpu_names = env.get("gpu_names", [])
         gpu = ", ".join(str(item) for item in gpu_names) if gpu_names else NOT_RECORDED
@@ -554,7 +566,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "selected_checkpoint": _file_evidence(
                 checkpoint_path, checkpoint_sha, SELECTION_RULE
             ),
-            "g2_formal_result": _file_evidence(result_snapshot),
+            profile.formal_result_artifact_type: _file_evidence(result_snapshot),
             "g2_gating_analysis_manifest": _file_evidence(analysis_manifest_snapshot),
             "dynamic_gating_summary": _file_evidence(
                 summary_snapshot, checkpoint_sha, summary.get("selection_rule", SELECTION_RULE)
@@ -575,7 +587,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
 
         manifest = {
             "schema_version": SCHEMA_VERSION,
-            "experiment_id": EXPERIMENT_ID,
+            "experiment_id": profile.experiment_id,
             "experiment_family": "C2-L03-MULTI-GRANULARITY-DYNAMIC-GATING",
             "evidence_id": run_id,
             "run_id": run_id,
@@ -585,8 +597,8 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
                 {"status": "success", "timestamp_utc": ended, "source": "post-hoc recovery"}
             ],
             "method_family": "multi_granularity_feature",
-            "method_variant": "g2_global_local_per_sample_dynamic_gating",
-            "method": "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]",
+            "method_variant": profile.method_variant,
+            "method": profile.method,
             "dataset": str(_nested(source_config, "DATASETS", "NAMES")),
             "baseline": "C2-L03 + MGP concat",
             "margin": _nested(source_config, "SOLVER", "MARGIN"),
@@ -595,7 +607,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "cross_camera_positive_lambda": _nested(
                 source_config, "MODEL", "CROSS_CAMERA_POSITIVE_LAMBDA"
             ),
-            "branch": EXPECTED_BRANCH,
+            "branch": profile.expected_branch,
             "commit": commit,
             "parent_branch": lineage["parent_branch"],
             "parent_commit": lineage["parent_commit"],
@@ -618,7 +630,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "alignment_mode": NOT_APPLICABLE,
             "alignment_temperature": NOT_APPLICABLE,
             "gating_mode": "per_sample_dynamic_gating",
-            "gating_input": EXPECTED_GATING_INPUT,
+            "gating_input": profile.gating_input,
             "gating_temperature": 1.0,
             "gating_normalization": "scaled_softmax",
             "scale_order": "2,4,6",
@@ -636,8 +648,9 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "launch_worktree_clean_evidence": str(reproducibility_path),
             "selected_checkpoint_record": dict(selected_row),
             "notes": (
-                "Recovered from existing machine-generated G2 evidence; numeric values "
-                "were not edited. Launch commit/worktree state comes from reproducibility.json."
+                "Recovered from existing machine-generated {} evidence; numeric values "
+                "were not edited. Launch commit/worktree state comes from "
+                "reproducibility.json.".format(profile.experiment_label)
             ),
             "records_root": str(records_root),
             "experiments_path": str(experiments_path),
@@ -675,9 +688,10 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
     return run_dir, row, True
 
 
-def main(argv=None):
+def main_for_profile(profile, argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config-file", default=str(DEFAULT_CONFIG))
+    default_config = REPO_ROOT / "configs" / profile.config_filename
+    parser.add_argument("--config-file", default=str(default_config))
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--console-log", required=True)
     parser.add_argument(
@@ -699,6 +713,7 @@ def main(argv=None):
         started_at_utc=args.started_at_utc,
         ended_at_utc=args.ended_at_utc,
         runtime_seconds=args.runtime_seconds,
+        profile=profile,
     )
     print(json.dumps({
         "created": created,
@@ -711,6 +726,10 @@ def main(argv=None):
         "selected_checkpoint_sha256": row["selected_checkpoint_sha256"],
     }, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def main(argv=None):
+    return main_for_profile(G2_GLOBAL_LOCAL_PROFILE, argv=argv)
 
 
 if __name__ == "__main__":

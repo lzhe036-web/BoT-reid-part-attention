@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from config import cfg
 from tools.analyze_dynamic_gating import _state_dict, generate_dynamic_gating_evidence
+from tools.g2_dynamic_gating_profiles import G2_GLOBAL_LOCAL_PROFILE
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import sha256_file
 
@@ -60,40 +61,68 @@ def _write_csv(path, fieldnames, rows):
     _atomic_text(path, buffer.getvalue())
 
 
-def _load_configuration(config_path):
+def _load_configuration(config_path, profile=G2_GLOBAL_LOCAL_PROFILE):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
     if not configuration.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
         raise ValueError("The supplied config does not enable Dynamic Gating")
-    if configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT != "concat_global_local":
+    if configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT != profile.gating_input:
         raise ValueError(
-            "This G2 analyzer requires MULTI_GRANULARITY_GATING_INPUT="
-            "'concat_global_local', got {!r}".format(
+            "This {} analyzer requires MULTI_GRANULARITY_GATING_INPUT="
+            "{!r}, got {!r}".format(
+                profile.experiment_label,
+                profile.gating_input,
                 configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT
             )
         )
     return configuration
 
 
-def _block_rows(state, configuration, checkpoint_sha256):
+def _block_rows(state, configuration, checkpoint_sha256,
+                profile=G2_GLOBAL_LOCAL_PROFILE):
     key = "multi_granularity_dynamic_gate.controller.weight"
     if key not in state:
         raise ValueError("Checkpoint has no dynamic-gate controller weight")
     controller = state[key].detach().to(dtype=torch.float64, device="cpu")
     local_dim = int(configuration.MODEL.MULTI_GRANULARITY_PART_DIM)
-    global_dim = int(controller.size(1) - len(SCALES) * local_dim)
-    expected = global_dim + len(SCALES) * local_dim
-    if controller.dim() != 2 or controller.size(0) != len(SCALES) or global_dim <= 0:
-        raise ValueError("Unexpected G2 controller shape {}".format(tuple(controller.shape)))
-    if controller.size(1) != expected:
-        raise ValueError("Unexpected G2 controller input width")
-    boundaries = (
-        ("g", 0, global_dim),
-        ("z2", global_dim, global_dim + local_dim),
-        ("z4", global_dim + local_dim, global_dim + 2 * local_dim),
-        ("z6", global_dim + 2 * local_dim, expected),
-    )
+    if controller.dim() != 2 or controller.size(0) != len(SCALES):
+        raise ValueError(
+            "Unexpected {} controller shape {}".format(
+                profile.experiment_label, tuple(controller.shape)
+            )
+        )
+    if profile.gating_input == "concat_global_local":
+        global_dim = int(controller.size(1) - len(SCALES) * local_dim)
+        expected = global_dim + len(SCALES) * local_dim
+        if global_dim <= 0 or controller.size(1) != expected:
+            raise ValueError("Unexpected G2 global-local controller input width")
+        boundaries = (
+            ("g", 0, global_dim),
+            ("z2", global_dim, global_dim + local_dim),
+            ("z4", global_dim + local_dim, global_dim + 2 * local_dim),
+            ("z6", global_dim + 2 * local_dim, expected),
+        )
+    elif profile.gating_input == "concat_local":
+        expected = len(SCALES) * local_dim
+        if controller.size(1) != expected:
+            raise ValueError(
+                "G2-local-only controller input width must be {}, got {}".format(
+                    expected, controller.size(1)
+                )
+            )
+        boundaries = tuple(
+            ("z{}".format(scale), index * local_dim, (index + 1) * local_dim)
+            for index, scale in enumerate(SCALES)
+        )
+    else:
+        raise ValueError("Unsupported G2 profile gating input {!r}".format(
+            profile.gating_input
+        ))
+    if tuple(block for block, _start, _end in boundaries) != profile.controller_blocks:
+        raise ValueError("Controller block protocol differs from {}".format(
+            profile.experiment_label
+        ))
     rows = []
     for target_index, target_scale in enumerate(SCALES):
         for block, start, end in boundaries:
@@ -112,8 +141,8 @@ def _block_rows(state, configuration, checkpoint_sha256):
     return rows, boundaries
 
 
-def _plot_block_magnitudes(rows, output_path):
-    labels = ("g", "z2", "z4", "z6")
+def _plot_block_magnitudes(rows, output_path, profile=G2_GLOBAL_LOCAL_PROFILE):
+    labels = profile.controller_blocks
     positions = np.arange(len(labels), dtype=np.float64)
     width = 0.22
     figure, axis = plt.subplots(figsize=(8.2, 4.8), dpi=180)
@@ -130,9 +159,11 @@ def _plot_block_magnitudes(rows, output_path):
                  label="controller output w{}".format(scale))
     axis.set_xticks(positions)
     axis.set_xticklabels(labels)
-    axis.set_xlabel("G2 controller input block")
+    axis.set_xlabel("{} controller input block".format(profile.experiment_label))
     axis.set_ylabel("Controller coefficient RMS magnitude")
-    axis.set_title("G2 controller parameter-block magnitudes")
+    axis.set_title("{} controller parameter-block magnitudes".format(
+        profile.experiment_label
+    ))
     axis.legend()
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
@@ -203,15 +234,20 @@ def _sample_weight_rows(samples_path):
     return rows, series
 
 
-def _plot_sample_weight_distribution(series, output_path):
+def _plot_sample_weight_distribution(series, output_path, pdf_path=None,
+                                     profile=G2_GLOBAL_LOCAL_PROFILE):
     figure, axis = plt.subplots(figsize=(7.2, 4.8), dpi=180)
     axis.boxplot(series, labels=["w2", "w4", "w6"], showmeans=True)
     axis.set_xlabel("Applied local-scale gate weight")
     axis.set_ylabel("Weight across deterministic test samples")
-    axis.set_title("G2 test-stage applied gate-weight distribution")
+    axis.set_title("{} test-stage applied gate-weight distribution".format(
+        profile.experiment_label
+    ))
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    if pdf_path is not None:
+        figure.savefig(str(pdf_path), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -219,8 +255,12 @@ def _sha256_text(path):
     return sha256_file(Path(path)) if Path(path).is_file() else "not_created"
 
 
+def _analysis_path(output_dir, profile, suffix):
+    return output_dir / "{}_{}".format(profile.artifact_prefix, suffix)
+
+
 def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
-            sample_limit=256, device=None):
+            sample_limit=256, device=None, profile=G2_GLOBAL_LOCAL_PROFILE):
     config_path = Path(config_path).resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -230,23 +270,25 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     if not epoch_stats_path.is_file():
         raise FileNotFoundError("Epoch gating statistics not found: {}".format(epoch_stats_path))
     output_dir.mkdir(parents=True, exist_ok=False)
-    configuration = _load_configuration(config_path)
+    configuration = _load_configuration(config_path, profile=profile)
     checkpoint_sha = sha256_file(checkpoint_path)
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
     state = _state_dict(checkpoint)
-    block_rows, _boundaries = _block_rows(state, configuration, checkpoint_sha)
-    block_csv = output_dir / "g2_controller_input_block_norms.csv"
+    block_rows, _boundaries = _block_rows(
+        state, configuration, checkpoint_sha, profile=profile
+    )
+    block_csv = _analysis_path(output_dir, profile, "controller_input_block_norms.csv")
     _write_csv(block_csv, list(block_rows[0].keys()), block_rows)
-    block_png = output_dir / "g2_controller_input_block_norms.png"
-    _plot_block_magnitudes(block_rows, block_png)
+    block_png = _analysis_path(output_dir, profile, "controller_input_block_norms.png")
+    _plot_block_magnitudes(block_rows, block_png, profile=profile)
 
     epoch_records = read_gating_epoch_records(epoch_stats_path)
     if not epoch_records:
         raise ValueError("No Dynamic Gating epoch records found")
     history_rows, history_fields = _history_rows(epoch_records)
-    history_csv = output_dir / "g2_gate_training_history.csv"
+    history_csv = _analysis_path(output_dir, profile, "gate_training_history.csv")
     _write_csv(history_csv, history_fields, history_rows)
-    history_png = output_dir / "g2_gate_training_history.png"
+    history_png = _analysis_path(output_dir, profile, "gate_training_history.png")
     _plot_history(history_rows, history_png)
 
     summary_path, samples_path, evidence_summary = generate_dynamic_gating_evidence(
@@ -254,20 +296,27 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         epoch_records[-1], limit=sample_limit, device=device,
     )
     weight_rows, series = _sample_weight_rows(samples_path)
-    weights_csv = output_dir / "g2_gate_test_weight_summary.csv"
+    weights_csv = _analysis_path(output_dir, profile, "gate_test_weight_summary.csv")
     _write_csv(weights_csv, list(weight_rows[0].keys()), weight_rows)
-    weights_png = output_dir / "g2_gate_test_weight_distribution.png"
-    _plot_sample_weight_distribution(series, weights_png)
+    weights_png = _analysis_path(output_dir, profile, "gate_test_weight_distribution.png")
+    weights_pdf = (
+        _analysis_path(output_dir, profile, "gate_test_weight_distribution.pdf")
+        if "test_weight_distribution_pdf" in profile.required_analysis_artifacts
+        else None
+    )
+    _plot_sample_weight_distribution(
+        series, weights_png, pdf_path=weights_pdf, profile=profile
+    )
 
     manifest = {
-        "analysis_type": "G2 global-plus-local Dynamic Gating observation",
+        "analysis_type": "{} observation".format(profile.experiment_label),
         "config_path": str(config_path),
         "config_sha256": sha256_file(config_path),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_sha,
         "epoch_statistics_path": str(epoch_stats_path),
         "epoch_statistics_sha256": sha256_file(epoch_stats_path),
-        "gating_input": "concat([g, z2, z4, z6])",
+        "gating_input": profile.gating_input_semantics,
         "controller_output_semantics": (
             "three scaled-softmax weights applied to z2, z4, z6; no direct g weight"
         ),
@@ -288,12 +337,16 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
             "dynamic_gating_summary_json": {"path": str(summary_path), "sha256": _sha256_text(summary_path)},
         },
     }
-    manifest_path = output_dir / "g2_gating_analysis_manifest.json"
+    if weights_pdf is not None:
+        manifest["files"]["test_weight_distribution_pdf"] = {
+            "path": str(weights_pdf), "sha256": _sha256_text(weights_pdf)
+        }
+    manifest_path = output_dir / profile.analysis_manifest_filename
     _atomic_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return manifest_path
 
 
-def main(argv=None):
+def main_for_profile(profile, argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-file", required=True)
     parser.add_argument("--weight", required=True)
@@ -306,10 +359,14 @@ def main(argv=None):
         parser.error("--sample-limit must be positive")
     manifest = analyze(
         args.config_file, args.weight, args.output_dir, args.epoch_stats,
-        sample_limit=args.sample_limit, device=args.device,
+        sample_limit=args.sample_limit, device=args.device, profile=profile,
     )
     print(str(manifest))
     return 0
+
+
+def main(argv=None):
+    return main_for_profile(G2_GLOBAL_LOCAL_PROFILE, argv=argv)
 
 
 if __name__ == "__main__":

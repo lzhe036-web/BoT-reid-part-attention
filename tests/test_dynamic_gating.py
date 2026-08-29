@@ -17,6 +17,16 @@ from utils.experiment_recording import validate_dynamic_configuration
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATIC_CONFIG = REPO_ROOT / "configs" / "softmax_triplet_c2_l03_multi_granularity_part_autodl.yml"
 DYNAMIC_CONFIG = REPO_ROOT / "configs" / "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_autodl.yml"
+G2_GLOBAL_LOCAL_CONFIG = (
+    REPO_ROOT / "configs" /
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_global_local_autodl.yml"
+)
+G2_LOCAL_ONLY_CONFIG = (
+    REPO_ROOT / "configs" /
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_local_only_autodl.yml"
+)
 
 
 class CountingBackbone(nn.Module):
@@ -49,6 +59,14 @@ def global_local_configuration():
     return result
 
 
+def local_only_configuration():
+    result = configuration(True).clone()
+    result.defrost()
+    result.MODEL.MULTI_GRANULARITY_GATING_INPUT = "concat_local"
+    result.freeze()
+    return result
+
+
 def model(dynamic, num_classes=3):
     result = build_model(configuration(dynamic), num_classes)
     result.base = CountingBackbone()
@@ -57,6 +75,12 @@ def model(dynamic, num_classes=3):
 
 def global_local_model(num_classes=3):
     result = build_model(global_local_configuration(), num_classes)
+    result.base = CountingBackbone()
+    return result
+
+
+def local_only_model(num_classes=3):
+    result = build_model(local_only_configuration(), num_classes)
     result.base = CountingBackbone()
     return result
 
@@ -119,6 +143,140 @@ class DynamicGatingTest(unittest.TestCase):
         self.assertEqual(
             tuple(network._last_dynamic_gating["weights"].shape), (2, 3)
         )
+
+    def test_local_only_gate_uses_only_declared_local_concat_input(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, temperature=1.0,
+            gating_input="concat_local", local_feature_dim=256,
+        )
+        global_features = torch.randn(2, 2048)
+        local_features = tuple(torch.randn(2, 256) for _ in range(3))
+        controller_input = gate.controller_input(global_features, local_features)
+        expected = torch.cat(local_features, dim=1)
+        self.assertEqual(tuple(controller_input.shape), (2, 768))
+        self.assertTrue(torch.equal(controller_input, expected))
+        self.assertEqual(gate.controller.in_features, 768)
+
+    def test_local_only_global_descriptor_cannot_change_gate_outputs(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, temperature=1.0,
+            gating_input="concat_local", local_feature_dim=256,
+        )
+        with torch.no_grad():
+            nn.init.normal_(gate.controller.weight, std=0.05)
+            nn.init.normal_(gate.controller.bias, std=0.05)
+        local_features = tuple(torch.randn(3, 256) for _ in range(3))
+        first_global = torch.randn(3, 2048)
+        second_global = torch.randn(3, 2048)
+        first = gate(first_global, local_features)
+        second = gate(second_global, local_features)
+        for first_value, second_value in zip(first, second):
+            self.assertTrue(torch.equal(first_value, second_value))
+
+    def test_local_only_local_features_can_change_gate_outputs(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, temperature=1.0,
+            gating_input="concat_local", local_feature_dim=256,
+        )
+        with torch.no_grad():
+            nn.init.normal_(gate.controller.weight, std=0.05)
+        global_features = torch.randn(2, 2048)
+        local_features = tuple(torch.randn(2, 256) for _ in range(3))
+        modified = list(local_features)
+        modified[1] = modified[1] + 1.0
+        self.assertFalse(torch.equal(
+            gate(global_features, local_features)[0],
+            gate(global_features, tuple(modified))[0],
+        ))
+
+    def test_local_only_rejects_missing_or_malformed_local_features(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, gating_input="concat_local", local_feature_dim=256,
+        )
+        global_features = torch.randn(2, 2048)
+        with self.assertRaisesRegex(ValueError, "expects 3 local"):
+            gate(global_features)
+        with self.assertRaisesRegex(ValueError, "expects 3 local"):
+            gate(global_features, (torch.randn(2, 256),) * 2)
+        with self.assertRaisesRegex(ValueError, "shape"):
+            gate(global_features, (
+                torch.randn(2, 256), torch.randn(2, 255), torch.randn(2, 256),
+            ))
+        with self.assertRaisesRegex(ValueError, "shape"):
+            gate(global_features, (
+                torch.randn(2, 256), torch.randn(3, 256), torch.randn(2, 256),
+            ))
+
+    def test_local_only_zero_initialization_preserves_static_descriptor(self):
+        static = model(False)
+        local_dynamic = local_only_model()
+        copy_shared_state(static, local_dynamic)
+        values = torch.randn(3, 3, 8, 4)
+        static.eval()
+        local_dynamic.eval()
+        with torch.no_grad():
+            expected = static(values)
+            actual = local_dynamic(values)
+        self.assertTrue(torch.equal(actual, expected))
+        gate = local_dynamic.multi_granularity_dynamic_gate
+        self.assertEqual(gate.controller.weight.count_nonzero().item(), 0)
+        self.assertEqual(gate.controller.bias.count_nonzero().item(), 0)
+        logits, probabilities, weights = gate(
+            torch.randn(3, 2048), tuple(torch.randn(3, 256) for _ in range(3))
+        )
+        self.assertTrue(torch.equal(logits, torch.zeros_like(logits)))
+        self.assertTrue(torch.allclose(probabilities, torch.full_like(probabilities, 1.0 / 3.0)))
+        self.assertTrue(torch.allclose(weights, torch.ones_like(weights)))
+
+    def test_local_only_model_keeps_2816_descriptor_and_three_gate_outputs(self):
+        network = local_only_model()
+        network.eval()
+        with torch.no_grad():
+            descriptor = network(torch.randn(2, 3, 8, 4))
+        self.assertEqual(tuple(descriptor.shape), (2, 2816))
+        self.assertEqual(
+            network.multi_granularity_dynamic_gate.controller.in_features, 768
+        )
+        self.assertEqual(
+            tuple(network._last_dynamic_gating["weights"].shape), (2, 3)
+        )
+
+    def test_local_only_formal_yaml_diff_is_limited_to_input_and_output(self):
+        global_local = yaml.safe_load(
+            G2_GLOBAL_LOCAL_CONFIG.read_text(encoding="utf-8")
+        )
+        local_only = yaml.safe_load(
+            G2_LOCAL_ONLY_CONFIG.read_text(encoding="utf-8")
+        )
+
+        def flatten(value, prefix=""):
+            result = {}
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    name = "{}.{}".format(prefix, key) if prefix else str(key)
+                    result.update(flatten(child, name))
+            else:
+                result[prefix] = value
+            return result
+
+        global_flat = flatten(global_local)
+        local_flat = flatten(local_only)
+        differences = {
+            field for field in set(global_flat) | set(local_flat)
+            if global_flat.get(field) != local_flat.get(field)
+        }
+        self.assertEqual(differences, {
+            "MODEL.MULTI_GRANULARITY_GATING_INPUT", "OUTPUT_DIR",
+        })
+        self.assertEqual(
+            local_flat["MODEL.MULTI_GRANULARITY_GATING_INPUT"], "concat_local"
+        )
+
+    def test_invalid_gating_input_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            MultiGranularityDynamicGate(
+                2048, 3, gating_input="g_plus_hidden_local", local_feature_dim=256
+            )
 
     def test_controller_is_zero_initialized(self):
         gate = MultiGranularityDynamicGate(2048, 3)

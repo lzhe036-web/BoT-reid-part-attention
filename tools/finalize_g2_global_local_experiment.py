@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from config import cfg
 from tools.analyze_g2_global_local_gating import analyze
+from tools.g2_dynamic_gating_profiles import G2_GLOBAL_LOCAL_PROFILE
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import (
     atomic_write_json,
@@ -27,9 +28,9 @@ from utils.experiment_recording import (
 )
 
 
-EXPECTED_BRANCH = "codex/g2-global-local-gating"
+EXPECTED_BRANCH = G2_GLOBAL_LOCAL_PROFILE.expected_branch
 EXPECTED_EPOCHS = (40, 80, 120)
-EXPECTED_GATING_INPUT = "concat_global_local"
+EXPECTED_GATING_INPUT = G2_GLOBAL_LOCAL_PROFILE.gating_input
 
 
 def _git(*arguments):
@@ -40,7 +41,8 @@ def _git(*arguments):
     return output.decode("utf-8", errors="replace").strip()
 
 
-def _load_configuration(config_path, output_dir):
+def _load_configuration(config_path, output_dir,
+                        profile=G2_GLOBAL_LOCAL_PROFILE):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
@@ -48,7 +50,7 @@ def _load_configuration(config_path, output_dir):
         "SEED": (int(configuration.SEED), 42),
         "MODEL.MULTI_GRANULARITY_GATING_INPUT": (
             str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT),
-            EXPECTED_GATING_INPUT,
+            profile.gating_input,
         ),
         "SOLVER.MAX_EPOCHS": (int(configuration.SOLVER.MAX_EPOCHS), 120),
         "SOLVER.CHECKPOINT_PERIOD": (
@@ -59,12 +61,17 @@ def _load_configuration(config_path, output_dir):
     for field, (actual, expected) in required.items():
         if actual != expected:
             raise ValueError(
-                "Formal G2 protocol mismatch {}: {!r} != {!r}".format(
+                "Formal {} protocol mismatch {}: {!r} != {!r}".format(
+                    profile.experiment_label,
                     field, actual, expected
                 )
             )
     if Path(str(configuration.OUTPUT_DIR)).resolve() != output_dir:
-        raise ValueError("Formal G2 output directory does not match the fixed YAML")
+        raise ValueError(
+            "Formal {} output directory does not match the fixed YAML".format(
+                profile.experiment_label
+            )
+        )
     return configuration
 
 
@@ -73,18 +80,18 @@ def _read_csv(path):
         return list(csv.DictReader(handle))
 
 
-def finalize(config_path, output_dir):
+def finalize(config_path, output_dir, profile=G2_GLOBAL_LOCAL_PROFILE):
     config_path = Path(config_path).resolve()
     output_dir = Path(output_dir).resolve()
     if not output_dir.is_dir():
         raise FileNotFoundError("G2 output directory is absent: {}".format(output_dir))
-    configuration = _load_configuration(config_path, output_dir)
+    configuration = _load_configuration(config_path, output_dir, profile=profile)
 
     branch = _git("branch", "--show-current")
-    if branch != EXPECTED_BRANCH:
+    if branch != profile.expected_branch:
         raise ValueError(
-            "G2 finalization requires branch {}, got {}".format(
-                EXPECTED_BRANCH, branch
+            "{} finalization requires branch {}, got {}".format(
+                profile.experiment_label, profile.expected_branch, branch
             )
         )
     commit = _git("rev-parse", "HEAD")
@@ -94,8 +101,8 @@ def finalize(config_path, output_dir):
     observed_epochs = tuple(int(row["epoch"]) for row in validation_records)
     if observed_epochs != EXPECTED_EPOCHS:
         raise ValueError(
-            "Formal G2 requires validation epochs {}, got {}".format(
-                EXPECTED_EPOCHS, observed_epochs
+            "Formal {} requires validation epochs {}, got {}".format(
+                profile.experiment_label, EXPECTED_EPOCHS, observed_epochs
             )
         )
     checkpoint_rows = build_dynamic_checkpoint_manifest(
@@ -109,39 +116,53 @@ def finalize(config_path, output_dir):
     epoch_stats_path = output_dir / "dynamic_gating_epoch_stats.jsonl"
     epoch_records = read_gating_epoch_records(epoch_stats_path)
     if tuple(int(row["epoch"]) for row in epoch_records) != tuple(range(1, 121)):
-        raise ValueError("Formal G2 requires one gate-statistics record per epoch")
+        raise ValueError(
+            "Formal {} requires one gate-statistics record per epoch".format(
+                profile.experiment_label
+            )
+        )
     selected_epoch = int(selected_validation["epoch"])
     selected_gate_rows = [
         row for row in epoch_records if int(row["epoch"]) == selected_epoch
     ]
     if len(selected_gate_rows) != 1:
-        raise ValueError("Selected G2 epoch has no unique gate-statistics record")
+        raise ValueError(
+            "Selected {} epoch has no unique gate-statistics record".format(
+                profile.experiment_label
+            )
+        )
 
-    analysis_dir = output_dir / "g2_gating_analysis"
+    analysis_dir = output_dir / profile.analysis_directory_name
     if analysis_dir.exists():
         raise FileExistsError(
-            "Refusing to overwrite existing G2 analysis: {}".format(analysis_dir)
+            "Refusing to overwrite existing {} analysis: {}".format(
+                profile.experiment_label, analysis_dir
+            )
         )
     analysis_manifest = analyze(
         config_path,
         checkpoint_path,
         analysis_dir,
         epoch_stats_path,
-        sample_limit=256,
+        sample_limit=256, profile=profile,
     )
     test_weight_rows = _read_csv(
-        analysis_dir / "g2_gate_test_weight_summary.csv"
+        analysis_dir / "{}_gate_test_weight_summary.csv".format(
+            profile.artifact_prefix
+        )
     )
     controller_block_rows = _read_csv(
-        analysis_dir / "g2_controller_input_block_norms.csv"
+        analysis_dir / "{}_controller_input_block_norms.csv".format(
+            profile.artifact_prefix
+        )
     )
 
     result = {
-        "experiment": "G2 global-plus-local Dynamic Gating",
+        "experiment": profile.experiment_label,
         "branch": branch,
         "commit": commit,
         "seed": 42,
-        "gating_input": "concat([g, z2, z4, z6])",
+        "gating_input": profile.gating_input_semantics,
         "gate_outputs": ["w2", "w4", "w6"],
         "checkpoint_selection_rule": (
             "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
@@ -172,22 +193,28 @@ def finalize(config_path, output_dir):
             "analysis_manifest_sha256": sha256_file(analysis_manifest),
         },
     }
-    result_path = output_dir / "g2_formal_result.json"
+    result_path = output_dir / profile.formal_result_filename
     atomic_write_json(result_path, result)
     return result_path, result
 
 
-def main(argv=None):
+def main_for_profile(profile, argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-file", required=True)
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args(argv)
-    result_path, result = finalize(args.config_file, args.output_dir)
+    result_path, result = finalize(
+        args.config_file, args.output_dir, profile=profile
+    )
     print(json.dumps({
         "result_path": str(result_path),
         "metrics": result["metrics"],
     }, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def main(argv=None):
+    return main_for_profile(G2_GLOBAL_LOCAL_PROFILE, argv=argv)
 
 
 if __name__ == "__main__":
