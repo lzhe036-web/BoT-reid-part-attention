@@ -26,6 +26,8 @@ import yaml
 
 from utils.dynamic_gating_evidence import (
     DYNAMIC_GATING_SELECTION_RULE,
+    gating_scales,
+    gating_stat_fields,
     read_gating_epoch_records,
     validate_dynamic_gating_evidence,
 )
@@ -503,6 +505,15 @@ def initialize_dynamic_run(records_root, experiments_path, experiment_id,
     atomic_write_json(run_dir / "fusion_gating_signature.json", gating_payload)
     started = started_at_utc or utc_now()
     resolved_mapping = yaml.safe_load(resolved_config_text)
+    active_scales = gating_scales(resolved_mapping)
+    try:
+        gating_input = _nested(
+            resolved_mapping, "MODEL.MULTI_GRANULARITY_GATING_INPUT"
+        )
+    except DynamicExperimentEvidenceError:
+        # Historical unit fixtures can omit the explicit default.  Their
+        # observable contract remains G1/global.
+        gating_input = "global"
     protocol_signature = (
         candidate_protocol_signature_sha256
         or candidate_protocol_signature(resolved_mapping)
@@ -554,9 +565,10 @@ def initialize_dynamic_run(records_root, experiments_path, experiment_id,
         "runtime_seconds": NOT_RECORDED, "return_code": NOT_RECORDED,
         "alignment_mode": NOT_APPLICABLE,
         "alignment_temperature": NOT_APPLICABLE,
-        "gating_mode": "per_sample_dynamic_gating", "gating_input": "global",
+        "gating_mode": "per_sample_dynamic_gating", "gating_input": gating_input,
         "gating_temperature": 1.0, "gating_normalization": "scaled_softmax",
-        "scale_order": "2,4,6", "metrics": {}, "notes": "tau=1.0 initial candidate",
+        "scale_order": ",".join(str(scale) for scale in active_scales),
+        "metrics": {}, "notes": "tau=1.0 initial candidate",
         "records_root": str(records_root.resolve()),
         "experiments_path": str(Path(experiments_path).resolve()),
     }
@@ -828,7 +840,12 @@ def _manifest_run_row(manifest, control_evidence=None):
     row["dynamic_gating_summary_source_checkpoint_sha256"] = summary.get("source_checkpoint_sha256", NOT_RECORDED)
     row["gating_samples_source_checkpoint_sha256"] = samples.get("source_checkpoint_sha256", NOT_RECORDED)
     row["gating_sample_selection_rule"] = samples.get("selection_rule", NOT_RECORDED)
-    for field in GATING_STAT_FIELDS:
+    active_scales = (
+        (2, 6)
+        if manifest.get("gating_input") == "concat_z2_z6"
+        else (2, 4, 6)
+    )
+    for field in gating_stat_fields(active_scales):
         row[field] = statistics.get(field, NOT_RECORDED)
     return _normalize_row(row, RUN_FIELDS)
 

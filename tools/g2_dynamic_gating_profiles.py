@@ -29,6 +29,8 @@ G2DynamicGatingProfile = namedtuple("G2DynamicGatingProfile", (
     "analysis_manifest_filename",
     "artifact_prefix",
     "controller_blocks",
+    "active_scales",
+    "gate_weight_sum",
     "required_analysis_artifacts",
 ))
 
@@ -53,6 +55,8 @@ G2_GLOBAL_LOCAL_PROFILE = G2DynamicGatingProfile(
     analysis_manifest_filename="g2_gating_analysis_manifest.json",
     artifact_prefix="g2",
     controller_blocks=("g", "z2", "z4", "z6"),
+    active_scales=(2, 4, 6),
+    gate_weight_sum=3.0,
     required_analysis_artifacts=(
         "controller_block_norms_csv",
         "controller_block_norms_png",
@@ -84,6 +88,42 @@ G2_LOCAL_ONLY_PROFILE = G2DynamicGatingProfile(
     analysis_manifest_filename="g2_local_only_gating_analysis_manifest.json",
     artifact_prefix="g2_local_only",
     controller_blocks=("z2", "z4", "z6"),
+    active_scales=(2, 4, 6),
+    gate_weight_sum=3.0,
+    required_analysis_artifacts=(
+        "controller_block_norms_csv",
+        "controller_block_norms_png",
+        "test_gate_samples_tsv",
+        "test_weight_summary_csv",
+        "test_weight_distribution_png",
+        "test_weight_distribution_pdf",
+        "dynamic_gating_summary_json",
+    ),
+)
+
+
+G2_WITHOUT_Z4_PROFILE = G2DynamicGatingProfile(
+    key="g2_without_z4",
+    experiment_id="C2-L03-MGDG-G2-WITHOUT-Z4-T1-S42",
+    expected_branch="codex/g2-without-z4",
+    expected_parent_branch="codex/g2-local-only",
+    gating_input="concat_z2_z6",
+    gating_input_semantics="concat([z2,z6])",
+    experiment_label="G2-without-z4 Dynamic Gating",
+    method_variant="g2_without_z4_per_sample_dynamic_gating",
+    method="G2-without-z4 Dynamic Gating [z2,z6] -> [w2,w6]",
+    config_filename=(
+        "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+        "g2_without_z4_autodl.yml"
+    ),
+    formal_result_filename="g2_without_z4_formal_result.json",
+    formal_result_artifact_type="g2_without_z4_formal_result",
+    analysis_directory_name="g2_without_z4_gating_analysis",
+    analysis_manifest_filename="g2_without_z4_gating_analysis_manifest.json",
+    artifact_prefix="g2_without_z4",
+    controller_blocks=("z2", "z6"),
+    active_scales=(2, 6),
+    gate_weight_sum=1.0,
     required_analysis_artifacts=(
         "controller_block_norms_csv",
         "controller_block_norms_png",

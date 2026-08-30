@@ -11,8 +11,11 @@ from yacs.config import CfgNode
 from config import cfg
 from tests.test_recover_g2_global_local_experiment import G2RecoveryTest, _sha, _write_json
 from tools.analyze_g2_global_local_gating import _block_rows, _load_configuration
-from tools.g2_dynamic_gating_profiles import G2_LOCAL_ONLY_PROFILE
-from tools.recover_g2_global_local_experiment import recover
+from tools.g2_dynamic_gating_profiles import (
+    G2_LOCAL_ONLY_PROFILE,
+    G2_WITHOUT_Z4_PROFILE,
+)
+from tools.recover_g2_global_local_experiment import G2RecoveryError, recover
 from utils.config_serialization import serialize_cfg_node_yaml
 
 
@@ -24,6 +27,10 @@ GLOBAL_CONFIG = REPO_ROOT / "configs" / (
 LOCAL_CONFIG = REPO_ROOT / "configs" / (
     "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
     "g2_local_only_autodl.yml"
+)
+WITHOUT_Z4_CONFIG = REPO_ROOT / "configs" / (
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_without_z4_autodl.yml"
 )
 
 
@@ -68,6 +75,49 @@ class G2LocalOnlyAnalyzerTest(unittest.TestCase):
         self.assertIn('git rev-parse --verify "origin/${EXPECTED_BRANCH}"', formal)
         self.assertIn("finalize_g2_local_only_experiment.py", formal)
         self.assertIn("recover_g2_local_only_experiment.py", formal)
+
+
+class G2WithoutZ4AnalyzerTest(unittest.TestCase):
+    def _configuration(self):
+        configuration = cfg.clone()
+        configuration.merge_from_file(str(WITHOUT_Z4_CONFIG))
+        configuration.freeze()
+        return configuration
+
+    def test_without_z4_controller_blocks_are_exactly_z2_z6(self):
+        state = {
+            "multi_granularity_dynamic_gate.controller.weight": torch.randn(2, 512)
+        }
+        rows, boundaries = _block_rows(
+            state, self._configuration(), "c" * 64,
+            profile=G2_WITHOUT_Z4_PROFILE,
+        )
+        self.assertEqual(boundaries, (("z2", 0, 256), ("z6", 256, 512)))
+        self.assertEqual({row["input_block"] for row in rows}, {"z2", "z6"})
+        self.assertEqual({row["target_gate"] for row in rows}, {"w2", "w6"})
+        self.assertEqual(len(rows), 4)
+
+    def test_without_z4_analyzer_rejects_three_way_controller_or_wrong_mode(self):
+        with self.assertRaisesRegex(ValueError, "must be 512"):
+            _block_rows(
+                {"multi_granularity_dynamic_gate.controller.weight": torch.randn(2, 768)},
+                self._configuration(), "d" * 64, profile=G2_WITHOUT_Z4_PROFILE,
+            )
+        with self.assertRaisesRegex(ValueError, "concat_z2_z6"):
+            _load_configuration(LOCAL_CONFIG, profile=G2_WITHOUT_Z4_PROFILE)
+
+    def test_without_z4_formal_scripts_are_isolated_and_fail_closed(self):
+        smoke = (REPO_ROOT / "scripts" / "test_g2_without_z4_gating_1epoch_autodl.sh").read_text(encoding="utf-8")
+        formal = (REPO_ROOT / "scripts" / "train_g2_without_z4_seed42_autodl.sh").read_text(encoding="utf-8")
+        for text in (smoke, formal):
+            self.assertIn('EXPECTED_BRANCH="codex/g2-without-z4"', text)
+            self.assertIn("g2_without_z4_tau1_seed42_market1501", text)
+            self.assertIn("PYTHONHASHSEED=42", text)
+            self.assertIn("CUBLAS_WORKSPACE_CONFIG=:4096:8", text)
+            self.assertNotIn("g2_local_only_tau1_seed42_market1501", text)
+        self.assertIn('git rev-parse --verify "origin/${EXPECTED_BRANCH}"', formal)
+        self.assertIn("finalize_g2_without_z4_experiment.py", formal)
+        self.assertIn("recover_g2_without_z4_experiment.py", formal)
 
 
 class G2LocalOnlyRecoveryTest(G2RecoveryTest):
@@ -145,3 +195,166 @@ class G2LocalOnlyRecoveryTest(G2RecoveryTest):
     def test_recovery_registers_g2_once_and_is_idempotent(self):
         """Override the inherited global-identity assertion for concat_local."""
         self.test_local_only_recovery_is_idempotent_and_registers_one_row()
+
+
+class G2WithoutZ4RecoveryTest(G2RecoveryTest):
+    """Exercise two-way evidence recovery without reusing three-way gate fields."""
+
+    @staticmethod
+    def _two_way_statistics(epoch):
+        return {
+            "gating_temperature": 1.0,
+            "gating_sample_count": 11904,
+            "p2_mean": 0.4,
+            "p2_std": 0.01,
+            "p2_min": 0.38,
+            "p2_max": 0.42,
+            "p6_mean": 0.6,
+            "p6_std": 0.01,
+            "p6_min": 0.58,
+            "p6_max": 0.62,
+            "applied_w2_mean": 0.4,
+            "applied_w2_std": 0.01,
+            "applied_w6_mean": 0.6,
+            "applied_w6_std": 0.01,
+            "mean_gate_entropy": 0.67 + epoch / 100000.0,
+            "dominant_k2_ratio": 0.4,
+            "dominant_k6_ratio": 0.6,
+        }
+
+    def _build_fixture(self):
+        super(G2WithoutZ4RecoveryTest, self)._build_fixture()
+        source = yaml.safe_load(self.config.read_text(encoding="utf-8"))
+        source["MODEL"]["MULTI_GRANULARITY_GATING_INPUT"] = "concat_z2_z6"
+        self.config.write_text(yaml.safe_dump(source, sort_keys=False), encoding="utf-8")
+        resolved = self.output / "config_resolved.yml"
+        resolved.write_text(serialize_cfg_node_yaml(CfgNode(source)), encoding="utf-8")
+
+        gate_path = self.output / "dynamic_gating_epoch_stats.jsonl"
+        gate_records = []
+        for epoch in range(1, 121):
+            row = {
+                "epoch": epoch,
+                "global_iteration": epoch * 186,
+                "epoch_length": 186,
+                "gating_scales": [2, 6],
+            }
+            row.update(self._two_way_statistics(epoch))
+            gate_records.append(row)
+        gate_path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in gate_records),
+            encoding="utf-8",
+        )
+
+        reproducibility_path = self.output / "reproducibility.json"
+        reproducibility = json.loads(reproducibility_path.read_text(encoding="utf-8"))
+        reproducibility["configuration"]["source_file_sha256"] = _sha(self.config)
+        reproducibility["configuration"]["resolved_file_sha256"] = _sha(resolved)
+        reproducibility["code"]["branch"] = G2_WITHOUT_Z4_PROFILE.expected_branch
+        _write_json(reproducibility_path, reproducibility)
+
+        selected_checkpoint = self.output / "resnet50_checkpoint_14880.pt"
+        selected_sha = _sha(selected_checkpoint)
+        analysis_dir = self.output / G2_WITHOUT_Z4_PROFILE.analysis_directory_name
+        existing_analysis_dir = self.output / "g2_gating_analysis"
+        existing_analysis_dir.rename(analysis_dir)
+        samples = analysis_dir / "gating_samples.tsv"
+        samples.write_text(
+            "stable_sample_key\tdataset_split\tpid\tcamid\tp2\tp6\tw2\tw6\tentropy\tdominant_k\tcheckpoint_sha256\n"
+            "q:1\tquery\t1\t0\t0.4\t0.6\t0.4\t0.6\t0.673\t6\t{}\n".format(selected_sha),
+            encoding="utf-8",
+        )
+        summary = analysis_dir / "dynamic_gating_summary.json"
+        selection_rule = "sha256(stable_sample_key) ascending; first 256 query+gallery samples"
+        _write_json(summary, {
+            "schema_version": 5,
+            "source_checkpoint_path": str(selected_checkpoint.resolve()),
+            "source_checkpoint_sha256": selected_sha,
+            "selection_rule": selection_rule,
+            "selected_sample_count": 1,
+            "training_epoch_statistics": gate_records[79],
+            "deterministic_sample_statistics": self._two_way_statistics(80),
+            "gating_samples": {
+                "path": str(samples.resolve()), "size_bytes": samples.stat().st_size,
+                "sha256": _sha(samples), "source_checkpoint_sha256": selected_sha,
+                "selection_rule": selection_rule,
+            },
+        })
+        required = {
+            "controller_block_norms_csv": analysis_dir / "controller.csv",
+            "controller_block_norms_png": analysis_dir / "controller.png",
+            "test_gate_samples_tsv": samples,
+            "test_weight_summary_csv": analysis_dir / "weights.csv",
+            "test_weight_distribution_png": analysis_dir / "weights.png",
+            "test_weight_distribution_pdf": analysis_dir / "weights.pdf",
+            "dynamic_gating_summary_json": summary,
+        }
+        for name, path in required.items():
+            if not path.exists():
+                path.write_bytes((name + "\n").encode("ascii"))
+        analysis_manifest = self.output / G2_WITHOUT_Z4_PROFILE.analysis_manifest_filename
+        _write_json(analysis_manifest, {
+            "analysis_type": "G2-without-z4 Dynamic Gating observation",
+            "config_path": str(self.config.resolve()), "config_sha256": _sha(self.config),
+            "checkpoint_path": str(selected_checkpoint.resolve()), "checkpoint_sha256": selected_sha,
+            "epoch_statistics_path": str(gate_path.resolve()), "epoch_statistics_sha256": _sha(gate_path),
+            "gating_input": "concat([z2,z6])",
+            "files": {name: {"path": str(path.resolve()), "sha256": _sha(path)} for name, path in required.items()},
+        })
+
+        result = {
+            "experiment": G2_WITHOUT_Z4_PROFILE.experiment_label,
+            "branch": G2_WITHOUT_Z4_PROFILE.expected_branch,
+            "commit": "f" * 40,
+            "seed": 42,
+            "gating_input": "concat([z2,z6])",
+            "gate_outputs": ["w2", "w6"],
+            "checkpoint_selection_rule": "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch",
+            "selected_checkpoint": {"path": str(selected_checkpoint.resolve()), "sha256": selected_sha, "epoch": 80, "global_iteration": 14880},
+            "metrics": {"rank1_percent": 95.2, "rank5_percent": 98.0, "rank10_percent": 99.0, "map_percent": 88.1},
+            "selected_epoch_gate_statistics": gate_records[79],
+            "test_gate_weight_distribution": [],
+            "controller_input_block_coefficient_statistics": [],
+            "evidence": {
+                "config": str(self.config.resolve()), "config_sha256": _sha(self.config),
+                "validation_history": str((self.output / "validation_history.jsonl").resolve()), "validation_history_sha256": _sha(self.output / "validation_history.jsonl"),
+                "epoch_gate_statistics": str(gate_path.resolve()), "epoch_gate_statistics_sha256": _sha(gate_path),
+                "analysis_manifest": str(analysis_manifest.resolve()), "analysis_manifest_sha256": _sha(analysis_manifest),
+            },
+        }
+        _write_json(self.output / G2_WITHOUT_Z4_PROFILE.formal_result_filename, result)
+
+    def _recover(self):
+        with mock.patch(
+                "tools.recover_g2_global_local_experiment._lineage",
+                return_value={"parent_branch": G2_WITHOUT_Z4_PROFILE.expected_parent_branch,
+                              "parent_commit": "a" * 40, "merge_base": "a" * 40}):
+            return recover(
+                self.config, self.output, self.console, self.records, self.experiments,
+                started_at_utc="2026-08-27T00:00:00Z",
+                ended_at_utc="2026-08-27T01:00:00Z", runtime_seconds=3600,
+                profile=G2_WITHOUT_Z4_PROFILE,
+            )
+
+    def test_without_z4_recovery_is_idempotent_and_registers_one_row(self):
+        run_dir, row, created = self._recover()
+        self.assertTrue(created)
+        self.assertEqual(row["experiment_id"], G2_WITHOUT_Z4_PROFILE.experiment_id)
+        self.assertEqual(row["gating_input"], "concat_z2_z6")
+        self.assertEqual(row["scale_order"], "2,6")
+        self.assertEqual(row["p4_mean"], "not_recorded")
+        self.assertTrue((run_dir / G2_WITHOUT_Z4_PROFILE.formal_result_filename).is_file())
+        _second_dir, second_row, created = self._recover()
+        self.assertFalse(created)
+        self.assertEqual(second_row["run_id"], row["run_id"])
+
+    def test_without_z4_recovery_rejects_z4_epoch_statistics(self):
+        gate_path = self.output / "dynamic_gating_epoch_stats.jsonl"
+        rows = [json.loads(line) for line in gate_path.read_text(encoding="utf-8").splitlines()]
+        rows[0]["p4_mean"] = 0.0
+        gate_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        with self.assertRaisesRegex(G2RecoveryError, "must not record z4"):
+            self._recover()
+
+    def test_recovery_registers_g2_once_and_is_idempotent(self):
+        self.test_without_z4_recovery_is_idempotent_and_registers_one_row()
