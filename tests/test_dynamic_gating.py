@@ -27,6 +27,11 @@ G2_LOCAL_ONLY_CONFIG = (
     "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
     "g2_local_only_autodl.yml"
 )
+G2_WITHOUT_Z2_CONFIG = (
+    REPO_ROOT / "configs" /
+    "softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_without_z2_autodl.yml"
+)
 
 
 class CountingBackbone(nn.Module):
@@ -67,6 +72,14 @@ def local_only_configuration():
     return result
 
 
+def without_z2_configuration():
+    result = configuration(True).clone()
+    result.defrost()
+    result.MODEL.MULTI_GRANULARITY_GATING_INPUT = "concat_z4_z6"
+    result.freeze()
+    return result
+
+
 def model(dynamic, num_classes=3):
     result = build_model(configuration(dynamic), num_classes)
     result.base = CountingBackbone()
@@ -81,6 +94,12 @@ def global_local_model(num_classes=3):
 
 def local_only_model(num_classes=3):
     result = build_model(local_only_configuration(), num_classes)
+    result.base = CountingBackbone()
+    return result
+
+
+def without_z2_model(num_classes=3):
+    result = build_model(without_z2_configuration(), num_classes)
     result.base = CountingBackbone()
     return result
 
@@ -240,6 +259,101 @@ class DynamicGatingTest(unittest.TestCase):
         self.assertEqual(
             tuple(network._last_dynamic_gating["weights"].shape), (2, 3)
         )
+
+    def test_without_z2_gate_uses_only_z4_z6_and_two_softmax_weights(self):
+        gate = MultiGranularityDynamicGate(
+            2048, 3, temperature=1.0,
+            gating_input="concat_z4_z6", local_feature_dim=256,
+        )
+        with torch.no_grad():
+            nn.init.normal_(gate.controller.weight, std=0.05)
+            nn.init.normal_(gate.controller.bias, std=0.05)
+        global_features = torch.randn(3, 2048)
+        z2, z4, z6 = (torch.randn(3, 256) for _ in range(3))
+        controller_input = gate.controller_input(global_features, (z2, z4, z6))
+        logits, probabilities, weights = gate(global_features, (z2, z4, z6))
+        self.assertEqual(tuple(controller_input.shape), (3, 512))
+        self.assertTrue(torch.equal(controller_input[:, :256], z4))
+        self.assertTrue(torch.equal(controller_input[:, 256:], z6))
+        self.assertEqual(tuple(logits.shape), (3, 2))
+        self.assertEqual(tuple(probabilities.shape), (3, 2))
+        self.assertEqual(tuple(weights.shape), (3, 2))
+        self.assertTrue(torch.all(probabilities >= 0))
+        self.assertTrue(torch.allclose(probabilities.sum(1), torch.ones(3)))
+        self.assertTrue(torch.allclose(weights, probabilities))
+        self.assertTrue(torch.allclose(weights.sum(1), torch.ones(3)))
+
+        changed_z2 = z2 + 1000.0
+        changed_input = gate.controller_input(
+            global_features, (changed_z2, z4, z6)
+        )
+        _changed_logits, changed_p, changed_w = gate(
+            global_features, (changed_z2, z4, z6)
+        )
+        self.assertTrue(torch.equal(changed_input, controller_input))
+        self.assertTrue(torch.equal(changed_p, probabilities))
+        self.assertTrue(torch.equal(changed_w, weights))
+
+        # The fixed G2 protocol concatenates the active weighted local blocks;
+        # the only dynamic local terms are exactly w4*z4 and w6*z6.
+        expected_blocks = torch.cat((weights[:, :1] * z4, weights[:, 1:] * z6), dim=1)
+        changed_blocks = torch.cat(
+            (changed_w[:, :1] * z4, changed_w[:, 1:] * z6), dim=1
+        )
+        self.assertTrue(torch.equal(expected_blocks, changed_blocks))
+        self.assertEqual(tuple(gate.active_scale_indices), (1, 2))
+
+    def test_without_z2_model_keeps_z2_extraction_but_excludes_it_from_descriptor(self):
+        network = without_z2_model()
+        network.eval()
+        with torch.no_grad():
+            descriptor = network(torch.randn(2, 3, 8, 4))
+        self.assertEqual(tuple(descriptor.shape), (2, 2560))
+        self.assertEqual(
+            network.multi_granularity_dynamic_gate.controller.in_features, 512
+        )
+        self.assertEqual(
+            tuple(network._last_dynamic_gating["probabilities"].shape), (2, 2)
+        )
+        self.assertEqual(network._last_dynamic_gating["scales"], (4, 6))
+
+    def test_without_z2_yaml_diff_from_local_only_is_only_gate_mode_and_output(self):
+        local_only = yaml.safe_load(
+            G2_LOCAL_ONLY_CONFIG.read_text(encoding="utf-8")
+        )
+        without_z2 = yaml.safe_load(
+            G2_WITHOUT_Z2_CONFIG.read_text(encoding="utf-8")
+        )
+
+        def flatten(value, prefix=""):
+            result = {}
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    name = "{}.{}".format(prefix, key) if prefix else str(key)
+                    result.update(flatten(child, name))
+            else:
+                result[prefix] = value
+            return result
+
+        local_flat = flatten(local_only)
+        without_flat = flatten(without_z2)
+        differences = {
+            field for field in set(local_flat) | set(without_flat)
+            if local_flat.get(field) != without_flat.get(field)
+        }
+        self.assertEqual(differences, {
+            "MODEL.MULTI_GRANULARITY_GATING_INPUT", "OUTPUT_DIR",
+        })
+        self.assertEqual(
+            without_flat["MODEL.MULTI_GRANULARITY_GATING_INPUT"],
+            "concat_z4_z6",
+        )
+
+    def test_without_z2_requires_all_three_extracted_local_scales(self):
+        with self.assertRaisesRegex(ValueError, "requires z2, z4, and z6"):
+            MultiGranularityDynamicGate(
+                2048, 2, gating_input="concat_z4_z6", local_feature_dim=256
+            )
 
     def test_local_only_formal_yaml_diff_is_limited_to_input_and_output(self):
         global_local = yaml.safe_load(

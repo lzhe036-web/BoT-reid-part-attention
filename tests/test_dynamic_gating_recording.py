@@ -441,6 +441,25 @@ class GatingEpochStatisticsTest(unittest.TestCase):
         self.assertEqual(rows[0]["global_iteration"], 17)
         self.assertEqual(rows[0]["gating_sample_count"], 3)
 
+    def test_two_way_statistics_record_only_active_scales(self):
+        accumulator = GatingEpochAccumulator(1.0, scales=(4, 6), weight_sum=1.0)
+        accumulator.update([[0.4, 0.6], [0.6, 0.4]])
+        summary = accumulator.summary()
+        self.assertNotIn("p2_mean", summary)
+        self.assertNotIn("applied_w2_mean", summary)
+        self.assertAlmostEqual(summary["applied_w4_mean"], summary["p4_mean"])
+        self.assertAlmostEqual(summary["applied_w6_mean"], summary["p6_mean"])
+        self.assertAlmostEqual(
+            summary["dominant_k4_ratio"] + summary["dominant_k6_ratio"], 1.0
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = append_gating_epoch_record(
+                directory, 1, 17, 17, summary, scales=(4, 6)
+            )
+            row = read_gating_epoch_records(path)[0]
+        self.assertEqual(row["gating_scales"], [4, 6])
+        self.assertNotIn("p2_mean", row)
+
 
 class Seed42ReceiptTest(unittest.TestCase):
     def test_complete_seed42_chain_is_required(self):

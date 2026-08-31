@@ -29,6 +29,8 @@ from utils.dynamic_gating_evidence import (
     DYNAMIC_GATING_SAMPLE_FIELDS,
     DYNAMIC_GATING_SELECTION_RULE,
     GatingEpochAccumulator,
+    dynamic_gating_sample_fields,
+    gating_scales,
 )
 from utils.experiment_schema import SCHEMA_VERSION
 from utils.experiment_recording import sha256_file
@@ -128,18 +130,32 @@ def generate_dynamic_gating_evidence(configuration, checkpoint_path, output_dir,
     )
     model.to(actual_device)
     model.eval()
-    accumulator = GatingEpochAccumulator(configuration.MODEL.MULTI_GRANULARITY_GATING_TAU)
+    scales = gating_scales(configuration)
+    expected_weight_sum = 1.0 if scales == (4, 6) else float(len(scales))
+    accumulator = GatingEpochAccumulator(
+        configuration.MODEL.MULTI_GRANULARITY_GATING_TAU,
+        scales=scales, weight_sum=expected_weight_sum,
+    )
     rows = []
     offset = 0
     with torch.no_grad():
         for images, _pids, _camids in loader:
             images = images.to(actual_device)
             descriptors = model(images)
-            if descriptors.dim() != 2 or descriptors.size(1) != 2816:
+            expected_descriptor_dim = 2048 + 256 * len(scales)
+            if descriptors.dim() != 2 or descriptors.size(1) != expected_descriptor_dim:
                 raise ValueError("Inference descriptor contract changed")
             evidence = model._last_dynamic_gating
             probabilities = evidence["probabilities"].to("cpu", dtype=torch.float64)
             weights = evidence["weights"].to("cpu", dtype=torch.float64)
+            if tuple(evidence.get("scales", ())) != tuple(scales):
+                raise ValueError("Dynamic Gating active-scale evidence mismatch")
+            if not torch.allclose(
+                    weights, probabilities * expected_weight_sum,
+                    rtol=1e-6, atol=1e-9):
+                raise ValueError(
+                    "Dynamic Gating applied weights do not match probabilities"
+                )
             accumulator.update(probabilities)
             for local_index in range(probabilities.size(0)):
                 key, split, _path, pid, camid = selected[offset + local_index]
@@ -147,16 +163,19 @@ def generate_dynamic_gating_evidence(configuration, checkpoint_path, output_dir,
                 weight = weights[local_index]
                 safe = probability.clamp_min(torch.finfo(probability.dtype).tiny)
                 entropy = float(-(probability * safe.log()).sum().item())
-                dominant = (2, 4, 6)[int(probability.argmax().item())]
-                rows.append({
+                dominant = scales[int(probability.argmax().item())]
+                row = {
                     "stable_sample_key": key, "dataset_split": split,
                     "pid": pid, "camid": camid,
-                    "p2": float(probability[0]), "p4": float(probability[1]),
-                    "p6": float(probability[2]), "w2": float(weight[0]),
-                    "w4": float(weight[1]), "w6": float(weight[2]),
+                }
+                for index, scale in enumerate(scales):
+                    row["p{}".format(scale)] = float(probability[index])
+                    row["w{}".format(scale)] = float(weight[index])
+                row.update({
                     "entropy": entropy, "dominant_k": dominant,
                     "checkpoint_sha256": checkpoint_sha,
                 })
+                rows.append(row)
             offset += int(probabilities.size(0))
     if offset != len(selected):
         raise ValueError("Gating evidence sample count mismatch")
@@ -165,7 +184,8 @@ def generate_dynamic_gating_evidence(configuration, checkpoint_path, output_dir,
     from io import StringIO
     buffer = StringIO(newline="")
     writer = csv.DictWriter(
-        buffer, fieldnames=SAMPLE_FIELDS, delimiter="\t", lineterminator="\n"
+        buffer, fieldnames=dynamic_gating_sample_fields(scales),
+        delimiter="\t", lineterminator="\n"
     )
     writer.writeheader()
     writer.writerows(rows)

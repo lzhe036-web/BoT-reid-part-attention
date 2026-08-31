@@ -12,6 +12,7 @@ from utils.dynamic_gating_evidence import (
     DYNAMIC_GATING_SELECTION_RULE,
     DynamicGatingEvidenceError,
     GatingEpochAccumulator,
+    dynamic_gating_sample_fields,
     validate_dynamic_gating_evidence,
 )
 from utils.experiment_schema import SCHEMA_VERSION
@@ -177,6 +178,89 @@ class DynamicGatingEvidenceValidationTest(unittest.TestCase):
         self.summary["gating_samples"] = self.samples_evidence()
         self.write_summary()
         self.assert_tamper_fails()
+
+    def test_two_way_schema_excludes_z2_and_uses_unscaled_weights(self):
+        checkpoint_sha = "b" * 64
+        samples_path = self.root / "two_way_samples.tsv"
+        summary_path = self.root / "two_way_summary.json"
+        keys = ["two-way-a", "two-way-b"]
+        keys.sort(key=lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest())
+        probabilities = ((0.25, 0.75), (0.6, 0.4))
+        rows = []
+        expected = []
+        for index, key in enumerate(keys):
+            p4, p6 = probabilities[index]
+            rows.append({
+                "stable_sample_key": key,
+                "dataset_split": "query" if index == 0 else "gallery",
+                "pid": index + 1,
+                "camid": index + 2,
+                "p4": p4,
+                "p6": p6,
+                "w4": p4,
+                "w6": p6,
+                "entropy": -(p4 * math.log(p4) + p6 * math.log(p6)),
+                "dominant_k": 4 if p4 > p6 else 6,
+                "checkpoint_sha256": checkpoint_sha,
+            })
+            expected.append((key, rows[-1]["dataset_split"], "unused.jpg", index + 1, index + 2))
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            buffer, fieldnames=dynamic_gating_sample_fields((4, 6)),
+            delimiter="\t", lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+        samples_path.write_text(buffer.getvalue(), encoding="utf-8", newline="\n")
+        accumulator = GatingEpochAccumulator(1.0, scales=(4, 6), weight_sum=1.0)
+        accumulator.update(probabilities)
+        statistics = accumulator.summary()
+        summary = {
+            "schema_version": SCHEMA_VERSION,
+            "source_checkpoint_sha256": checkpoint_sha,
+            "selection_rule": DYNAMIC_GATING_SELECTION_RULE,
+            "selected_sample_count": len(rows),
+            "training_epoch_statistics": statistics,
+            "deterministic_sample_statistics": statistics,
+            "gating_samples": {
+                "path": str(samples_path.resolve()),
+                "size_bytes": samples_path.stat().st_size,
+                "sha256": hashlib.sha256(samples_path.read_bytes()).hexdigest(),
+                "source_checkpoint_sha256": checkpoint_sha,
+                "selection_rule": DYNAMIC_GATING_SELECTION_RULE,
+            },
+        }
+        summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+        resolved = {
+            "MODEL": {
+                "MULTI_GRANULARITY_GATING_TAU": 1.0,
+                "MULTI_GRANULARITY_GATING_INPUT": "concat_z4_z6",
+            }
+        }
+        validated = validate_dynamic_gating_evidence(
+            summary_path, samples_path, checkpoint_sha, resolved, statistics, {},
+            selection_resolver=lambda _cfg: expected,
+            dataset_validator=lambda _cfg, _manifest: None,
+        )
+        self.assertEqual(validated["sample_count"], 2)
+        self.assertNotIn("p2", samples_path.read_text(encoding="utf-8").splitlines()[0])
+
+        # A legacy z2 column is not accepted in the two-way protocol.
+        content = samples_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        lines[0] = lines[0].replace("\tp4", "\tp2\tp4")
+        lines[1] = lines[1].replace("\t0.25\t0.75", "\t0.0\t0.25\t0.75")
+        lines[2] = lines[2].replace("\t0.6\t0.4", "\t0.0\t0.6\t0.4")
+        samples_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        summary["gating_samples"]["size_bytes"] = samples_path.stat().st_size
+        summary["gating_samples"]["sha256"] = hashlib.sha256(samples_path.read_bytes()).hexdigest()
+        summary_path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
+        with self.assertRaisesRegex(DynamicGatingEvidenceError, "header mismatch"):
+            validate_dynamic_gating_evidence(
+                summary_path, samples_path, checkpoint_sha, resolved, statistics, {},
+                selection_resolver=lambda _cfg: expected,
+                dataset_validator=lambda _cfg, _manifest: None,
+            )
 
 
 if __name__ == "__main__":

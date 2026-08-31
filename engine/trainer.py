@@ -17,6 +17,7 @@ from utils.experiment_recording import append_validation_record, utc_now
 from utils.dynamic_gating_evidence import (
     GatingEpochAccumulator,
     append_gating_epoch_record,
+    gating_scales,
 )
 
 def _unpack_train_batch(batch):
@@ -286,8 +287,11 @@ def do_train(
     def adjust_learning_rate(engine):
         scheduler.step()
         if cfg.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
+            active_scales = gating_scales(cfg)
             engine.state.dynamic_gating_accumulator = GatingEpochAccumulator(
-                cfg.MODEL.MULTI_GRANULARITY_GATING_TAU
+                cfg.MODEL.MULTI_GRANULARITY_GATING_TAU,
+                scales=active_scales,
+                weight_sum=(1.0 if active_scales == (4, 6) else len(active_scales)),
             )
 
     @trainer.on(Events.ITERATION_COMPLETED)
@@ -329,6 +333,7 @@ def do_train(
                 engine.state.iteration,
                 _engine_epoch_length(engine),
                 statistics,
+                scales=gating_scales(cfg),
             )
             logger.info(
                 'DYNAMIC_GATING_EPOCH {}'.format(

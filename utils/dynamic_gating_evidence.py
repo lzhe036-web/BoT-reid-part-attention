@@ -30,35 +30,75 @@ class DynamicGatingEvidenceError(RuntimeError):
     pass
 
 
+def gating_scales(configuration):
+    """Return active gate scales without changing part-feature extraction."""
+    try:
+        value = _config_value(
+            configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT"
+        )
+    except (AttributeError, KeyError):
+        value = "global"
+    return (4, 6) if str(value) == "concat_z4_z6" else (2, 4, 6)
+
+
+def gating_stat_fields(scales):
+    fields = ["gating_temperature", "gating_sample_count"]
+    for scale in scales:
+        fields.extend((
+            "p{}_mean".format(scale), "p{}_std".format(scale),
+            "p{}_min".format(scale), "p{}_max".format(scale),
+            "applied_w{}_mean".format(scale),
+            "applied_w{}_std".format(scale),
+        ))
+    fields.append("mean_gate_entropy")
+    fields.extend("dominant_k{}_ratio".format(scale) for scale in scales)
+    return tuple(fields)
+
+
+def dynamic_gating_sample_fields(scales):
+    fields = ["stable_sample_key", "dataset_split", "pid", "camid"]
+    fields.extend("p{}".format(scale) for scale in scales)
+    fields.extend("w{}".format(scale) for scale in scales)
+    fields.extend(("entropy", "dominant_k", "checkpoint_sha256"))
+    return tuple(fields)
+
+
 class GatingEpochAccumulator(object):
     """Exact sample-weighted moments without retaining per-sample tensors."""
 
-    def __init__(self, temperature):
+    def __init__(self, temperature, scales=(2, 4, 6), weight_sum=None):
         temperature = float(temperature)
         if not math.isfinite(temperature) or temperature <= 0.0:
             raise ValueError("gating temperature must be finite and positive")
         self.temperature = temperature
+        self.scales = tuple(int(scale) for scale in scales)
+        if not self.scales or len(set(self.scales)) != len(self.scales):
+            raise ValueError("gating scales must be non-empty and unique")
+        self.weight_sum = float(
+            len(self.scales) if weight_sum is None else weight_sum
+        )
         self.reset()
 
     def reset(self):
         self.count = 0
-        self.sum_p = [0.0, 0.0, 0.0]
-        self.sum_p2 = [0.0, 0.0, 0.0]
-        self.min_p = [float("inf"), float("inf"), float("inf")]
-        self.max_p = [float("-inf"), float("-inf"), float("-inf")]
-        self.sum_w = [0.0, 0.0, 0.0]
-        self.sum_w2 = [0.0, 0.0, 0.0]
+        width = len(self.scales)
+        self.sum_p = [0.0] * width
+        self.sum_p2 = [0.0] * width
+        self.min_p = [float("inf")] * width
+        self.max_p = [float("-inf")] * width
+        self.sum_w = [0.0] * width
+        self.sum_w2 = [0.0] * width
         self.entropy_sum = 0.0
-        self.dominant_counts = [0, 0, 0]
+        self.dominant_counts = [0] * width
 
     def update(self, probabilities):
         if not torch.is_tensor(probabilities):
             probabilities = torch.as_tensor(probabilities)
         values = probabilities.detach().to(device="cpu", dtype=torch.float64)
-        if values.dim() != 2 or values.size(1) != 3:
+        if values.dim() != 2 or values.size(1) != len(self.scales):
             raise DynamicGatingEvidenceError(
-                "Gating probabilities must have shape [B,3], got {}".format(
-                    tuple(values.shape)
+                "Gating probabilities must have shape [B,{}], got {}".format(
+                    len(self.scales), tuple(values.shape)
                 )
             )
         if values.size(0) == 0:
@@ -79,10 +119,10 @@ class GatingEpochAccumulator(object):
                 )
             )
 
-        weights = values * 3.0
+        weights = values * self.weight_sum
         batch_count = int(values.size(0))
         self.count += batch_count
-        for index in range(3):
+        for index in range(len(self.scales)):
             column = values[:, index]
             weight_column = weights[:, index]
             self.sum_p[index] += float(column.sum().item())
@@ -97,7 +137,7 @@ class GatingEpochAccumulator(object):
         entropy = -(values * safe_values.log()).sum(dim=1)
         self.entropy_sum += float(entropy.sum().item())
         dominant = values.argmax(dim=1)
-        for index in range(3):
+        for index in range(len(self.scales)):
             self.dominant_counts[index] += int((dominant == index).sum().item())
 
     @staticmethod
@@ -116,8 +156,8 @@ class GatingEpochAccumulator(object):
             "gating_sample_count": self.count,
             "mean_gate_entropy": self.entropy_sum / float(self.count),
         }
-        labels = ("2", "4", "6")
-        for index, label in enumerate(labels):
+        for index, scale in enumerate(self.scales):
+            label = str(scale)
             result["p{}_mean".format(label)] = (
                 self.sum_p[index] / float(self.count)
             )
@@ -135,7 +175,7 @@ class GatingEpochAccumulator(object):
             result["dominant_k{}_ratio".format(label)] = (
                 self.dominant_counts[index] / float(self.count)
             )
-        for field in GATING_STAT_FIELDS:
+        for field in gating_stat_fields(self.scales):
             value = result[field]
             if isinstance(value, float) and not math.isfinite(value):
                 raise DynamicGatingEvidenceError(
@@ -158,14 +198,17 @@ def _atomic_write_text(path, text):
 
 
 def append_gating_epoch_record(output_dir, epoch, global_iteration,
-                               epoch_length, statistics):
+                               epoch_length, statistics, scales=(2, 4, 6)):
     path = Path(output_dir) / "dynamic_gating_epoch_stats.jsonl"
     record = {
         "epoch": int(epoch),
         "global_iteration": int(global_iteration),
         "epoch_length": int(epoch_length),
     }
-    record.update({field: statistics[field] for field in GATING_STAT_FIELDS})
+    record["gating_scales"] = list(scales)
+    record.update({
+        field: statistics[field] for field in gating_stat_fields(scales)
+    })
     if record["epoch"] <= 0 or record["global_iteration"] <= 0:
         raise DynamicGatingEvidenceError("Epoch evidence counters must be positive")
     if record["epoch_length"] <= 0:
@@ -288,8 +331,11 @@ def validate_dynamic_gating_evidence(
     lines = text.splitlines()
     if not lines or any(not line.strip() for line in lines):
         raise DynamicGatingEvidenceError("Gating TSV contains an empty line")
+    scales = gating_scales(resolved_config)
+    sample_fields = dynamic_gating_sample_fields(scales)
+    expected_weight_sum = 1.0 if scales == (4, 6) else float(len(scales))
     reader = csv.DictReader(lines, delimiter="\t")
-    if tuple(reader.fieldnames or ()) != DYNAMIC_GATING_SAMPLE_FIELDS:
+    if tuple(reader.fieldnames or ()) != sample_fields:
         raise DynamicGatingEvidenceError("Gating TSV header mismatch")
     rows = list(reader)
     if len(rows) != selected_count:
@@ -299,7 +345,7 @@ def validate_dynamic_gating_evidence(
     keys = []
     parsed_rows = []
     for line_number, row in enumerate(rows, 2):
-        if None in row or set(row) != set(DYNAMIC_GATING_SAMPLE_FIELDS):
+        if None in row or set(row) != set(sample_fields):
             raise DynamicGatingEvidenceError(
                 "Gating TSV has extra/missing columns at line {}".format(line_number)
             )
@@ -313,8 +359,8 @@ def validate_dynamic_gating_evidence(
             raise DynamicGatingEvidenceError("Invalid gating dataset split")
         try:
             pid, camid = int(row["pid"]), int(row["camid"])
-            p = [float(row[name]) for name in ("p2", "p4", "p6")]
-            w = [float(row[name]) for name in ("w2", "w4", "w6")]
+            p = [float(row["p{}".format(scale)]) for scale in scales]
+            w = [float(row["w{}".format(scale)]) for scale in scales]
             entropy = float(row["entropy"])
             dominant = int(row["dominant_k"])
         except (TypeError, ValueError) as error:
@@ -326,15 +372,18 @@ def validate_dynamic_gating_evidence(
         if not all(math.isfinite(value) for value in w + [entropy]):
             raise DynamicGatingEvidenceError("Gating weights/entropy must be finite")
         _close(sum(p), 1.0, "probability sum")
-        for index in range(3):
-            _close(w[index], 3.0 * p[index], "applied gating weight")
+        for index in range(len(scales)):
+            _close(
+                w[index], expected_weight_sum * p[index],
+                "applied gating weight"
+            )
         recomputed_entropy = -sum(
             value * math.log(max(value, float.fromhex("0x1.0p-1022")))
             for value in p
         )
         _close(entropy, recomputed_entropy, "gating entropy")
-        expected_dominant = (2, 4, 6)[max(range(3), key=lambda index: p[index])]
-        if dominant not in (2, 4, 6) or dominant != expected_dominant:
+        expected_dominant = scales[max(range(len(scales)), key=lambda index: p[index])]
+        if dominant not in scales or dominant != expected_dominant:
             raise DynamicGatingEvidenceError("Dominant K mismatch")
         if row["checkpoint_sha256"] != selected_checkpoint_sha256:
             raise DynamicGatingEvidenceError("Per-sample checkpoint SHA mismatch")
@@ -367,14 +416,16 @@ def validate_dynamic_gating_evidence(
     temperature = float(_config_value(
         resolved_config, "MODEL.MULTI_GRANULARITY_GATING_TAU"
     ))
-    accumulator = GatingEpochAccumulator(temperature)
+    accumulator = GatingEpochAccumulator(
+        temperature, scales=scales, weight_sum=expected_weight_sum
+    )
     accumulator.update(probabilities)
     recomputed = accumulator.summary()
     deterministic = summary.get("deterministic_sample_statistics")
     training = summary.get("training_epoch_statistics")
     if not isinstance(deterministic, dict) or not isinstance(training, dict):
         raise DynamicGatingEvidenceError("Summary statistics are missing")
-    for field in GATING_STAT_FIELDS:
+    for field in gating_stat_fields(scales):
         _close(deterministic.get(field), recomputed[field], "deterministic {}".format(field))
         _close(training.get(field), gating_epoch_statistics.get(field), "training {}".format(field))
     return {

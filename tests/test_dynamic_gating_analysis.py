@@ -13,6 +13,7 @@ from config import cfg
 from tools.analyze_dynamic_gating import generate_dynamic_gating_evidence
 from utils.dynamic_gating_evidence import (
     GatingEpochAccumulator,
+    dynamic_gating_sample_fields,
     validate_dynamic_gating_evidence,
 )
 from utils.experiment_recording import sha256_file
@@ -56,8 +57,23 @@ class SyntheticModel(object):
         self._last_dynamic_gating = {
             "probabilities": probabilities,
             "weights": 3.0 * probabilities,
+            "scales": (2, 4, 6),
         }
         return torch.zeros(count, 2816, device=images.device)
+
+
+class SyntheticTwoWayModel(SyntheticModel):
+    def __call__(self, images):
+        count = int(images.size(0))
+        probabilities = torch.tensor(
+            [[0.3, 0.7]], device=images.device, dtype=torch.float64
+        ).repeat(count, 1)
+        self._last_dynamic_gating = {
+            "probabilities": probabilities,
+            "weights": probabilities,
+            "scales": (4, 6),
+        }
+        return torch.zeros(count, 2560, device=images.device)
 
 
 class DynamicGatingAnalysisTest(unittest.TestCase):
@@ -112,6 +128,56 @@ class DynamicGatingAnalysisTest(unittest.TestCase):
                 dataset_validator=lambda _cfg, _manifest: None,
             )
             self.assertEqual(validated["sample_count"], 4)
+
+    def test_two_way_gating_evidence_has_only_z4_z6_columns(self):
+        configuration = cfg.clone()
+        configuration.merge_from_file(str(CONFIG))
+        configuration.defrost()
+        configuration.MODEL.DEVICE = "cpu"
+        configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT = "concat_z4_z6"
+        configuration.DATALOADER.NUM_WORKERS = 0
+        configuration.freeze()
+        selected = [
+            ("key{}".format(index), "query", "image{}.jpg".format(index), index, 1)
+            for index in range(2)
+        ]
+        selected.sort(
+            key=lambda item: hashlib.sha256(item[0].encode("utf-8")).hexdigest()
+        )
+        accumulator = GatingEpochAccumulator(1.0, scales=(4, 6), weight_sum=1.0)
+        accumulator.update([[0.3, 0.7]] * 2)
+        epoch_statistics = accumulator.summary()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "selected.pt"
+            torch.save({"weight": torch.tensor([1.0])}, checkpoint)
+            with mock.patch(
+                    "tools.analyze_dynamic_gating.select_samples",
+                    return_value=(selected, 2)), mock.patch(
+                    "tools.analyze_dynamic_gating.ImageDataset", SyntheticImages), mock.patch(
+                    "tools.analyze_dynamic_gating.build_transforms", return_value=None), mock.patch(
+                    "tools.analyze_dynamic_gating.build_model", return_value=SyntheticTwoWayModel()):
+                summary_path, samples_path, _summary = generate_dynamic_gating_evidence(
+                    configuration, checkpoint, root / "evidence", epoch_statistics,
+                    device="cpu",
+                )
+            with samples_path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+                self.assertEqual(
+                    tuple(rows[0]), dynamic_gating_sample_fields((4, 6))
+                )
+            self.assertNotIn("p2", rows[0])
+            self.assertNotIn("w2", rows[0])
+            for row in rows:
+                self.assertAlmostEqual(float(row["p4"]) + float(row["p6"]), 1.0)
+                self.assertAlmostEqual(float(row["w4"]) + float(row["w6"]), 1.0)
+            validated = validate_dynamic_gating_evidence(
+                summary_path, samples_path, sha256_file(checkpoint),
+                configuration, epoch_statistics, {},
+                selection_resolver=lambda _cfg: selected,
+                dataset_validator=lambda _cfg, _manifest: None,
+            )
+            self.assertEqual(validated["sample_count"], 2)
 
 
 if __name__ == "__main__":
