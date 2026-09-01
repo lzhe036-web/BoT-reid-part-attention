@@ -30,7 +30,7 @@ epoch=120、gate input 与 checkpoint SHA256。任何不一致都会 fail-closed
 ```bash
 cd /root/autodl-tmp/BoT-reid-g2-global-local
 git fetch origin '+refs/heads/codex/g1-vs-g2-gating-analysis:refs/remotes/origin/codex/g1-vs-g2-gating-analysis'
-git switch codex/g1-vs-g2-gating-analysis 2>/dev/null || git switch -c codex/g1-vs-g2-gating-analysis 3d127681e14b66f4fd72d1bcd6f14a89e2e2edab
+git switch codex/g1-vs-g2-gating-analysis 2>/dev/null || git switch -c codex/g1-vs-g2-gating-analysis 8e7916d35026a9442f18da24cac28573f395bd02
 git rev-parse HEAD
 test -z "$(git status --porcelain=v1 --untracked-files=all)" || { echo 'dirty worktree'; exit 1; }
 
