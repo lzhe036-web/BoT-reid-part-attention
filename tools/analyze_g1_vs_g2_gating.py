@@ -229,6 +229,35 @@ def _contains_resolved_type_wrapper(value):
     return False
 
 
+def _apply_resolved_mapping(configuration, restored, path=""):
+    """Apply decoded resolved evidence without YACS re-parsing scalar values.
+
+    ``CfgNode(mapping)`` is not lossless: YACS re-parses a string such as
+    ``"0"`` as an integer.  The resolved-evidence serializer intentionally
+    preserves that distinction, so assign verified leaves directly after a
+    strict schema and type check against the active configuration tree.
+    """
+    if not isinstance(restored, dict):
+        raise EvidenceError("Resolved configuration root is not a mapping")
+    for key, value in restored.items():
+        key_path = "{}.{}".format(path, key) if path else key
+        if key not in configuration:
+            raise EvidenceError("Resolved configuration has unknown key {}".format(key_path))
+        current = configuration[key]
+        if isinstance(current, CfgNode):
+            if not isinstance(value, dict):
+                raise EvidenceError("Resolved configuration node {} is not a mapping".format(key_path))
+            _apply_resolved_mapping(current, value, key_path)
+            continue
+        if isinstance(value, dict) or type(value) is not type(current):
+            raise EvidenceError(
+                "Resolved configuration value {} has type {} but expected {}".format(
+                    key_path, type(value).__name__, type(current).__name__
+                )
+            )
+        configuration[key] = value
+
+
 def _config_from_path(path):
     path = Path(path)
     configuration = cfg.clone()
@@ -237,7 +266,8 @@ def _config_from_path(path):
         payload = yaml.safe_load(text)
         if _contains_resolved_type_wrapper(payload):
             restored = deserialize_cfg_node_yaml(text)
-            configuration.merge_from_other_cfg(CfgNode(restored))
+            configuration.defrost()
+            _apply_resolved_mapping(configuration, restored)
         else:
             configuration.merge_from_file(str(path))
     except Exception as error:

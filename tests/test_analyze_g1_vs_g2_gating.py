@@ -87,6 +87,7 @@ class G1VsG2GatingAnalysisTest(unittest.TestCase):
             resolved_path.write_text(serialize_cfg_node_yaml(original), encoding="utf-8")
             restored = analysis._config_from_path(resolved_path)
             self.assertEqual(restored.MODEL.DEVICE, "cuda")
+            self.assertEqual(restored.MODEL.DEVICE_ID, "0")
 
     def test_plain_source_config_keeps_standard_yacs_loading(self):
         with tempfile.TemporaryDirectory() as directory:
