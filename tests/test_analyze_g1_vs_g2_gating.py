@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from tools import analyze_g1_vs_g2_gating as analysis
+from utils.config_serialization import serialize_cfg_node_yaml
 
 
 class G1VsG2GatingAnalysisTest(unittest.TestCase):
@@ -74,6 +75,25 @@ class G1VsG2GatingAnalysisTest(unittest.TestCase):
         for invalid in (("2", "4", "6.0"), ("2", "04", "6"), ("2", "6", "4"), (True, 4, 6)):
             with self.assertRaises(analysis.EvidenceError):
                 analysis._exact_list(invalid, [2, 4, 6], "scale order")
+
+    def test_typed_resolved_config_is_decoded_before_yacs_merge(self):
+        """Historical resolved evidence keeps string leaves in type wrappers."""
+        with tempfile.TemporaryDirectory() as directory:
+            original = analysis.cfg.clone()
+            original.defrost()
+            original.MODEL.DEVICE = "cuda"
+            original.freeze()
+            resolved_path = Path(directory) / "config_resolved.yml"
+            resolved_path.write_text(serialize_cfg_node_yaml(original), encoding="utf-8")
+            restored = analysis._config_from_path(resolved_path)
+            self.assertEqual(restored.MODEL.DEVICE, "cuda")
+
+    def test_plain_source_config_keeps_standard_yacs_loading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "config_source.yml"
+            source_path.write_text("MODEL:\n  DEVICE: cuda\n", encoding="utf-8")
+            restored = analysis._config_from_path(source_path)
+            self.assertEqual(restored.MODEL.DEVICE, "cuda")
 
     def test_historical_tsv_requires_probability_weight_order_and_sums(self):
         with tempfile.TemporaryDirectory() as directory:

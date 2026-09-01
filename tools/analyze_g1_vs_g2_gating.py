@@ -31,7 +31,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader
+from yacs.config import CfgNode
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,7 @@ from modeling import build_model
 from tools.analyze_dynamic_gating import _state_dict
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import sha256_file
+from utils.config_serialization import BOT_CFG_TYPE_TAG, deserialize_cfg_node_yaml
 from utils.reproducibility import make_data_loader_generator, seed_worker
 
 
@@ -208,10 +211,35 @@ def _close(actual, expected, label, rel=1e-6, abs_tol=1e-9):
         raise EvidenceError("{} mismatch: {!r} != {!r}".format(label, actual, expected))
 
 
+def _contains_resolved_type_wrapper(value):
+    """Return whether a parsed config contains the reserved evidence wrapper.
+
+    A resolved configuration is deliberately serialized with explicit wrappers
+    for strings and tuples.  It must be decoded rather than passed to YACS as
+    ordinary YAML; conversely, source configuration YAML must keep the normal
+    YACS loading path.  Detecting the reserved tag first also makes malformed
+    resolved evidence fail closed instead of being misread as a plain config.
+    """
+    if isinstance(value, dict):
+        return BOT_CFG_TYPE_TAG in value or any(
+            _contains_resolved_type_wrapper(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_resolved_type_wrapper(item) for item in value)
+    return False
+
+
 def _config_from_path(path):
+    path = Path(path)
     configuration = cfg.clone()
     try:
-        configuration.merge_from_file(str(path))
+        text = path.read_text(encoding="utf-8")
+        payload = yaml.safe_load(text)
+        if _contains_resolved_type_wrapper(payload):
+            restored = deserialize_cfg_node_yaml(text)
+            configuration.merge_from_other_cfg(CfgNode(restored))
+        else:
+            configuration.merge_from_file(str(path))
     except Exception as error:
         raise EvidenceError("Cannot load recorded config {}".format(path)) from error
     configuration.freeze()
