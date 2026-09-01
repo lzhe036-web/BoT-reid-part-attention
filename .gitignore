@@ -177,3 +177,10 @@ celerybeat-schedule
 !/paper_notes/
 /paper_notes/**
 !/paper_notes/multi_granularity_part.md
+
+# Commit only the machine-generated audit tables and permitted figures from
+# the fixed G2-vs-variants analysis.  Dataset images, checkpoints and generic
+# training outputs remain ignored by the broader rules above.
+!/analysis_outputs/
+!/analysis_outputs/g2_baseline_all_variants/
+!/analysis_outputs/g2_baseline_all_variants/**

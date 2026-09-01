@@ -1,0 +1,12 @@
+# 性能与统一 G2 baseline 的比较
+
+所有 delta 均相对 G2-global-local；缺少对应 formal run 的行不含虚构指标。
+
+| variant | baseline | gate_input | active_scales | seed | selected_epoch | rank1 | map | rank1_delta_vs_g2 | map_delta_vs_g2 | formal_commit | checkpoint_sha256 | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| G2-global-local | G2-global-local | concat_global_local | 2,4,6 | 42 | 120 | 94.83373165130615 | 87.64558553090099 | 0.0 | 0.0 | fa4e7f88f7ab645e9ba6b9a8e6cffdd9056b36c8 | 49a766fb520cca5dfe9121f272994185db9fddee45709c9d61446c6781dc7d45 | success |
+| G1 | G2-global-local | global | 2,4,6 | not_recorded | not_recorded | N/A | N/A | N/A | N/A | not_recorded | not_recorded | missing_formal_evidence |
+| G2-local-only | G2-global-local | concat_local | 2,4,6 | not_recorded | not_recorded | N/A | N/A | N/A | N/A | not_recorded | not_recorded | missing_formal_evidence |
+| G2-without-z6 | G2-global-local | concat_z2_z4 | 2,4 | 42 | 120 | 94.83373165130615 | 87.46649903306654 | 0.0 | -0.1790864978344473 | cc6f8314384513ac695b1a440dbf281e282eb40e | 67774d7d2bf04316dcf6e5e304b727bf039b3723ef899c124e77d50f543126f1 | success |
+| G2-without-z4 | G2-global-local | concat_z2_z6 | 2,6 | not_recorded | not_recorded | N/A | N/A | N/A | N/A | not_recorded | not_recorded | missing_formal_evidence |
+| G2-without-z2 | G2-global-local | concat_z4_z6 | 4,6 | not_recorded | not_recorded | N/A | N/A | N/A | N/A | not_recorded | not_recorded | missing_formal_evidence |

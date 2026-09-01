@@ -1,0 +1,61 @@
+# 门控坍缩指标与统一 G2 baseline 的比较
+
+跨两路/三路模型优先解释 normalized_entropy；被删除 scale 标为 excluded/N/A。
+
+| baseline | variant | gate_input | active_scales | status | metric | count | mean | std | median | q25 | q75 | ci95_low | ci95_high | baseline_mean | delta_vs_g2 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | dominant_k2_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | dominant_k4_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | dominant_k6_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | raw_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | normalized_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | maximum_probability | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | first_second_margin | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | normalized_effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | uniform_total_variation | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G1 | global | 2,4,6 | missing_formal_evidence | dominant_branch_concentration | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | dominant_k2_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | dominant_k4_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | dominant_k6_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | raw_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | normalized_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | maximum_probability | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | first_second_margin | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | normalized_effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | uniform_total_variation | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-local-only | concat_local | 2,4,6 | missing_formal_evidence | dominant_branch_concentration | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | dominant_k2_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | dominant_k4_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | dominant_k6_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | raw_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | normalized_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | maximum_probability | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | first_second_margin | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | normalized_effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | uniform_total_variation | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z6 | concat_z2_z4 | 2,4 | fixed_candidate_manifest_required | dominant_branch_concentration | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | dominant_k2_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | dominant_k4_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | dominant_k6_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | raw_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | normalized_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | maximum_probability | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | first_second_margin | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | normalized_effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | uniform_total_variation | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z4 | concat_z2_z6 | 2,6 | missing_formal_evidence | dominant_branch_concentration | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | dominant_k2_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | dominant_k4_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | dominant_k6_ratio | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | raw_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | normalized_entropy | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | maximum_probability | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | first_second_margin | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | normalized_effective_active_scales | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | uniform_total_variation | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| G2-global-local | G2-without-z2 | concat_z4_z6 | 4,6 | missing_formal_evidence | dominant_branch_concentration | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |

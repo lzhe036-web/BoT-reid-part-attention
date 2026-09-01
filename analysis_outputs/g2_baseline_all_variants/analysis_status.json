@@ -1,0 +1,12 @@
+{
+  "baseline": "G2-global-local",
+  "baseline_branch_tip": "5a9a2a33e19f3d9dfc3afaf356dc8b9ee3f0f737",
+  "baseline_training_commit": "fa4e7f88f7ab645e9ba6b9a8e6cffdd9056b36c8",
+  "bootstrap_replicates": 100,
+  "bootstrap_seed": 42,
+  "figures": "not_generated_without_complete_paired_fixed_samples",
+  "fixed_candidate_manifest": "N/A",
+  "variant_data_status": {
+    "fixed_samples": "not_generated: supply --market-root or --fixed-manifest before any TSV is read"
+  }
+}
