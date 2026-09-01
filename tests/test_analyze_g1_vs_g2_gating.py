@@ -40,6 +40,32 @@ class G1VsG2GatingAnalysisTest(unittest.TestCase):
             self.assertTrue(all("__MACOSX" not in row["relative_path"] for row in rows_one))
             self.assertTrue(all(row["pid"] != -1 for row in rows_one))
 
+    def test_legacy_null_field_does_not_mask_metrics_or_selected_checkpoint_evidence(self):
+        manifest = {
+            "dataset": None,
+            "selected_epoch": None,
+            "metrics": {"dataset": "market1501", "selected_epoch": 120},
+            "selected_checkpoint": {"epoch": 80},
+        }
+        self.assertEqual(
+            analysis._manifest_field_with_source(manifest, "dataset"),
+            ("market1501", "run_manifest.metrics.dataset"),
+        )
+        self.assertEqual(
+            analysis._manifest_field_with_source(manifest, "selected_epoch"),
+            (120, "run_manifest.metrics.selected_epoch"),
+        )
+        del manifest["metrics"]["selected_epoch"]
+        self.assertEqual(
+            analysis._manifest_field_with_source(manifest, "selected_epoch"),
+            (80, "run_manifest.selected_checkpoint.epoch"),
+        )
+        del manifest["selected_checkpoint"]["epoch"]
+        self.assertEqual(
+            analysis._manifest_field_with_source(manifest, "selected_epoch"),
+            (analysis.NOT_RECORDED, analysis.NOT_RECORDED),
+        )
+
     def test_historical_tsv_requires_probability_weight_order_and_sums(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "samples.tsv"

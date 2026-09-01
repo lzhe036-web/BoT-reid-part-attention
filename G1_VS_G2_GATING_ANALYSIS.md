@@ -12,6 +12,10 @@
 `tools/analyze_g1_vs_g2_gating.py` 在推理前严格核验 formal/success、
 Market1501、Seed=42、temperature=1、`[2,4,6]`、scaled-softmax、selected
 epoch=120、gate input 与 checkpoint SHA256。任何不一致都会 fail-closed。
+若历史 `run_manifest.json` 将 `dataset` 或 `selected_epoch` 写为 JSON `null`，
+工具仅在已校验 SHA256 的 source/resolved config（数据集）或同一 manifest 的
+`metrics`/`selected_checkpoint.epoch`（epoch）提供一致原始证据时恢复读取；
+恢复来源会写入最终 `analysis_manifest.json`。若这些原始证据也缺失，仍拒绝分析。
 
 概率和实际融合权重分别记录：`p2+p4+p6=1`；G1、G2 均为 scaled-softmax，
 故 `w=3p`、`w2+w4+w6=3`。训练末轮的 epoch JSONL 仅有聚合矩，未存储原始
@@ -25,8 +29,8 @@ epoch=120、gate input 与 checkpoint SHA256。任何不一致都会 fail-closed
 
 ```bash
 cd /root/autodl-tmp/BoT-reid-g2-global-local
-git fetch origin codex/g1-vs-g2-gating-analysis
-git switch --track origin/codex/g1-vs-g2-gating-analysis
+git fetch origin '+refs/heads/codex/g1-vs-g2-gating-analysis:refs/remotes/origin/codex/g1-vs-g2-gating-analysis'
+git switch codex/g1-vs-g2-gating-analysis 2>/dev/null || git switch -c codex/g1-vs-g2-gating-analysis 3d127681e14b66f4fd72d1bcd6f14a89e2e2edab
 git rev-parse HEAD
 test -z "$(git status --porcelain=v1 --untracked-files=all)" || { echo 'dirty worktree'; exit 1; }
 
@@ -41,7 +45,7 @@ OUT=/root/autodl-tmp/analysis_outputs/g1_vs_g2_dynamic_gating_seed42
 
 test -f "$G1_RUN/run_manifest.json" && test -f "$G2_RUN/run_manifest.json"
 test -f "$G1_CHECKPOINT" && test -f "$G2_CHECKPOINT"
-test -d "$DATASET_ROOT/market1501/query" && test -d "$DATASET_ROOT/market1501/bounding_box_test"
+test -d "$DATASET_ROOT/market1501/query" || test -d "$DATASET_ROOT/Market-1501-v15.09/query" || test -d "$DATASET_ROOT/query"
 echo 'e57dd34a1b8d10ef6f544d55d4f627656815704ee8303a1c20e3ae735d4ca6aa  '"$G1_CHECKPOINT" | sha256sum -c -
 echo '49a766fb520cca5dfe9121f272994185db9fddee45709c9d61446c6781dc7d45  '"$G2_CHECKPOINT" | sha256sum -c -
 python -m unittest tests.test_analyze_g1_vs_g2_gating -v

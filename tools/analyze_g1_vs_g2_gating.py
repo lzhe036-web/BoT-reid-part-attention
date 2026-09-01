@@ -138,11 +138,36 @@ def _nested(mapping, *keys):
     return value
 
 
-def _manifest_field(manifest, name):
-    if name in manifest:
-        return manifest[name]
+def _is_missing_evidence(value):
+    return value in (None, "", NOT_RECORDED, NOT_APPLICABLE)
+
+
+def _manifest_field_with_source(manifest, name):
+    """Return a legacy-compatible manifest field and its immutable source.
+
+    Older Dynamic Gating finalizers sometimes wrote a top-level JSON null for
+    a field while preserving the same field in ``metrics`` or in the selected
+    checkpoint record. A null is absence, not evidence, and must never mask a
+    populated nested field. This helper is intentionally narrow: it does not
+    manufacture a value when every original record is absent.
+    """
+    direct = manifest.get(name, NOT_RECORDED)
+    if not _is_missing_evidence(direct):
+        return direct, "run_manifest.{}".format(name)
     metrics = manifest.get("metrics", {})
-    return metrics.get(name, NOT_RECORDED) if isinstance(metrics, dict) else NOT_RECORDED
+    nested = metrics.get(name, NOT_RECORDED) if isinstance(metrics, dict) else NOT_RECORDED
+    if not _is_missing_evidence(nested):
+        return nested, "run_manifest.metrics.{}".format(name)
+    if name == "selected_epoch":
+        checkpoint = manifest.get("selected_checkpoint")
+        nested = checkpoint.get("epoch", NOT_RECORDED) if isinstance(checkpoint, dict) else NOT_RECORDED
+        if not _is_missing_evidence(nested):
+            return nested, "run_manifest.selected_checkpoint.epoch"
+    return NOT_RECORDED, NOT_RECORDED
+
+
+def _manifest_field(manifest, name):
+    return _manifest_field_with_source(manifest, name)[0]
 
 
 def _exact_list(value, expected, label):
@@ -255,8 +280,6 @@ def validate_formal_run(spec):
     manifest = _read_json(manifest_path, spec.label + " run manifest")
     if manifest.get("status") != "success" or manifest.get("run_kind") != "formal":
         raise EvidenceError("{} run is not a successful formal run".format(spec.label))
-    if str(manifest.get("dataset", "")).lower() != "market1501":
-        raise EvidenceError("{} run is not Market1501".format(spec.label))
     if manifest.get("commit") != spec.formal_commit:
         raise EvidenceError("{} formal training commit mismatch".format(spec.label))
     if str(manifest.get("output_dir", "")) != str(spec.output_dir):
@@ -270,8 +293,6 @@ def validate_formal_run(spec):
     _exact_list(manifest.get("gate_outputs"), ["w2", "w4", "w6"], spec.label + " gate output order")
     if manifest.get("gating_input") != spec.gate_input:
         raise EvidenceError("{} gate input mismatch".format(spec.label))
-    if int(_manifest_field(manifest, "selected_epoch")) != 120:
-        raise EvidenceError("{} selected epoch is not 120".format(spec.label))
 
     selected = manifest.get("selected_checkpoint")
     if not isinstance(selected, dict):
@@ -298,6 +319,43 @@ def validate_formal_run(spec):
         _close(protocol["temperature"], 1.0, spec.label + " " + protocol_name + " temperature")
         if protocol["scale_order"] != [2, 4, 6]:
             raise EvidenceError("{} {} scale order mismatch".format(spec.label, protocol_name))
+
+    dataset, dataset_source = _manifest_field_with_source(manifest, "dataset")
+    if _is_missing_evidence(dataset):
+        # This documented post-hoc recovery boundary is permitted only because
+        # both archived training configs independently say Market1501 and their
+        # hashes were validated above.
+        dataset_evidence = {
+            "raw_manifest_value": manifest.get("dataset"),
+            "resolved_value": resolved_protocol["dataset"],
+            "source": "source_config_and_resolved_config",
+            "status": "recovered_from_archived_configs",
+        }
+    else:
+        if str(dataset).lower() != "market1501":
+            raise EvidenceError("{} run is not Market1501".format(spec.label))
+        dataset_evidence = {
+            "raw_manifest_value": dataset,
+            "resolved_value": resolved_protocol["dataset"],
+            "source": dataset_source,
+            "status": "recorded",
+        }
+
+    selected_epoch, selected_epoch_source = _manifest_field_with_source(manifest, "selected_epoch")
+    if _is_missing_evidence(selected_epoch):
+        raise EvidenceError("{} selected epoch is absent from all immutable run evidence".format(spec.label))
+    try:
+        selected_epoch = int(selected_epoch)
+    except (TypeError, ValueError) as error:
+        raise EvidenceError("{} selected epoch is invalid".format(spec.label)) from error
+    if selected_epoch != 120:
+        raise EvidenceError("{} selected epoch is not 120".format(spec.label))
+    selected_epoch_evidence = {
+        "raw_manifest_value": manifest.get("selected_epoch"),
+        "resolved_value": selected_epoch,
+        "source": selected_epoch_source,
+        "status": "recorded" if selected_epoch_source == "run_manifest.selected_epoch" else "recovered_from_nested_immutable_evidence",
+    }
     summary = _read_json(paths["dynamic_gating_summary"], spec.label + " dynamic gating summary")
     if summary.get("source_checkpoint_sha256") != spec.checkpoint_sha256:
         raise EvidenceError("{} summary checkpoint SHA256 mismatch".format(spec.label))
@@ -320,6 +378,7 @@ def validate_formal_run(spec):
         "source_config": source_config, "resolved_config": resolved_config,
         "source_protocol": source_protocol, "resolved_protocol": resolved_protocol,
         "summary": summary, "history": history, "historical_sample_count": historical_sample_count,
+        "identity_evidence": {"dataset": dataset_evidence, "selected_epoch": selected_epoch_evidence},
     }
 
 
@@ -872,8 +931,8 @@ def run_analysis(g1_spec, g2_spec, dataset_root, output_dir, device=None, query_
     manifest = {
         "analysis": "reproducible_g1_vs_g2_dynamic_gating", "selection_prefix": SELECTION_PREFIX,
         "candidate_manifest": _file_evidence(candidate_path), "candidate_counts": dict(Counter(row["split"] for row in candidates)),
-        "g1": {"formal_commit": G1_COMMIT, "checkpoint_sha256": G1_SHA256, "gate_input": "global", "inputs": g1["artifacts"]},
-        "g2": {"formal_commit": G2_COMMIT, "checkpoint_sha256": G2_SHA256, "gate_input": "concat_global_local", "inputs": g2["artifacts"]},
+        "g1": {"formal_commit": G1_COMMIT, "checkpoint_sha256": G1_SHA256, "gate_input": "global", "inputs": g1["artifacts"], "identity_evidence": g1["identity_evidence"]},
+        "g2": {"formal_commit": G2_COMMIT, "checkpoint_sha256": G2_SHA256, "gate_input": "concat_global_local", "inputs": g2["artifacts"], "identity_evidence": g2["identity_evidence"]},
         "contact_sheets": contact_paths, "prepare_annotations_only": bool(prepare_annotations_only),
     }
     _write_json(output_dir / "analysis_manifest.json", manifest)
