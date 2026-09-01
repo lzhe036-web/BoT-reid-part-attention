@@ -179,5 +179,24 @@ class AllGatingVariantsAnalysisTest(unittest.TestCase):
             paths = analysis.generate_pair_figures(spec, variant, baseline, directory)
             self.assertEqual(len(paths), 12)
             self.assertTrue(all(Path(path).is_file() for path in paths))
+
+    def test_blind_annotations_require_fixed_keys_categories_and_reasons(self):
+        candidates = [{"stable_sample_key": "fixed", "selection_hash": "a" * 64}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "annotations.tsv"
+            path.write_text(
+                "stable_sample_key\tcategory\tannotation_version\treason\n"
+                "fixed\tclear\tv1\tvisible upper-body detail\n",
+                encoding="utf-8",
+            )
+            rows = analysis.read_blind_annotations(path, candidates)
+            self.assertEqual(rows[0]["category"], "clear")
+            path.write_text(
+                "stable_sample_key\tcategory\tannotation_version\treason\n"
+                "not-fixed\tclear\tv1\treason\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(analysis.AnalysisError):
+                analysis.read_blind_annotations(path, candidates)
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,7 @@ weights 的和为 1。工具同时输出 native applied weights 和归一化 pro
 - `manifests/fixed_candidate_samples.tsv`：冻结候选清单（提供 `--market-root` 时）；
 - `manifests/image_type_annotations.tsv`：盲标注模板，Market 类别不是官方标签；
 - `figures/g2_vs_*/`：完整配对后输出 PNG/PDF（300 DPI），否则只保留状态说明；
+- `samples/<category>/g2_vs_*.{png,pdf}`：仅当用户完成固定样本盲标注且该版本完整配对后生成；
 - `missing_formal_evidence_commands.md`：未完成正式实验的命令，绝不用 smoke 补数。
 
 ## AutoDL：审计与分析
@@ -78,7 +79,8 @@ python tools/analyze_all_gating_variants_vs_g2.py \
   --artifact-root /root/autodl-tmp/g2_evidence_packages \
   --artifact-root /root/autodl-tmp/experiments \
   --market-root /root/autodl-tmp/datasets \
-  --fixed-sample-limit 256
+  --fixed-sample-limit 256 \
+  --display-per-category 10
 find analysis_outputs/g2_baseline_all_variants -type f -print0 | sort -z | xargs -0 sha256sum \
   > analysis_outputs/g2_baseline_all_variants/SHA256SUMS.external
 ```

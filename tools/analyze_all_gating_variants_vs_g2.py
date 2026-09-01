@@ -974,6 +974,121 @@ def write_annotation_template(path):
 """)
 
 
+IMAGE_CATEGORIES = ("clear", "occluded", "misaligned", "side_view", "back_view", "blurred")
+
+
+def read_blind_annotations(path, candidates):
+    """Read only a pre-existing blind annotation TSV; never infer categories."""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    fields = ("stable_sample_key", "category", "annotation_version", "reason")
+    if not rows:
+        return []
+    if tuple(rows[0].keys()) != fields:
+        raise AnalysisError("Image-type annotation TSV has an invalid schema")
+    available = {row["stable_sample_key"] for row in candidates}
+    seen = set()
+    for row in rows:
+        identity = (row["stable_sample_key"], row["category"])
+        if row["stable_sample_key"] not in available:
+            raise AnalysisError("Blind annotation refers to a non-fixed sample")
+        if row["category"] not in IMAGE_CATEGORIES:
+            raise AnalysisError("Blind annotation has an unsupported category")
+        if not row["annotation_version"] or not row["reason"]:
+            raise AnalysisError("Blind annotation must record version and reason")
+        if identity in seen:
+            raise AnalysisError("Blind annotation duplicates a sample/category pair")
+        seen.add(identity)
+    return rows
+
+
+def _candidate_image_path(market_root, candidate):
+    root = Path(market_root)
+    relative = Path(candidate["relative_path"])
+    direct = root / relative
+    if direct.is_file():
+        return direct
+    # ``relative_path`` contains market1501/ when Market root is its parent.
+    # If the user supplied the Market directory itself, discard that leading
+    # component instead of guessing any other dataset location.
+    if relative.parts and relative.parts[0].lower() in ("market1501", "market-1501-v15.09"):
+        nested = root / Path(*relative.parts[1:])
+        if nested.is_file():
+            return nested
+    return None
+
+
+def _gate_text(label, sample, active_scales, baseline_sample=None):
+    fields = []
+    for scale in (2, 4, 6):
+        if scale not in active_scales:
+            fields.append("K{}: excluded".format(scale))
+            continue
+        value = "K{}: p={:.4f}, w={:.4f}".format(
+            scale, sample["probabilities"][scale], sample["weights"][scale]
+        )
+        if baseline_sample is not None:
+            value += ", Δp={:+.4f}".format(
+                sample["probabilities"][scale] - baseline_sample["probabilities"][scale]
+            )
+        fields.append(value)
+    return "{} | dominant K{}\n{}".format(label, sample["dominant"], "; ".join(fields))
+
+
+def generate_fixed_sample_panels(spec, sample_map, baseline_map, candidates, annotations,
+                                 market_root, output_directory, per_category):
+    """Render blind-annotated fixed sample panels once evidence is paired.
+
+    Category membership is read verbatim from the user-maintained blind TSV;
+    this function does not inspect weights while selecting the category or
+    rank.  It merely filters previously frozen candidates and orders each
+    category by its immutable selection hash.
+    """
+    if not annotations:
+        return []
+    pyplot = _get_matplotlib()
+    candidate_by_key = {row["stable_sample_key"]: row for row in candidates}
+    annotation_keys = {}
+    for annotation in annotations:
+        annotation_keys.setdefault(annotation["category"], set()).add(annotation["stable_sample_key"])
+    paths = []
+    for category in IMAGE_CATEGORIES:
+        selected = [
+            candidate_by_key[key] for key in annotation_keys.get(category, set())
+            if key in sample_map and key in baseline_map
+        ]
+        selected.sort(key=lambda row: row["selection_hash"])
+        selected = selected[:int(per_category)]
+        if not selected:
+            continue
+        figure, axes = pyplot.subplots(len(selected), 1, figsize=(9.4, 4.7 * len(selected)))
+        if len(selected) == 1:
+            axes = [axes]
+        for axis, candidate in zip(axes, selected):
+            image_path = _candidate_image_path(market_root, candidate)
+            if image_path is None:
+                pyplot.close(figure)
+                raise AnalysisError("Fixed sample image is absent: {}".format(candidate["relative_path"]))
+            axis.imshow(pyplot.imread(str(image_path)))
+            axis.axis("off")
+            key = candidate["stable_sample_key"]
+            title = (
+                "{} | split={} pid={} camid={} | category={}\n{}\n{}"
+            ).format(
+                candidate["relative_path"], candidate["split"], candidate["pid"], candidate["camid"], category,
+                _gate_text("G2", baseline_map[key], (2, 4, 6)),
+                _gate_text(spec.label, sample_map[key], spec.active_scales, baseline_map[key]),
+            )
+            axis.set_title(title, fontsize=8, loc="left")
+        figure.suptitle("Fixed blind-annotated samples: G2 vs {} ({})".format(spec.label, category), y=1.0)
+        paths += _save_figure(figure, Path(output_directory) / category, "g2_vs_{}".format(spec.key))
+        pyplot.close(figure)
+    return [str(path) for path in paths]
+
+
 def write_output_checksums(output_dir):
     output_dir = Path(output_dir)
     rows = []
@@ -984,7 +1099,7 @@ def write_output_checksums(output_dir):
 
 def run_analysis(repo_root, output_dir, artifact_roots=(), market_root=None,
                  fixed_manifest=None, fixed_limit=256, bootstrap_seed=42,
-                 bootstrap_replicates=1000):
+                 bootstrap_replicates=1000, display_per_category=10):
     """Run the audit and only compute paired gate statistics when evidence exists."""
     repo_root, output_dir = Path(repo_root).resolve(), Path(output_dir).resolve()
     tables_dir, manifests_dir, figures_dir, samples_dir, evidence_dir = (
@@ -1038,7 +1153,7 @@ def run_analysis(repo_root, output_dir, artifact_roots=(), market_root=None,
     else:
         candidates, fixed_manifest_path = None, None
 
-    weight_rows, collapse_rows, data_status, figure_paths = [], [], {}, {}
+    weight_rows, collapse_rows, data_status, figure_paths, sample_panel_paths = [], [], {}, {}, {}
     if candidates is None:
         for spec in VARIANTS:
             status = MISSING_FORMAL if inventory[spec.key].get("formal_status") != "success" else "fixed_candidate_manifest_required"
@@ -1048,6 +1163,9 @@ def run_analysis(repo_root, output_dir, artifact_roots=(), market_root=None,
             collapse_rows.extend(unavailable_collapse_rows(spec, status))
         data_status["fixed_samples"] = "not_generated: supply --market-root or --fixed-manifest before any TSV is read"
     else:
+        annotations = read_blind_annotations(
+            manifests_dir / "image_type_annotations.tsv", candidates
+        )
         paired = {}
         for spec in VARIANTS:
             detail = evidence[spec.key]
@@ -1093,6 +1211,14 @@ def run_analysis(repo_root, output_dir, artifact_roots=(), market_root=None,
                     )
                 except AnalysisError as error:
                     figure_paths[spec.key] = "not_generated: {}".format(error)
+                if market_root and annotations:
+                    try:
+                        sample_panel_paths[spec.key] = generate_fixed_sample_panels(
+                            spec, paired[spec.key], baseline_map, candidates, annotations,
+                            market_root, samples_dir, display_per_category,
+                        )
+                    except AnalysisError as error:
+                        sample_panel_paths[spec.key] = "not_generated: {}".format(error)
             else:
                 collapse_rows.extend(unavailable_collapse_rows(spec, data_status.get(spec.key, "unavailable")))
         _write_json(manifests_dir / "fixed_candidate_manifest_provenance.json", {
@@ -1127,6 +1253,7 @@ def run_analysis(repo_root, output_dir, artifact_roots=(), market_root=None,
         "fixed_candidate_manifest": str(fixed_manifest_path) if fixed_manifest_path else NOT_APPLICABLE,
         "variant_data_status": data_status,
         "figures": figure_paths if figure_paths else "not_generated_without_complete_paired_fixed_samples",
+        "sample_panels": sample_panel_paths if sample_panel_paths else "not_generated_without_blind_annotations_and_complete_paired_fixed_samples",
         "bootstrap_seed": bootstrap_seed,
         "bootstrap_replicates": bootstrap_replicates,
     }
@@ -1148,16 +1275,18 @@ def main(argv=None):
     parser.add_argument("--fixed-sample-limit", type=int, default=256)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
     parser.add_argument("--bootstrap-replicates", type=int, default=1000)
+    parser.add_argument("--display-per-category", type=int, default=10,
+                        help="Maximum blind-annotated fixed samples per category (5-10 recommended).")
     args = parser.parse_args(argv)
     if args.market_root and args.fixed_manifest:
         parser.error("--market-root and --fixed-manifest are mutually exclusive")
-    if args.fixed_sample_limit <= 0 or args.bootstrap_replicates <= 0:
-        parser.error("sample limit and bootstrap replicates must be positive")
+    if args.fixed_sample_limit <= 0 or args.bootstrap_replicates <= 0 or args.display_per_category <= 0:
+        parser.error("sample limit, bootstrap replicates, and display count must be positive")
     result = run_analysis(
         args.repo_root, args.output_dir, artifact_roots=args.artifact_root,
         market_root=args.market_root, fixed_manifest=args.fixed_manifest,
         fixed_limit=args.fixed_sample_limit, bootstrap_seed=args.bootstrap_seed,
-        bootstrap_replicates=args.bootstrap_replicates,
+        bootstrap_replicates=args.bootstrap_replicates, display_per_category=args.display_per_category,
     )
     print(json.dumps(result["status"], ensure_ascii=False, indent=2, sort_keys=True))
     return 0

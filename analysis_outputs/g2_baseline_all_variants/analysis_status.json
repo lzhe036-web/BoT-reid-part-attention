@@ -6,6 +6,7 @@
   "bootstrap_seed": 42,
   "figures": "not_generated_without_complete_paired_fixed_samples",
   "fixed_candidate_manifest": "N/A",
+  "sample_panels": "not_generated_without_blind_annotations_and_complete_paired_fixed_samples",
   "variant_data_status": {
     "fixed_samples": "not_generated: supply --market-root or --fixed-manifest before any TSV is read"
   }
