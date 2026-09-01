@@ -66,6 +66,15 @@ class G1VsG2GatingAnalysisTest(unittest.TestCase):
             (analysis.NOT_RECORDED, analysis.NOT_RECORDED),
         )
 
+    def test_scale_order_accepts_only_canonical_decimal_integer_strings(self):
+        self.assertEqual(
+            analysis._exact_list(["2", "4", "6"], [2, 4, 6], "scale order"),
+            [2, 4, 6],
+        )
+        for invalid in (("2", "4", "6.0"), ("2", "04", "6"), ("2", "6", "4"), (True, 4, 6)):
+            with self.assertRaises(analysis.EvidenceError):
+                analysis._exact_list(invalid, [2, 4, 6], "scale order")
+
     def test_historical_tsv_requires_probability_weight_order_and_sums(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "samples.tsv"

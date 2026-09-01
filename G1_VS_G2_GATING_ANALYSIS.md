@@ -16,6 +16,8 @@ epoch=120、gate input 与 checkpoint SHA256。任何不一致都会 fail-closed
 工具仅在已校验 SHA256 的 source/resolved config（数据集）或同一 manifest 的
 `metrics`/`selected_checkpoint.epoch`（epoch）提供一致原始证据时恢复读取；
 恢复来源会写入最终 `analysis_manifest.json`。若这些原始证据也缺失，仍拒绝分析。
+同样地，历史 JSON 中仅允许将 `[2,4,6]` 编码为规范十进制字符串
+`["2","4","6"]`；浮点、前导零、布尔值或顺序变化仍会被拒绝。
 
 概率和实际融合权重分别记录：`p2+p4+p6=1`；G1、G2 均为 scaled-softmax，
 故 `w=3p`、`w2+w4+w6=3`。训练末轮的 epoch JSONL 仅有聚合矩，未存储原始

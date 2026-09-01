@@ -173,8 +173,30 @@ def _manifest_field(manifest, name):
 def _exact_list(value, expected, label):
     if isinstance(value, str):
         value = [item.strip() for item in value.split(",") if item.strip()]
-    if list(value) != list(expected):
-        raise EvidenceError("{} mismatch: {!r} != {!r}".format(label, value, expected))
+    try:
+        actual = list(value)
+    except TypeError as error:
+        raise EvidenceError("{} is not a list".format(label)) from error
+    # Historical JSON manifests encoded numeric scale values as decimal strings.
+    # Accept only canonical integer spellings when an integer schema is expected;
+    # floats, signs, scientific notation, booleans, and reordered values remain
+    # fail-closed.
+    if all(type(item) is int for item in expected):
+        normalized = []
+        for item in actual:
+            if type(item) is int:
+                normalized.append(item)
+                continue
+            if not isinstance(item, str) or not item.isdigit():
+                raise EvidenceError("{} has non-canonical integer item {!r}".format(label, item))
+            number = int(item)
+            if str(number) != item:
+                raise EvidenceError("{} has non-canonical integer item {!r}".format(label, item))
+            normalized.append(number)
+        actual = normalized
+    if actual != list(expected):
+        raise EvidenceError("{} mismatch: {!r} != {!r}".format(label, actual, expected))
+    return actual
 
 
 def _close(actual, expected, label, rel=1e-6, abs_tol=1e-9):
@@ -289,7 +311,7 @@ def validate_formal_run(spec):
     _close(manifest.get("gating_temperature"), 1.0, spec.label + " temperature")
     if manifest.get("gating_normalization") != "scaled_softmax":
         raise EvidenceError("{} uses a non-scaled-softmax gate".format(spec.label))
-    _exact_list(manifest.get("scale_order"), [2, 4, 6], spec.label + " scale order")
+    manifest_scale_order = _exact_list(manifest.get("scale_order"), [2, 4, 6], spec.label + " scale order")
     _exact_list(manifest.get("gate_outputs"), ["w2", "w4", "w6"], spec.label + " gate output order")
     if manifest.get("gating_input") != spec.gate_input:
         raise EvidenceError("{} gate input mismatch".format(spec.label))
@@ -378,7 +400,16 @@ def validate_formal_run(spec):
         "source_config": source_config, "resolved_config": resolved_config,
         "source_protocol": source_protocol, "resolved_protocol": resolved_protocol,
         "summary": summary, "history": history, "historical_sample_count": historical_sample_count,
-        "identity_evidence": {"dataset": dataset_evidence, "selected_epoch": selected_epoch_evidence},
+        "identity_evidence": {
+            "dataset": dataset_evidence,
+            "selected_epoch": selected_epoch_evidence,
+            "scale_order": {
+                "raw_manifest_value": manifest.get("scale_order"),
+                "resolved_value": manifest_scale_order,
+                "source": "run_manifest.scale_order",
+                "status": "recorded" if manifest.get("scale_order") == manifest_scale_order else "canonicalized_decimal_integer_strings",
+            },
+        },
     }
 
 
