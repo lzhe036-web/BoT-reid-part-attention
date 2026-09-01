@@ -291,6 +291,20 @@ def _validate_historical_gating_samples(path, checkpoint_sha256, label):
     return len(rows)
 
 
+def _gate_outputs_from_historical_samples(path, label):
+    """Recover the only valid gate-output order from an archived TSV header."""
+    expected = (
+        "stable_sample_key", "dataset_split", "pid", "camid",
+        "p2", "p4", "p6", "w2", "w4", "w6", "entropy",
+        "dominant_k", "checkpoint_sha256",
+    )
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        header = csv.DictReader(handle, delimiter="\t").fieldnames
+    if tuple(header or ()) != expected:
+        raise EvidenceError("{} historical gating TSV cannot establish gate output order".format(label))
+    return ["w2", "w4", "w6"]
+
+
 def validate_formal_run(spec):
     """Validate all immutable formal-run and selected-checkpoint contracts."""
     run_dir = Path(spec.run_dir)
@@ -312,7 +326,6 @@ def validate_formal_run(spec):
     if manifest.get("gating_normalization") != "scaled_softmax":
         raise EvidenceError("{} uses a non-scaled-softmax gate".format(spec.label))
     manifest_scale_order = _exact_list(manifest.get("scale_order"), [2, 4, 6], spec.label + " scale order")
-    _exact_list(manifest.get("gate_outputs"), ["w2", "w4", "w6"], spec.label + " gate output order")
     if manifest.get("gating_input") != spec.gate_input:
         raise EvidenceError("{} gate input mismatch".format(spec.label))
 
@@ -341,6 +354,24 @@ def validate_formal_run(spec):
         _close(protocol["temperature"], 1.0, spec.label + " " + protocol_name + " temperature")
         if protocol["scale_order"] != [2, 4, 6]:
             raise EvidenceError("{} {} scale order mismatch".format(spec.label, protocol_name))
+
+    gate_outputs, gate_outputs_source = _manifest_field_with_source(manifest, "gate_outputs")
+    if _is_missing_evidence(gate_outputs):
+        gate_outputs = _gate_outputs_from_historical_samples(paths["gating_samples"], spec.label)
+        gate_outputs_evidence = {
+            "raw_manifest_value": manifest.get("gate_outputs"),
+            "resolved_value": gate_outputs,
+            "source": "gating_samples.tsv.header",
+            "status": "recovered_from_archived_gating_sample_schema",
+        }
+    else:
+        gate_outputs = _exact_list(gate_outputs, ["w2", "w4", "w6"], spec.label + " gate output order")
+        gate_outputs_evidence = {
+            "raw_manifest_value": manifest.get("gate_outputs"),
+            "resolved_value": gate_outputs,
+            "source": gate_outputs_source,
+            "status": "recorded",
+        }
 
     dataset, dataset_source = _manifest_field_with_source(manifest, "dataset")
     if _is_missing_evidence(dataset):
@@ -409,6 +440,7 @@ def validate_formal_run(spec):
                 "source": "run_manifest.scale_order",
                 "status": "recorded" if manifest.get("scale_order") == manifest_scale_order else "canonicalized_decimal_integer_strings",
             },
+            "gate_outputs": gate_outputs_evidence,
         },
     }
 

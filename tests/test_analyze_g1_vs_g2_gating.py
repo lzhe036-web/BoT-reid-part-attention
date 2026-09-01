@@ -89,6 +89,16 @@ class G1VsG2GatingAnalysisTest(unittest.TestCase):
             with self.assertRaises(analysis.EvidenceError):
                 analysis._validate_historical_gating_samples(path, "a" * 64, "test")
 
+    def test_gate_output_recovery_requires_the_archived_sample_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "samples.tsv"
+            header = ("stable_sample_key", "dataset_split", "pid", "camid", "p2", "p4", "p6", "w2", "w4", "w6", "entropy", "dominant_k", "checkpoint_sha256")
+            path.write_text("\t".join(header) + "\n", encoding="utf-8")
+            self.assertEqual(analysis._gate_outputs_from_historical_samples(path, "test"), ["w2", "w4", "w6"])
+            path.write_text("w2\tw4\tw6\n", encoding="utf-8")
+            with self.assertRaises(analysis.EvidenceError):
+                analysis._gate_outputs_from_historical_samples(path, "test")
+
     def test_fixed_gate_reader_rejects_checkpoint_or_dominant_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixed.tsv"
