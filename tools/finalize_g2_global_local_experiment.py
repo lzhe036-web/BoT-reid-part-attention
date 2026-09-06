@@ -30,6 +30,10 @@ from utils.experiment_recording import (
 EXPECTED_BRANCH = "codex/g2-global-local-gating"
 EXPECTED_EPOCHS = (40, 80, 120)
 EXPECTED_GATING_INPUT = "concat_global_local"
+EXPECTED_GATING_TAU = 1.0
+DEFAULT_EXPERIMENT_LABEL = "G2 global-plus-local Dynamic Gating"
+DEFAULT_RESULT_FILENAME = "g2_formal_result.json"
+DEFAULT_ANALYSIS_DIRNAME = "g2_gating_analysis"
 
 
 def _git(*arguments):
@@ -40,7 +44,7 @@ def _git(*arguments):
     return output.decode("utf-8", errors="replace").strip()
 
 
-def _load_configuration(config_path, output_dir):
+def _load_configuration(config_path, output_dir, expected_gating_tau):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
@@ -49,6 +53,10 @@ def _load_configuration(config_path, output_dir):
         "MODEL.MULTI_GRANULARITY_GATING_INPUT": (
             str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT),
             EXPECTED_GATING_INPUT,
+        ),
+        "MODEL.MULTI_GRANULARITY_GATING_TAU": (
+            float(configuration.MODEL.MULTI_GRANULARITY_GATING_TAU),
+            float(expected_gating_tau),
         ),
         "SOLVER.MAX_EPOCHS": (int(configuration.SOLVER.MAX_EPOCHS), 120),
         "SOLVER.CHECKPOINT_PERIOD": (
@@ -73,18 +81,24 @@ def _read_csv(path):
         return list(csv.DictReader(handle))
 
 
-def finalize(config_path, output_dir):
+def finalize(config_path, output_dir, expected_branch=EXPECTED_BRANCH,
+             expected_gating_tau=EXPECTED_GATING_TAU,
+             experiment_label=DEFAULT_EXPERIMENT_LABEL,
+             result_filename=DEFAULT_RESULT_FILENAME,
+             analysis_dirname=DEFAULT_ANALYSIS_DIRNAME):
     config_path = Path(config_path).resolve()
     output_dir = Path(output_dir).resolve()
     if not output_dir.is_dir():
         raise FileNotFoundError("G2 output directory is absent: {}".format(output_dir))
-    configuration = _load_configuration(config_path, output_dir)
+    configuration = _load_configuration(
+        config_path, output_dir, expected_gating_tau
+    )
 
     branch = _git("branch", "--show-current")
-    if branch != EXPECTED_BRANCH:
+    if branch != expected_branch:
         raise ValueError(
             "G2 finalization requires branch {}, got {}".format(
-                EXPECTED_BRANCH, branch
+                expected_branch, branch
             )
         )
     commit = _git("rev-parse", "HEAD")
@@ -117,7 +131,7 @@ def finalize(config_path, output_dir):
     if len(selected_gate_rows) != 1:
         raise ValueError("Selected G2 epoch has no unique gate-statistics record")
 
-    analysis_dir = output_dir / "g2_gating_analysis"
+    analysis_dir = output_dir / analysis_dirname
     if analysis_dir.exists():
         raise FileExistsError(
             "Refusing to overwrite existing G2 analysis: {}".format(analysis_dir)
@@ -128,6 +142,7 @@ def finalize(config_path, output_dir):
         analysis_dir,
         epoch_stats_path,
         sample_limit=256,
+        expected_gating_tau=float(expected_gating_tau),
     )
     test_weight_rows = _read_csv(
         analysis_dir / "g2_gate_test_weight_summary.csv"
@@ -137,10 +152,11 @@ def finalize(config_path, output_dir):
     )
 
     result = {
-        "experiment": "G2 global-plus-local Dynamic Gating",
+        "experiment": experiment_label,
         "branch": branch,
         "commit": commit,
         "seed": 42,
+        "gating_temperature": float(expected_gating_tau),
         "gating_input": "concat([g, z2, z4, z6])",
         "gate_outputs": ["w2", "w4", "w6"],
         "checkpoint_selection_rule": (
@@ -172,7 +188,7 @@ def finalize(config_path, output_dir):
             "analysis_manifest_sha256": sha256_file(analysis_manifest),
         },
     }
-    result_path = output_dir / "g2_formal_result.json"
+    result_path = output_dir / result_filename
     atomic_write_json(result_path, result)
     return result_path, result
 
@@ -181,8 +197,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-file", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--expected-branch", default=EXPECTED_BRANCH)
+    parser.add_argument("--expected-gating-tau", type=float,
+                        default=EXPECTED_GATING_TAU)
+    parser.add_argument("--experiment-label", default=DEFAULT_EXPERIMENT_LABEL)
+    parser.add_argument("--result-filename", default=DEFAULT_RESULT_FILENAME)
+    parser.add_argument("--analysis-dirname", default=DEFAULT_ANALYSIS_DIRNAME)
     args = parser.parse_args(argv)
-    result_path, result = finalize(args.config_file, args.output_dir)
+    if args.expected_gating_tau <= 0.0:
+        parser.error("--expected-gating-tau must be positive")
+    result_path, result = finalize(
+        args.config_file, args.output_dir,
+        expected_branch=args.expected_branch,
+        expected_gating_tau=args.expected_gating_tau,
+        experiment_label=args.experiment_label,
+        result_filename=args.result_filename,
+        analysis_dirname=args.analysis_dirname,
+    )
     print(json.dumps({
         "result_path": str(result_path),
         "metrics": result["metrics"],

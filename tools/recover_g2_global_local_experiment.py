@@ -50,10 +50,17 @@ from utils.experiment_schema import (
 EXPERIMENT_ID = "C2-L03-MGDG-G2-GL-T1-S42"
 EXPECTED_BRANCH = "codex/g2-global-local-gating"
 EXPECTED_PARENT_BRANCH = "exp/c2-l03-multi-granularity-dynamic-gating"
+EXPECTED_PARENT_COMMIT = None
 EXPECTED_EPOCHS = (40, 80, 120)
 EXPECTED_GATE_EPOCHS = tuple(range(1, 121))
 EXPECTED_GATING_INPUT = "concat_global_local"
+EXPECTED_GATING_TAU = 1.0
 SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
+RESULT_FILENAME = "g2_formal_result.json"
+METHOD_VARIANT = "g2_global_local_per_sample_dynamic_gating"
+METHOD_LABEL = "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]"
+BASELINE_LABEL = "C2-L03 + MGP concat"
+REQUIRE_RESULT_GATING_TEMPERATURE = False
 DEFAULT_CONFIG = (
     REPO_ROOT
     / "configs"
@@ -128,7 +135,7 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
         (("SEED",), 42),
         (("MODEL", "MULTI_GRANULARITY_DYNAMIC_GATING"), True),
         (("MODEL", "MULTI_GRANULARITY_GATING_INPUT"), EXPECTED_GATING_INPUT),
-        (("MODEL", "MULTI_GRANULARITY_GATING_TAU"), 1.0),
+        (("MODEL", "MULTI_GRANULARITY_GATING_TAU"), EXPECTED_GATING_TAU),
         (("MODEL", "MULTI_GRANULARITY_GATING_NORMALIZATION"), "scaled_softmax"),
         (("MODEL", "MULTI_GRANULARITY_PART_SCALES"), [2, 4, 6]),
         (("SOLVER", "MAX_EPOCHS"), 120),
@@ -138,7 +145,9 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
     for keys, expected in checks:
         for label, payload in (("source", source), ("resolved", resolved)):
             actual = _nested(payload, *keys)
-            if actual != expected:
+            if (not _same_number(actual, expected)
+                    if keys == ("MODEL", "MULTI_GRANULARITY_GATING_TAU")
+                    else actual != expected):
                 raise G2RecoveryError(
                     "G2 {} config mismatch {}: {!r} != {!r}".format(
                         label, ".".join(keys), actual, expected
@@ -235,6 +244,10 @@ def _validate_result(output_dir, result, commit, validation_records,
         raise G2RecoveryError("G2 result branch/commit does not match training evidence")
     if result.get("seed") != 42:
         raise G2RecoveryError("G2 result does not record Seed=42")
+    if REQUIRE_RESULT_GATING_TEMPERATURE and not _same_number(
+            result.get("gating_temperature"), EXPECTED_GATING_TAU
+    ):
+        raise G2RecoveryError("G2 result has the wrong gating temperature")
     if result.get("gating_input") != "concat([g, z2, z4, z6])":
         raise G2RecoveryError("G2 result has the wrong controller input")
     if result.get("gate_outputs") != ["w2", "w4", "w6"]:
@@ -283,6 +296,9 @@ def _validate_result(output_dir, result, commit, validation_records,
     if len(selected_gate) != 1:
         raise G2RecoveryError("Selected epoch has no unique gate-statistics row")
     result_gate = result.get("selected_epoch_gate_statistics", {})
+    for row in gate_records:
+        if not _same_number(row.get("gating_temperature"), EXPECTED_GATING_TAU):
+            raise G2RecoveryError("Gate epoch statistics have the wrong temperature")
     for field in GATING_STAT_FIELDS:
         value = selected_gate[0].get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)) \
@@ -403,7 +419,21 @@ def _lineage(commit):
             return NOT_RECORDED
         return output.decode("utf-8", errors="replace").strip() or NOT_RECORDED
 
-    parent_commit = git("merge-base", commit, EXPECTED_PARENT_BRANCH)
+    if EXPECTED_PARENT_COMMIT is not None:
+        expected_parent = str(EXPECTED_PARENT_COMMIT)
+        if len(expected_parent) != 40:
+            raise G2RecoveryError("Configured parent commit is not a full SHA")
+        try:
+            subprocess.check_call(
+                ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
+                 expected_parent, commit],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            raise G2RecoveryError("Training commit is not descended from the configured parent")
+        parent_commit = expected_parent
+    else:
+        parent_commit = git("merge-base", commit, EXPECTED_PARENT_BRANCH)
     return {
         "parent_branch": EXPECTED_PARENT_BRANCH,
         "parent_commit": parent_commit,
@@ -431,6 +461,7 @@ def _verify_existing_run(run_dir, output_dir, commit, checkpoint_sha):
         "commit": commit,
         "output_dir": str(output_dir),
         "gating_input": EXPECTED_GATING_INPUT,
+        "gating_temperature": EXPECTED_GATING_TAU,
     }
     for key, value in expected.items():
         if manifest.get(key) != value:
@@ -479,7 +510,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
     checkpoint_manifest_path = _require_file(
         output_dir / "checkpoint_manifest.tsv", "checkpoint manifest"
     )
-    result_path = _require_file(output_dir / "g2_formal_result.json", "G2 formal result")
+    result_path = _require_file(output_dir / RESULT_FILENAME, "G2 formal result")
 
     reproducibility = _read_json(reproducibility_path, "reproducibility record")
     commit = _validate_reproducibility(reproducibility)
@@ -585,10 +616,10 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
                 {"status": "success", "timestamp_utc": ended, "source": "post-hoc recovery"}
             ],
             "method_family": "multi_granularity_feature",
-            "method_variant": "g2_global_local_per_sample_dynamic_gating",
-            "method": "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]",
+            "method_variant": METHOD_VARIANT,
+            "method": METHOD_LABEL,
             "dataset": str(_nested(source_config, "DATASETS", "NAMES")),
-            "baseline": "C2-L03 + MGP concat",
+            "baseline": BASELINE_LABEL,
             "margin": _nested(source_config, "SOLVER", "MARGIN"),
             "mode": _nested(source_config, "MODEL", "CROSS_CAMERA_POSITIVE_MODE"),
             "lambda": NOT_APPLICABLE,
@@ -619,7 +650,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "alignment_temperature": NOT_APPLICABLE,
             "gating_mode": "per_sample_dynamic_gating",
             "gating_input": EXPECTED_GATING_INPUT,
-            "gating_temperature": 1.0,
+            "gating_temperature": EXPECTED_GATING_TAU,
             "gating_normalization": "scaled_softmax",
             "scale_order": "2,4,6",
             "gate_outputs": ["w2", "w4", "w6"],

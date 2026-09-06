@@ -60,7 +60,7 @@ def _write_csv(path, fieldnames, rows):
     _atomic_text(path, buffer.getvalue())
 
 
-def _load_configuration(config_path):
+def _load_configuration(config_path, expected_gating_tau=None):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
@@ -71,6 +71,16 @@ def _load_configuration(config_path):
             "This G2 analyzer requires MULTI_GRANULARITY_GATING_INPUT="
             "'concat_global_local', got {!r}".format(
                 configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT
+            )
+        )
+    if expected_gating_tau is not None and float(
+            configuration.MODEL.MULTI_GRANULARITY_GATING_TAU
+    ) != float(expected_gating_tau):
+        raise ValueError(
+            "This G2 analyzer requires MULTI_GRANULARITY_GATING_TAU={!r}, "
+            "got {!r}".format(
+                float(expected_gating_tau),
+                float(configuration.MODEL.MULTI_GRANULARITY_GATING_TAU),
             )
         )
     return configuration
@@ -220,7 +230,7 @@ def _sha256_text(path):
 
 
 def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
-            sample_limit=256, device=None):
+            sample_limit=256, device=None, expected_gating_tau=None):
     config_path = Path(config_path).resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -230,7 +240,7 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     if not epoch_stats_path.is_file():
         raise FileNotFoundError("Epoch gating statistics not found: {}".format(epoch_stats_path))
     output_dir.mkdir(parents=True, exist_ok=False)
-    configuration = _load_configuration(config_path)
+    configuration = _load_configuration(config_path, expected_gating_tau)
     checkpoint_sha = sha256_file(checkpoint_path)
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
     state = _state_dict(checkpoint)
@@ -268,6 +278,9 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         "epoch_statistics_path": str(epoch_stats_path),
         "epoch_statistics_sha256": sha256_file(epoch_stats_path),
         "gating_input": "concat([g, z2, z4, z6])",
+        "gating_temperature": float(
+            configuration.MODEL.MULTI_GRANULARITY_GATING_TAU
+        ),
         "controller_output_semantics": (
             "three scaled-softmax weights applied to z2, z4, z6; no direct g weight"
         ),
@@ -301,12 +314,14 @@ def main(argv=None):
     parser.add_argument("--epoch-stats", required=True)
     parser.add_argument("--sample-limit", type=int, default=256)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--expected-gating-tau", type=float, default=None)
     args = parser.parse_args(argv)
     if args.sample_limit <= 0:
         parser.error("--sample-limit must be positive")
     manifest = analyze(
         args.config_file, args.weight, args.output_dir, args.epoch_stats,
         sample_limit=args.sample_limit, device=args.device,
+        expected_gating_tau=args.expected_gating_tau,
     )
     print(str(manifest))
     return 0
