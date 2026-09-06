@@ -63,16 +63,17 @@ def _leaf_differences(left, right, prefix=()):
     return [] if left == right else [(prefix, left, right)]
 
 
-def verify(baseline_path, candidate_path):
+def verify(baseline_path, candidate_path, expected_baseline_tau=1.0,
+           expected_candidate_tau=0.5):
     baseline = _read(baseline_path)
     candidate = _read(candidate_path)
     for path, expected in EXPECTED.items():
         if _at(baseline, path) != expected or _at(candidate, path) != expected:
             raise ProtocolError("Protocol mismatch {}".format(".".join(path)))
-    if float(_at(baseline, ("MODEL", "MULTI_GRANULARITY_GATING_TAU"))) != 1.0:
-        raise ProtocolError("Baseline gate temperature is not 1.0")
-    if float(_at(candidate, ("MODEL", "MULTI_GRANULARITY_GATING_TAU"))) != 0.5:
-        raise ProtocolError("Candidate gate temperature is not 0.5")
+    if float(_at(baseline, ("MODEL", "MULTI_GRANULARITY_GATING_TAU"))) != float(expected_baseline_tau):
+        raise ProtocolError("Baseline gate temperature is not {}".format(expected_baseline_tau))
+    if float(_at(candidate, ("MODEL", "MULTI_GRANULARITY_GATING_TAU"))) != float(expected_candidate_tau):
+        raise ProtocolError("Candidate gate temperature is not {}".format(expected_candidate_tau))
     differences = _leaf_differences(baseline, candidate)
     unexpected = [item for item in differences if item[0] not in ALLOWED_LEAF_DIFFERENCES]
     if unexpected:
@@ -80,7 +81,9 @@ def verify(baseline_path, candidate_path):
     return {
         "baseline_config": str(Path(baseline_path).resolve()),
         "candidate_config": str(Path(candidate_path).resolve()),
-        "algorithm_variable": "MODEL.MULTI_GRANULARITY_GATING_TAU: 1.0 -> 0.5",
+        "algorithm_variable": "MODEL.MULTI_GRANULARITY_GATING_TAU: {} -> {}".format(
+            expected_baseline_tau, expected_candidate_tau
+        ),
         "allowed_differences": [".".join(item[0]) for item in differences],
         "status": "verified",
     }
@@ -90,8 +93,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-config", required=True)
     parser.add_argument("--candidate-config", required=True)
+    parser.add_argument("--expected-baseline-tau", type=float, default=1.0)
+    parser.add_argument("--expected-candidate-tau", type=float, default=0.5)
     args = parser.parse_args(argv)
-    print(json.dumps(verify(args.baseline_config, args.candidate_config),
+    if args.expected_baseline_tau <= 0.0 or args.expected_candidate_tau <= 0.0:
+        parser.error("Expected gate temperatures must be positive")
+    print(json.dumps(verify(
+        args.baseline_config, args.candidate_config,
+        args.expected_baseline_tau, args.expected_candidate_tau,
+    ),
                      ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
