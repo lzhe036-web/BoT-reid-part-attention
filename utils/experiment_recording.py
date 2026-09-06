@@ -165,6 +165,11 @@ FORMAL_RESOLVED_DEFAULTS = {
     "MODEL.MULTI_GRANULARITY_GATING_INPUT": "global",
     "MODEL.MULTI_GRANULARITY_GATING_TAU": 1.0,
     "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION": "scaled_softmax",
+    # E1's fusion switch is an opt-in dynamic-gating extension.  The legacy
+    # static formal protocol remains valid only with these resolved defaults;
+    # an enabled residual must use its dedicated E1 finalizer/profile.
+    "MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL": False,
+    "MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA": 0.0,
 }
 
 LEGACY_STATIC_RUN_FIELDS = (

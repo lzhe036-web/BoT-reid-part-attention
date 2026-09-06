@@ -20,6 +20,10 @@ import utils.multigranularity_signatures as signatures
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+E1_CONFIG_PATH = (
+    "configs/softmax_triplet_c2_l03_multi_granularity_dynamic_gating_"
+    "g2_e1_static_dynamic_alpha0p5_autodl.yml"
+)
 
 
 class FeatureSignatureTest(unittest.TestCase):
@@ -86,6 +90,16 @@ class FeatureSignatureTest(unittest.TestCase):
         modified["MODEL"]["MULTI_GRANULARITY_GATING_TAU"] = 3.5
         evidence = self.evidence(current_config=modified)
         self.assertEqual(evidence["feature_compatibility_status"], "compatible")
+
+    def test_static_dynamic_residual_is_fusion_evidence_not_shared_feature_change(self):
+        e1 = yaml.safe_load((REPO_ROOT / E1_CONFIG_PATH).read_text(encoding="utf-8"))
+        evidence = self.evidence(current_config=e1)
+        self.assertEqual(evidence["feature_compatibility_status"], "compatible")
+        residual = evidence["fusion_gating_signature"]["current"].get(
+            "static_dynamic_residual"
+        )
+        self.assertEqual(residual["alpha"], 0.5)
+        self.assertEqual(residual["local_formula"], "(1+alpha*w_k)*z_k")
 
     def test_shared_baseline_forward_change_is_detected_and_named(self):
         sources = dict(self.current_sources)
