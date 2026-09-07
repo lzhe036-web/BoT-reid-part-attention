@@ -10,13 +10,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import torch
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from config import cfg
+from modeling import build_model
 from tools.analyze_g2_global_local_gating import analyze
+from tools.analyze_dynamic_gating import _state_dict
 from tools.package_g2_c_hidden256_tau0p5_result import package
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import (
@@ -90,6 +94,30 @@ def _read_csv(path):
         return list(csv.DictReader(handle))
 
 
+def _parameter_counts(configuration, checkpoint_path):
+    """Measure counts from the exact selected checkpoint/config pair."""
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+    state = _state_dict(checkpoint)
+    classifier_key = "classifier.weight"
+    if classifier_key not in state or state[classifier_key].dim() != 2:
+        raise ValueError("Selected G2-C checkpoint has no classifier weight")
+    model_cfg = configuration.clone()
+    model_cfg.defrost()
+    model_cfg.MODEL.PRETRAIN_CHOICE = "none"
+    model_cfg.MODEL.PRETRAIN_PATH = ""
+    model_cfg.freeze()
+    model = build_model(model_cfg, int(state[classifier_key].shape[0]))
+    model.load_state_dict(state, strict=True)
+    controller = model.multi_granularity_dynamic_gate
+    return {
+        "measurement_source": "selected checkpoint loaded into resolved-config model",
+        "total_parameters": int(sum(item.numel() for item in model.parameters())),
+        "trainable_parameters": int(sum(item.numel() for item in model.parameters() if item.requires_grad)),
+        "controller_parameters": int(sum(item.numel() for item in controller.parameters())),
+        "controller_trainable_parameters": int(sum(item.numel() for item in controller.parameters() if item.requires_grad)),
+    }
+
+
 def finalize(config_path, output_dir):
     config_path = Path(config_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -128,6 +156,7 @@ def finalize(config_path, output_dir):
         checkpoint_rows, validation_records
     )
     checkpoint_path = output_dir / selected_checkpoint["relative_path"]
+    parameter_counts = _parameter_counts(configuration, checkpoint_path)
 
     epoch_stats_path = output_dir / "dynamic_gating_epoch_stats.jsonl"
     epoch_records = read_gating_epoch_records(epoch_stats_path)
@@ -168,6 +197,7 @@ def finalize(config_path, output_dir):
         "gating_temperature": EXPECTED_GATING_TAU,
         "controller_architecture": EXPECTED_CONTROLLER,
         "controller_hidden_dim": EXPECTED_HIDDEN_DIM,
+        "parameter_counts": parameter_counts,
         "gate_outputs": ["w2", "w4", "w6"],
         "checkpoint_selection_rule": (
             "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"

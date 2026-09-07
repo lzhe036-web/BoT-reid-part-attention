@@ -222,6 +222,7 @@ def package(output_dir):
         "seed": 42, "controller_architecture": "mlp", "controller_hidden_dim": 256,
         "gating_input": "concat([g,z2,z4,z6])", "gating_temperature": 0.5,
         "selected_checkpoint": result["selected_checkpoint"],
+        "parameter_counts": result.get("parameter_counts", "not_recorded"),
         "gate_sample_protocol": analysis_manifest["test_weight_protocol"],
         "gate_sample_count": len(package_rows), "retrieval_metric_protocol": metric_row["metric_source"],
         "controller_block_proxy": analysis_manifest["controller_block_plot_semantics"],
