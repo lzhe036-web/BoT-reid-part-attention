@@ -145,17 +145,17 @@ def _resolve_image(market_root, row):
     raise ComparisonError("Frozen candidate image is absent: {}".format(relative))
 
 
-def _load_candidate_config(path):
+def _load_candidate_config(path, expected_gating_input="concat_global_local"):
     configuration = cfg.clone()
     configuration.merge_from_file(str(path))
     configuration.freeze()
     if (str(configuration.DATASETS.NAMES).lower() != "market1501"
             or int(configuration.SEED) != 42
-            or str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT) != "concat_global_local"
+            or str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT) != expected_gating_input
             or float(configuration.MODEL.MULTI_GRANULARITY_GATING_TAU) != 0.5
             or str(configuration.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION) != "scaled_softmax"
             or list(configuration.MODEL.MULTI_GRANULARITY_PART_SCALES) != list(SCALES)):
-        raise ComparisonError("Candidate config is not the expected G2 τg=0.5 protocol")
+        raise ComparisonError("Candidate config is not the expected τg=0.5 protocol")
     return configuration
 
 

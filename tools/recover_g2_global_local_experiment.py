@@ -54,6 +54,9 @@ EXPECTED_PARENT_COMMIT = None
 EXPECTED_EPOCHS = (40, 80, 120)
 EXPECTED_GATE_EPOCHS = tuple(range(1, 121))
 EXPECTED_GATING_INPUT = "concat_global_local"
+EXPECTED_GATING_INPUT_DESCRIPTION = "concat([g, z2, z4, z6])"
+EXPECTED_CONTROLLER_INPUT_DIM = 2816
+EXPECTED_DELTA46_DEFINITION = NOT_APPLICABLE
 EXPECTED_GATING_TAU = 1.0
 SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
 RESULT_FILENAME = "g2_formal_result.json"
@@ -61,6 +64,7 @@ METHOD_VARIANT = "g2_global_local_per_sample_dynamic_gating"
 METHOD_LABEL = "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]"
 BASELINE_LABEL = "C2-L03 + MGP concat"
 REQUIRE_RESULT_GATING_TEMPERATURE = False
+REQUIRE_RESULT_INPUT_METADATA = False
 DEFAULT_CONFIG = (
     REPO_ROOT
     / "configs"
@@ -248,8 +252,17 @@ def _validate_result(output_dir, result, commit, validation_records,
             result.get("gating_temperature"), EXPECTED_GATING_TAU
     ):
         raise G2RecoveryError("G2 result has the wrong gating temperature")
-    if result.get("gating_input") != "concat([g, z2, z4, z6])":
+    if result.get("gating_input") != EXPECTED_GATING_INPUT_DESCRIPTION:
         raise G2RecoveryError("G2 result has the wrong controller input")
+    if REQUIRE_RESULT_INPUT_METADATA:
+        if result.get("gating_input_mode") != EXPECTED_GATING_INPUT:
+            raise G2RecoveryError("G2 result has the wrong controller-input mode")
+        if int(result.get("controller_input_dim", -1)) != int(EXPECTED_CONTROLLER_INPUT_DIM):
+            raise G2RecoveryError("G2 result has the wrong controller-input dimension")
+        if result.get("retrieval_feature_dim") != 2816:
+            raise G2RecoveryError("G2 result changed the retrieval descriptor dimension")
+        if result.get("delta46_definition") != EXPECTED_DELTA46_DEFINITION:
+            raise G2RecoveryError("G2 result delta46 definition mismatch")
     if result.get("gate_outputs") != ["w2", "w4", "w6"]:
         raise G2RecoveryError("G2 result has the wrong gate-output semantics")
 
@@ -327,6 +340,13 @@ def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
     if sha256_file(analysis_manifest_path) != evidence.get("analysis_manifest_sha256"):
         raise G2RecoveryError("G2 analysis manifest SHA256 binding is inconsistent")
     analysis = _read_json(analysis_manifest_path, "G2 analysis manifest")
+    if REQUIRE_RESULT_INPUT_METADATA:
+        if analysis.get("gating_input_mode") != EXPECTED_GATING_INPUT:
+            raise G2RecoveryError("G2 analysis has the wrong controller-input mode")
+        if int(analysis.get("controller_input_dim", -1)) != int(EXPECTED_CONTROLLER_INPUT_DIM):
+            raise G2RecoveryError("G2 analysis has the wrong controller-input dimension")
+        if analysis.get("delta46_definition") != EXPECTED_DELTA46_DEFINITION:
+            raise G2RecoveryError("G2 analysis delta46 definition mismatch")
     if analysis.get("checkpoint_sha256") != checkpoint_sha:
         raise G2RecoveryError("G2 analysis is bound to a different checkpoint")
     if analysis.get("config_sha256") != sha256_file(config_path):
@@ -650,6 +670,13 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "alignment_temperature": NOT_APPLICABLE,
             "gating_mode": "per_sample_dynamic_gating",
             "gating_input": EXPECTED_GATING_INPUT,
+            "gating_input_description": EXPECTED_GATING_INPUT_DESCRIPTION,
+            "controller_input_dim": EXPECTED_CONTROLLER_INPUT_DIM,
+            "retrieval_feature_dim": 2816,
+            "delta46_definition": EXPECTED_DELTA46_DEFINITION,
+            "controller_parameter_count": result.get(
+                "controller_parameter_count", NOT_RECORDED
+            ),
             "gating_temperature": EXPECTED_GATING_TAU,
             "gating_normalization": "scaled_softmax",
             "scale_order": "2,4,6",

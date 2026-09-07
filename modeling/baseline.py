@@ -206,12 +206,16 @@ class MultiGranularityDynamicGate(nn.Module):
 
     ``global`` (G1) feeds the global descriptor ``g`` to the controller.  The
     ``concat_global_local`` variant (G2) feeds ``[g, z2, z4, z6]`` before the
-    same controller.  In both cases the controller still produces three
+    same controller.  ``concat_global_local_diff46`` (G2-D1) appends the
+    graph-connected element-wise absolute difference ``|z4-z6|``.  In every
+    mode the controller still produces three
     weights, one for each existing local scale descriptor; it does not add a
     fourth global-feature gate.
     """
 
-    VALID_GATING_INPUTS = ('global', 'concat_global_local')
+    VALID_GATING_INPUTS = (
+        'global', 'concat_global_local', 'concat_global_local_diff46'
+    )
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
                  gating_input='global', normalization='scaled_softmax',
@@ -247,18 +251,43 @@ class MultiGranularityDynamicGate(nn.Module):
         self.local_feature_dim = (
             None if local_feature_dim is None else int(local_feature_dim)
         )
-        if self.gating_input == 'concat_global_local':
+        if self.gating_input in (
+                'concat_global_local', 'concat_global_local_diff46'):
             if self.local_feature_dim is None or self.local_feature_dim <= 0:
                 raise ValueError(
                     'concat_global_local gating requires a positive '
                     'local_feature_dim'
                 )
-            self.controller_input_dim = (
-                self.in_planes + self.num_scales * self.local_feature_dim
+            self.controller_input_dim = self.in_planes + (
+                self.num_scales * self.local_feature_dim
             )
+            if self.gating_input == 'concat_global_local_diff46':
+                if self.num_scales != 3:
+                    raise ValueError(
+                        'concat_global_local_diff46 requires exactly three '
+                        'local scale features ordered as z2,z4,z6'
+                    )
+                self.controller_input_dim += self.local_feature_dim
         else:
             self.controller_input_dim = self.in_planes
-        self.controller = nn.Linear(self.controller_input_dim, self.num_scales)
+        if self.gating_input == 'concat_global_local_diff46':
+            # Preserve the baseline G2-A CPU RNG advance: the controller is
+            # constructed before BNNeck/classifier, and changing 2816 to 3072
+            # would otherwise perturb their same-seed initialization.  Build a
+            # disposable G2-A-shaped layer first, then initialize the wider
+            # zeroed controller in an isolated RNG scope.
+            historical_width = self.in_planes + (
+                self.num_scales * self.local_feature_dim
+            )
+            nn.Linear(historical_width, self.num_scales)
+            with torch.random.fork_rng(devices=[]):
+                self.controller = nn.Linear(
+                    self.controller_input_dim, self.num_scales
+                )
+        else:
+            self.controller = nn.Linear(
+                self.controller_input_dim, self.num_scales
+            )
         nn.init.constant_(self.controller.weight, 0.0)
         nn.init.constant_(self.controller.bias, 0.0)
 
@@ -288,6 +317,11 @@ class MultiGranularityDynamicGate(nn.Module):
                     )
                 )
             checked.append(feature)
+        if self.gating_input == 'concat_global_local_diff46':
+            # The difference is intentionally neither detached nor normalized:
+            # it is a fifth controller-input block only, not a fourth gate.
+            delta46 = torch.abs(checked[1] - checked[2])
+            return torch.cat((global_feat,) + tuple(checked) + (delta46,), dim=1)
         return torch.cat((global_feat,) + tuple(checked), dim=1)
 
     def forward(self, global_feat, scale_features=None):

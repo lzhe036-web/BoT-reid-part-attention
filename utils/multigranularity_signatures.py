@@ -334,9 +334,16 @@ def _fusion_signature(configuration, dynamic):
         "dynamic_gating": bool(dynamic),
     }
     if dynamic:
+        gating_input = _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT")
+        controller_input_dim = 2048 + 3 * 256
+        input_blocks = ["g", "z2", "z4", "z6"]
+        if gating_input == "concat_global_local_diff46":
+            controller_input_dim += 256
+            input_blocks.append("abs(z4-z6)")
         payload["controller"] = {
-            "input": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT"),
-            "linear": [2048, 3],
+            "input": gating_input,
+            "input_blocks": input_blocks,
+            "linear": [controller_input_dim, 3],
             "temperature": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_TAU"),
             "normalization": _nested(
                 configuration, "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION"

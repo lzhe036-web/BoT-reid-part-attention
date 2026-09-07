@@ -60,19 +60,45 @@ def _write_csv(path, fieldnames, rows):
     _atomic_text(path, buffer.getvalue())
 
 
-def _load_configuration(config_path, expected_gating_tau=None):
+def _gate_input_description(gating_input):
+    descriptions = {
+        "concat_global_local": "concat([g, z2, z4, z6])",
+        "concat_global_local_diff46": "concat([g, z2, z4, z6, abs(z4-z6)])",
+    }
+    try:
+        return descriptions[gating_input]
+    except KeyError:
+        raise ValueError("Unsupported G2 controller-input mode: {!r}".format(gating_input))
+
+
+def _controller_blocks(configuration):
+    local_dim = int(configuration.MODEL.MULTI_GRANULARITY_PART_DIM)
+    gating_input = str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT)
+    blocks = [("g", 2048), ("z2", local_dim), ("z4", local_dim), ("z6", local_dim)]
+    if gating_input == "concat_global_local_diff46":
+        blocks.append(("delta46_abs_z4_minus_z6", local_dim))
+    elif gating_input != "concat_global_local":
+        raise ValueError("Unsupported G2 controller-input mode: {!r}".format(gating_input))
+    return tuple(blocks)
+
+
+def _load_configuration(config_path, expected_gating_tau=None,
+                        expected_gating_input=None):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
     if not configuration.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING:
         raise ValueError("The supplied config does not enable Dynamic Gating")
-    if configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT != "concat_global_local":
+    gating_input = str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT)
+    if gating_input not in ("concat_global_local", "concat_global_local_diff46"):
         raise ValueError(
-            "This G2 analyzer requires MULTI_GRANULARITY_GATING_INPUT="
-            "'concat_global_local', got {!r}".format(
-                configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT
-            )
+            "This G2 analyzer does not support MULTI_GRANULARITY_GATING_INPUT="
+            "{!r}".format(gating_input)
         )
+    if expected_gating_input is not None and gating_input != expected_gating_input:
+        raise ValueError("This analyzer requires gating input {!r}, got {!r}".format(
+            expected_gating_input, gating_input
+        ))
     if expected_gating_tau is not None and float(
             configuration.MODEL.MULTI_GRANULARITY_GATING_TAU
     ) != float(expected_gating_tau):
@@ -91,19 +117,18 @@ def _block_rows(state, configuration, checkpoint_sha256):
     if key not in state:
         raise ValueError("Checkpoint has no dynamic-gate controller weight")
     controller = state[key].detach().to(dtype=torch.float64, device="cpu")
-    local_dim = int(configuration.MODEL.MULTI_GRANULARITY_PART_DIM)
-    global_dim = int(controller.size(1) - len(SCALES) * local_dim)
-    expected = global_dim + len(SCALES) * local_dim
-    if controller.dim() != 2 or controller.size(0) != len(SCALES) or global_dim <= 0:
+    blocks = _controller_blocks(configuration)
+    expected = sum(width for _name, width in blocks)
+    if controller.dim() != 2 or controller.size(0) != len(SCALES):
         raise ValueError("Unexpected G2 controller shape {}".format(tuple(controller.shape)))
     if controller.size(1) != expected:
-        raise ValueError("Unexpected G2 controller input width")
-    boundaries = (
-        ("g", 0, global_dim),
-        ("z2", global_dim, global_dim + local_dim),
-        ("z4", global_dim + local_dim, global_dim + 2 * local_dim),
-        ("z6", global_dim + 2 * local_dim, expected),
-    )
+        raise ValueError("Unexpected G2 controller input width {} != {}".format(
+            controller.size(1), expected
+        ))
+    boundaries, offset = [], 0
+    for block, width in blocks:
+        boundaries.append((block, offset, offset + width))
+        offset += width
     rows = []
     for target_index, target_scale in enumerate(SCALES):
         for block, start, end in boundaries:
@@ -119,11 +144,11 @@ def _block_rows(state, configuration, checkpoint_sha256):
                 "rms_weight": float(torch.sqrt(torch.mean(values.square())).item()),
                 "mean_abs_weight": float(torch.mean(torch.abs(values)).item()),
             })
-    return rows, boundaries
+    return rows, tuple(boundaries)
 
 
 def _plot_block_magnitudes(rows, output_path):
-    labels = ("g", "z2", "z4", "z6")
+    labels = tuple(dict.fromkeys(row["input_block"] for row in rows))
     positions = np.arange(len(labels), dtype=np.float64)
     width = 0.22
     figure, axis = plt.subplots(figsize=(8.2, 4.8), dpi=180)
@@ -147,6 +172,7 @@ def _plot_block_magnitudes(rows, output_path):
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(output_path.with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -183,6 +209,7 @@ def _plot_history(rows, output_path):
         axis.legend()
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(output_path.with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
     return True
 
@@ -222,6 +249,7 @@ def _plot_sample_weight_distribution(series, output_path):
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(output_path.with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -230,7 +258,8 @@ def _sha256_text(path):
 
 
 def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
-            sample_limit=256, device=None, expected_gating_tau=None):
+            sample_limit=256, device=None, expected_gating_tau=None,
+            expected_gating_input=None):
     config_path = Path(config_path).resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -240,10 +269,18 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     if not epoch_stats_path.is_file():
         raise FileNotFoundError("Epoch gating statistics not found: {}".format(epoch_stats_path))
     output_dir.mkdir(parents=True, exist_ok=False)
-    configuration = _load_configuration(config_path, expected_gating_tau)
+    configuration = _load_configuration(
+        config_path, expected_gating_tau, expected_gating_input
+    )
     checkpoint_sha = sha256_file(checkpoint_path)
     checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
     state = _state_dict(checkpoint)
+    controller_parameter_count = sum(
+        int(value.numel()) for name, value in state.items()
+        if name.startswith("multi_granularity_dynamic_gate.controller.")
+    )
+    if controller_parameter_count <= 0:
+        raise ValueError("Checkpoint has no dynamic-gate controller parameters")
     block_rows, _boundaries = _block_rows(state, configuration, checkpoint_sha)
     block_csv = output_dir / "g2_controller_input_block_norms.csv"
     _write_csv(block_csv, list(block_rows[0].keys()), block_rows)
@@ -270,14 +307,26 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     _plot_sample_weight_distribution(series, weights_png)
 
     manifest = {
-        "analysis_type": "G2 global-plus-local Dynamic Gating observation",
+        "analysis_type": "G2 linear Dynamic Gating observation",
         "config_path": str(config_path),
         "config_sha256": sha256_file(config_path),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_sha,
         "epoch_statistics_path": str(epoch_stats_path),
         "epoch_statistics_sha256": sha256_file(epoch_stats_path),
-        "gating_input": "concat([g, z2, z4, z6])",
+        "gating_input": _gate_input_description(str(
+            configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT
+        )),
+        "gating_input_mode": str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT),
+        "controller_input_blocks": [name for name, _width in _controller_blocks(configuration)],
+        "controller_input_dim": sum(width for _name, width in _controller_blocks(configuration)),
+        "controller_parameter_count": controller_parameter_count,
+        "retrieval_feature_dim": 2816,
+        "delta46_definition": (
+            "torch.abs(z4-z6); unweighted; graph-connected; controller input only"
+            if str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT) == "concat_global_local_diff46"
+            else "not_applicable"
+        ),
         "gating_temperature": float(
             configuration.MODEL.MULTI_GRANULARITY_GATING_TAU
         ),
@@ -293,11 +342,14 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         "files": {
             "controller_block_norms_csv": {"path": str(block_csv), "sha256": _sha256_text(block_csv)},
             "controller_block_norms_png": {"path": str(block_png), "sha256": _sha256_text(block_png)},
+            "controller_block_norms_pdf": {"path": str(block_png.with_suffix(".pdf")), "sha256": _sha256_text(block_png.with_suffix(".pdf"))},
             "training_history_csv": {"path": str(history_csv), "sha256": _sha256_text(history_csv)},
             "training_history_png": {"path": str(history_png), "sha256": _sha256_text(history_png)},
+            "training_history_pdf": {"path": str(history_png.with_suffix(".pdf")), "sha256": _sha256_text(history_png.with_suffix(".pdf"))},
             "test_gate_samples_tsv": {"path": str(samples_path), "sha256": _sha256_text(samples_path)},
             "test_weight_summary_csv": {"path": str(weights_csv), "sha256": _sha256_text(weights_csv)},
             "test_weight_distribution_png": {"path": str(weights_png), "sha256": _sha256_text(weights_png)},
+            "test_weight_distribution_pdf": {"path": str(weights_png.with_suffix(".pdf")), "sha256": _sha256_text(weights_png.with_suffix(".pdf"))},
             "dynamic_gating_summary_json": {"path": str(summary_path), "sha256": _sha256_text(summary_path)},
         },
     }
@@ -315,6 +367,7 @@ def main(argv=None):
     parser.add_argument("--sample-limit", type=int, default=256)
     parser.add_argument("--device", default=None)
     parser.add_argument("--expected-gating-tau", type=float, default=None)
+    parser.add_argument("--expected-gating-input", default=None)
     args = parser.parse_args(argv)
     if args.sample_limit <= 0:
         parser.error("--sample-limit must be positive")
@@ -322,6 +375,7 @@ def main(argv=None):
         args.config_file, args.weight, args.output_dir, args.epoch_stats,
         sample_limit=args.sample_limit, device=args.device,
         expected_gating_tau=args.expected_gating_tau,
+        expected_gating_input=args.expected_gating_input,
     )
     print(str(manifest))
     return 0

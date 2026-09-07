@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from config import cfg
-from tools.analyze_g2_global_local_gating import analyze
+from tools.analyze_g2_global_local_gating import analyze, _gate_input_description
 from utils.dynamic_gating_evidence import read_gating_epoch_records
 from utils.experiment_recording import (
     atomic_write_json,
@@ -44,7 +44,8 @@ def _git(*arguments):
     return output.decode("utf-8", errors="replace").strip()
 
 
-def _load_configuration(config_path, output_dir, expected_gating_tau):
+def _load_configuration(config_path, output_dir, expected_gating_tau,
+                        expected_gating_input=EXPECTED_GATING_INPUT):
     configuration = cfg.clone()
     configuration.merge_from_file(str(config_path))
     configuration.freeze()
@@ -52,7 +53,7 @@ def _load_configuration(config_path, output_dir, expected_gating_tau):
         "SEED": (int(configuration.SEED), 42),
         "MODEL.MULTI_GRANULARITY_GATING_INPUT": (
             str(configuration.MODEL.MULTI_GRANULARITY_GATING_INPUT),
-            EXPECTED_GATING_INPUT,
+            expected_gating_input,
         ),
         "MODEL.MULTI_GRANULARITY_GATING_TAU": (
             float(configuration.MODEL.MULTI_GRANULARITY_GATING_TAU),
@@ -83,6 +84,7 @@ def _read_csv(path):
 
 def finalize(config_path, output_dir, expected_branch=EXPECTED_BRANCH,
              expected_gating_tau=EXPECTED_GATING_TAU,
+             expected_gating_input=EXPECTED_GATING_INPUT,
              experiment_label=DEFAULT_EXPERIMENT_LABEL,
              result_filename=DEFAULT_RESULT_FILENAME,
              analysis_dirname=DEFAULT_ANALYSIS_DIRNAME):
@@ -91,7 +93,7 @@ def finalize(config_path, output_dir, expected_branch=EXPECTED_BRANCH,
     if not output_dir.is_dir():
         raise FileNotFoundError("G2 output directory is absent: {}".format(output_dir))
     configuration = _load_configuration(
-        config_path, output_dir, expected_gating_tau
+        config_path, output_dir, expected_gating_tau, expected_gating_input
     )
 
     branch = _git("branch", "--show-current")
@@ -143,7 +145,10 @@ def finalize(config_path, output_dir, expected_branch=EXPECTED_BRANCH,
         epoch_stats_path,
         sample_limit=256,
         expected_gating_tau=float(expected_gating_tau),
+        expected_gating_input=expected_gating_input,
     )
+    with analysis_manifest.open("r", encoding="utf-8") as handle:
+        analysis_payload = json.load(handle)
     test_weight_rows = _read_csv(
         analysis_dir / "g2_gate_test_weight_summary.csv"
     )
@@ -157,7 +162,22 @@ def finalize(config_path, output_dir, expected_branch=EXPECTED_BRANCH,
         "commit": commit,
         "seed": 42,
         "gating_temperature": float(expected_gating_tau),
-        "gating_input": "concat([g, z2, z4, z6])",
+        "gating_input": _gate_input_description(expected_gating_input),
+        "gating_input_mode": expected_gating_input,
+        "controller_input_dim": int(
+            configuration.MODEL.MULTI_GRANULARITY_PART_DIM *
+            (4 if expected_gating_input == "concat_global_local_diff46" else 3)
+            + 2048
+        ),
+        "controller_parameter_count": int(
+            analysis_payload["controller_parameter_count"]
+        ),
+        "retrieval_feature_dim": 2816,
+        "delta46_definition": (
+            "torch.abs(z4-z6); unweighted; graph-connected; controller input only"
+            if expected_gating_input == "concat_global_local_diff46"
+            else "not_applicable"
+        ),
         "gate_outputs": ["w2", "w4", "w6"],
         "checkpoint_selection_rule": (
             "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
@@ -200,6 +220,7 @@ def main(argv=None):
     parser.add_argument("--expected-branch", default=EXPECTED_BRANCH)
     parser.add_argument("--expected-gating-tau", type=float,
                         default=EXPECTED_GATING_TAU)
+    parser.add_argument("--expected-gating-input", default=EXPECTED_GATING_INPUT)
     parser.add_argument("--experiment-label", default=DEFAULT_EXPERIMENT_LABEL)
     parser.add_argument("--result-filename", default=DEFAULT_RESULT_FILENAME)
     parser.add_argument("--analysis-dirname", default=DEFAULT_ANALYSIS_DIRNAME)
@@ -210,6 +231,7 @@ def main(argv=None):
         args.config_file, args.output_dir,
         expected_branch=args.expected_branch,
         expected_gating_tau=args.expected_gating_tau,
+        expected_gating_input=args.expected_gating_input,
         experiment_label=args.experiment_label,
         result_filename=args.result_filename,
         analysis_dirname=args.analysis_dirname,
