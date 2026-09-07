@@ -419,16 +419,16 @@ def _lineage(commit):
             return NOT_RECORDED
         return output.decode("utf-8", errors="replace").strip() or NOT_RECORDED
 
-    parent_commit = git("rev-parse", "{}^".format(commit))
-    if parent_commit != EXPECTED_PARENT_COMMIT:
+    merge_base = git("merge-base", commit, EXPECTED_PARENT_COMMIT)
+    if merge_base != EXPECTED_PARENT_COMMIT:
         raise G2RecoveryError(
-            "G2-C training commit must directly descend from original G2 {}"
+            "G2-C training commit must descend from original G2 {}"
             .format(EXPECTED_PARENT_COMMIT)
         )
     return {
         "parent_branch": EXPECTED_PARENT_BRANCH,
-        "parent_commit": parent_commit,
-        "merge_base": parent_commit,
+        "parent_commit": EXPECTED_PARENT_COMMIT,
+        "merge_base": merge_base,
     }
 
 

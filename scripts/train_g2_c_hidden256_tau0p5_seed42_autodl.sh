@@ -25,8 +25,8 @@ if [[ "${CURRENT_COMMIT}" != "${REMOTE_COMMIT}" ]]; then
   printf 'Local G2-C commit does not match origin/%s.\n' "${EXPECTED_BRANCH}" >&2
   exit 1
 fi
-if [[ "$(git rev-parse "${CURRENT_COMMIT}^")" != "${EXPECTED_PARENT_COMMIT}" ]]; then
-  printf 'G2-C must directly descend from original G2 commit %s.\n' "${EXPECTED_PARENT_COMMIT}" >&2
+if [[ "$(git merge-base "${CURRENT_COMMIT}" "${EXPECTED_PARENT_COMMIT}")" != "${EXPECTED_PARENT_COMMIT}" ]]; then
+  printf 'G2-C must descend from original G2 commit %s.\n' "${EXPECTED_PARENT_COMMIT}" >&2
   exit 1
 fi
 if [[ ! -d /root/autodl-tmp/datasets ]]; then

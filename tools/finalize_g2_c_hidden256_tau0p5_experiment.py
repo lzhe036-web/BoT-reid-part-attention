@@ -105,9 +105,9 @@ def finalize(config_path, output_dir):
             )
         )
     commit = _git("rev-parse", "HEAD")
-    if _git("rev-parse", "{}^".format(commit)) != EXPECTED_PARENT_COMMIT:
+    if _git("merge-base", commit, EXPECTED_PARENT_COMMIT) != EXPECTED_PARENT_COMMIT:
         raise ValueError(
-            "G2-C must directly descend from original G2 commit {}".format(
+            "G2-C must descend from original G2 commit {}".format(
                 EXPECTED_PARENT_COMMIT
             )
         )

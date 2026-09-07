@@ -65,7 +65,7 @@ def _write_csv(path, fieldnames, rows):
 
 def _parse_stable_key(key):
     fields = str(key).split("|")
-    if len(fields) != 5 or fields[0] not in ("query", "gallery"):
+    if len(fields) != 4 or fields[0] not in ("query", "gallery"):
         raise ValueError("Invalid stable sample key: {!r}".format(key))
     return fields[0], fields[1], int(fields[2]), int(fields[3])
 
