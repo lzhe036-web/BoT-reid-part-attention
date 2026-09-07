@@ -89,6 +89,12 @@ class G2Diff46PackageTest(unittest.TestCase):
             self.assertEqual([row["relative_image_path"] for row in mapping], ["market1501/query/0001_c1s1_000001_00.jpg", "market1501/bounding_box_test/0002_c2s1_000001_00.jpg"])
             self.assertTrue(all(row["mapping_status"].startswith("sha256_") for row in mapping))
 
+    def test_export_script_checks_hashes_from_the_package_directory(self):
+        script = (REPO_ROOT / "scripts" / "export_g2_diff46_result_autodl.sh").read_text(encoding="utf-8")
+        self.assertIn('(cd "${PACKAGE_DIR}" && sha256sum -c SHA256SUMS)', script)
+        self.assertIn('tar -C "$(dirname "${PACKAGE_DIR}")" -czf "${ARCHIVE}"', script)
+        self.assertNotIn('(cd "${OUTPUT_DIR}" && sha256sum -c', script)
+
 
 if __name__ == "__main__":
     unittest.main()

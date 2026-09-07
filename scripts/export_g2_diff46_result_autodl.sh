@@ -10,7 +10,7 @@ test -f "${OUTPUT_DIR}/g2_d1_formal_result.json" || { echo "Formal result is abs
 test -s "${PACKAGE_DIR}/SHA256SUMS" || { echo "Delivery package is absent or incomplete." >&2; exit 1; }
 test ! -e "${ARCHIVE}" && test ! -e "${ARCHIVE}.sha256" || { echo "Refusing to overwrite export." >&2; exit 1; }
 mkdir -p "${EXPORT_DIR}"
-(cd "${OUTPUT_DIR}" && sha256sum -c "$(basename "${PACKAGE_DIR}")/SHA256SUMS")
-tar -C "${OUTPUT_DIR}" -czf "${ARCHIVE}" "$(basename "${PACKAGE_DIR}")"
+(cd "${PACKAGE_DIR}" && sha256sum -c SHA256SUMS)
+tar -C "$(dirname "${PACKAGE_DIR}")" -czf "${ARCHIVE}" "$(basename "${PACKAGE_DIR}")"
 sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
 printf 'archive=%s\nsha256=%s\n' "${ARCHIVE}" "${ARCHIVE}.sha256"
