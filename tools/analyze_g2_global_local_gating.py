@@ -76,10 +76,36 @@ def _load_configuration(config_path):
     return configuration
 
 
+def _controller_metadata(configuration):
+    return {
+        "architecture": str(configuration.MODEL.MULTI_GRANULARITY_GATING_CONTROLLER),
+        "hidden_dim": int(configuration.MODEL.MULTI_GRANULARITY_GATING_HIDDEN_DIM),
+    }
+
+
 def _block_rows(state, configuration, checkpoint_sha256):
+    metadata = _controller_metadata(configuration)
+    if metadata["architecture"] == "mlp":
+        # An MLP has no direct input-block-to-logit coefficient matrix.  A
+        # fabricated norm would be misleading: per-sample p/w evidence remains
+        # valid, while this linear-only proxy is explicitly not applicable.
+        return [{
+            "checkpoint_sha256": checkpoint_sha256,
+            "controller_architecture": "mlp",
+            "controller_hidden_dim": metadata["hidden_dim"],
+            "applicability": "not_applicable",
+            "reason": "MLP has no direct 2816-to-3 controller coefficient matrix",
+            "target_gate": "not_applicable",
+            "input_block": "not_applicable",
+            "input_width": "not_applicable",
+            "l2_norm": "not_applicable",
+            "rms_weight": "not_applicable",
+            "mean_abs_weight": "not_applicable",
+        }], None
+
     key = "multi_granularity_dynamic_gate.controller.weight"
     if key not in state:
-        raise ValueError("Checkpoint has no dynamic-gate controller weight")
+        raise ValueError("Checkpoint has no linear dynamic-gate controller weight")
     controller = state[key].detach().to(dtype=torch.float64, device="cpu")
     local_dim = int(configuration.MODEL.MULTI_GRANULARITY_PART_DIM)
     global_dim = int(controller.size(1) - len(SCALES) * local_dim)
@@ -102,6 +128,10 @@ def _block_rows(state, configuration, checkpoint_sha256):
             width = int(end - start)
             rows.append({
                 "checkpoint_sha256": checkpoint_sha256,
+                "controller_architecture": "linear",
+                "controller_hidden_dim": "not_applicable",
+                "applicability": "applicable",
+                "reason": "direct linear controller coefficient",
                 "target_gate": "w{}".format(target_scale),
                 "input_block": block,
                 "input_width": width,
@@ -113,6 +143,25 @@ def _block_rows(state, configuration, checkpoint_sha256):
 
 
 def _plot_block_magnitudes(rows, output_path):
+    if rows[0].get("applicability") == "not_applicable":
+        figure, axis = plt.subplots(figsize=(8.2, 3.2), dpi=180)
+        axis.axis("off")
+        axis.text(
+            0.5, 0.58,
+            "Controller input-block coefficient plot: not applicable",
+            ha="center", va="center", fontsize=12, weight="bold",
+        )
+        axis.text(
+            0.5, 0.36,
+            "The configured controller is an MLP, so it has no direct\n"
+            "2816-to-3 coefficient matrix. Per-sample gate p/w are exported separately.",
+            ha="center", va="center", fontsize=10,
+        )
+        figure.tight_layout()
+        figure.savefig(str(output_path), bbox_inches="tight")
+        figure.savefig(str(Path(output_path).with_suffix(".pdf")), bbox_inches="tight")
+        plt.close(figure)
+        return
     labels = ("g", "z2", "z4", "z6")
     positions = np.arange(len(labels), dtype=np.float64)
     width = 0.22
@@ -137,6 +186,7 @@ def _plot_block_magnitudes(rows, output_path):
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(Path(output_path).with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -173,6 +223,7 @@ def _plot_history(rows, output_path):
         axis.legend()
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(Path(output_path).with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
     return True
 
@@ -212,6 +263,7 @@ def _plot_sample_weight_distribution(series, output_path):
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(str(output_path), bbox_inches="tight")
+    figure.savefig(str(Path(output_path).with_suffix(".pdf")), bbox_inches="tight")
     plt.close(figure)
 
 
@@ -268,23 +320,30 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         "epoch_statistics_path": str(epoch_stats_path),
         "epoch_statistics_sha256": sha256_file(epoch_stats_path),
         "gating_input": "concat([g, z2, z4, z6])",
+        "controller_architecture": _controller_metadata(configuration)["architecture"],
+        "controller_hidden_dim": _controller_metadata(configuration)["hidden_dim"],
         "controller_output_semantics": (
             "three scaled-softmax weights applied to z2, z4, z6; no direct g weight"
         ),
         "controller_block_plot_semantics": (
             "RMS magnitude of learned linear-controller coefficients by input block; "
             "not a per-sample branch-weight allocation"
+            if block_rows[0].get("applicability") == "applicable"
+            else "not_applicable: the MLP has no direct input-block-to-logit coefficient matrix"
         ),
         "test_weight_protocol": evidence_summary["selection_rule"],
         "test_weight_sample_count": evidence_summary["selected_sample_count"],
         "files": {
             "controller_block_norms_csv": {"path": str(block_csv), "sha256": _sha256_text(block_csv)},
             "controller_block_norms_png": {"path": str(block_png), "sha256": _sha256_text(block_png)},
+            "controller_block_norms_pdf": {"path": str(block_png.with_suffix(".pdf")), "sha256": _sha256_text(block_png.with_suffix(".pdf"))},
             "training_history_csv": {"path": str(history_csv), "sha256": _sha256_text(history_csv)},
             "training_history_png": {"path": str(history_png), "sha256": _sha256_text(history_png)},
+            "training_history_pdf": {"path": str(history_png.with_suffix(".pdf")), "sha256": _sha256_text(history_png.with_suffix(".pdf"))},
             "test_gate_samples_tsv": {"path": str(samples_path), "sha256": _sha256_text(samples_path)},
             "test_weight_summary_csv": {"path": str(weights_csv), "sha256": _sha256_text(weights_csv)},
             "test_weight_distribution_png": {"path": str(weights_png), "sha256": _sha256_text(weights_png)},
+            "test_weight_distribution_pdf": {"path": str(weights_png.with_suffix(".pdf")), "sha256": _sha256_text(weights_png.with_suffix(".pdf"))},
             "dynamic_gating_summary_json": {"path": str(summary_path), "sha256": _sha256_text(summary_path)},
         },
     }

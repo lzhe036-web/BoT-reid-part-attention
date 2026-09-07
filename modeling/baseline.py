@@ -212,10 +212,12 @@ class MultiGranularityDynamicGate(nn.Module):
     """
 
     VALID_GATING_INPUTS = ('global', 'concat_global_local')
+    VALID_CONTROLLERS = ('linear', 'mlp')
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
                  gating_input='global', normalization='scaled_softmax',
-                 local_feature_dim=None):
+                 local_feature_dim=None, controller='linear',
+                 controller_hidden_dim=0):
         super(MultiGranularityDynamicGate, self).__init__()
         if gating_input not in self.VALID_GATING_INPUTS:
             raise ValueError(
@@ -238,12 +240,34 @@ class MultiGranularityDynamicGate(nn.Module):
         if (not isinstance(num_scales, int) or isinstance(num_scales, bool)
                 or num_scales <= 0):
             raise ValueError('num_scales must be a positive integer')
+        controller = str(controller).lower()
+        if controller not in self.VALID_CONTROLLERS:
+            raise ValueError(
+                "MULTI_GRANULARITY_GATING_CONTROLLER must be one of {}, got {!r}"
+                .format(self.VALID_CONTROLLERS, controller)
+            )
+        if (not isinstance(controller_hidden_dim, int)
+                or isinstance(controller_hidden_dim, bool)):
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_HIDDEN_DIM must be an integer, got {!r}'
+                .format(controller_hidden_dim)
+            )
+        if controller == 'mlp' and controller_hidden_dim <= 0:
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_HIDDEN_DIM must be positive for an MLP'
+            )
+        if controller == 'linear' and controller_hidden_dim not in (0,):
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_HIDDEN_DIM must be 0 for the linear controller'
+            )
 
         self.in_planes = int(in_planes)
         self.num_scales = int(num_scales)
         self.temperature = float(temperature)
         self.gating_input = gating_input
         self.normalization = normalization
+        self.controller_architecture = controller
+        self.controller_hidden_dim = int(controller_hidden_dim)
         self.local_feature_dim = (
             None if local_feature_dim is None else int(local_feature_dim)
         )
@@ -258,9 +282,43 @@ class MultiGranularityDynamicGate(nn.Module):
             )
         else:
             self.controller_input_dim = self.in_planes
-        self.controller = nn.Linear(self.controller_input_dim, self.num_scales)
-        nn.init.constant_(self.controller.weight, 0.0)
-        nn.init.constant_(self.controller.bias, 0.0)
+        if self.controller_architecture == 'linear':
+            # This is intentionally retained verbatim for historical G1/G2
+            # checkpoints: controller.weight and controller.bias stay stable.
+            self.controller = nn.Linear(
+                self.controller_input_dim, self.num_scales
+            )
+            nn.init.constant_(self.controller.weight, 0.0)
+            nn.init.constant_(self.controller.bias, 0.0)
+        else:
+            # The historical linear controller construction consumes one
+            # [controller_input_dim, num_scales] Linear initialization before
+            # later modules (notably the classifier) are created.  Advance the
+            # caller RNG by exactly that same construction, then isolate the
+            # MLP's own random initialization.  This keeps every shared G2
+            # module bitwise-identical under a common seed.
+            historical_rng_advance = nn.Linear(
+                self.controller_input_dim, self.num_scales
+            )
+            del historical_rng_advance
+            # Creating the MLP Linear layers itself advances the CPU RNG.
+            # Isolating that construction prevents added capacity from
+            # perturbing the historical shared-module initialization stream.
+            with torch.random.fork_rng(devices=[]):
+                first = nn.Linear(
+                    self.controller_input_dim, self.controller_hidden_dim
+                )
+                final = nn.Linear(self.controller_hidden_dim, self.num_scales)
+                nn.init.kaiming_uniform_(
+                    first.weight, a=0.0, mode='fan_in', nonlinearity='relu'
+                )
+                nn.init.constant_(first.bias, 0.0)
+                # Zero logits preserve the G2 neutral initial condition, while
+                # the nonzero first layer can receive gradient after the output
+                # layer has made its first update.
+                nn.init.constant_(final.weight, 0.0)
+                nn.init.constant_(final.bias, 0.0)
+                self.controller = nn.Sequential(first, nn.ReLU(), final)
 
     def controller_input(self, global_feat, scale_features=None):
         """Return the configured controller input without changing descriptors."""
@@ -311,7 +369,9 @@ class Baseline(nn.Module):
                   multi_granularity_dynamic_gating=False,
                   multi_granularity_gating_input='global',
                   multi_granularity_gating_tau=1.0,
-                  multi_granularity_gating_normalization='scaled_softmax'):
+                  multi_granularity_gating_normalization='scaled_softmax',
+                  multi_granularity_gating_controller='linear',
+                  multi_granularity_gating_hidden_dim=0):
         super(Baseline, self).__init__()
         if part_attention and multi_granularity_part:
             raise ValueError(
@@ -464,6 +524,8 @@ class Baseline(nn.Module):
                         multi_granularity_gating_normalization
                     ).lower(),
                     local_feature_dim=self.multi_granularity_part_head.projection_dim,
+                    controller=str(multi_granularity_gating_controller).lower(),
+                    controller_hidden_dim=multi_granularity_gating_hidden_dim,
                 )
 
         if self.neck == 'no':

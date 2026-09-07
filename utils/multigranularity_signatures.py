@@ -334,15 +334,29 @@ def _fusion_signature(configuration, dynamic):
         "dynamic_gating": bool(dynamic),
     }
     if dynamic:
+        controller = _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_CONTROLLER") \
+            if "MULTI_GRANULARITY_GATING_CONTROLLER" in configuration.get("MODEL", {}) \
+            else "linear"
+        hidden_dim = _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_HIDDEN_DIM") \
+            if "MULTI_GRANULARITY_GATING_HIDDEN_DIM" in configuration.get("MODEL", {}) \
+            else 0
         payload["controller"] = {
             "input": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT"),
-            "linear": [2048, 3],
+            "architecture": controller,
+            "layers": (
+                [2048, 3] if controller == "linear"
+                else [2048, hidden_dim, 3]
+            ),
+            "activation": "not_applicable" if controller == "linear" else "relu",
             "temperature": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_TAU"),
             "normalization": _nested(
                 configuration, "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION"
             ),
             "weight_scale": 3.0,
-            "weight_initialization": "zeros",
+            "weight_initialization": (
+                "zeros" if controller == "linear"
+                else "kaiming_uniform_relu_then_zero_output"
+            ),
             "bias_initialization": "zeros",
         }
     else:

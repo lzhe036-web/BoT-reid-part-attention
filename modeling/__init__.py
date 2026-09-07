@@ -34,5 +34,7 @@ def build_model(cfg, num_classes):
         multi_granularity_gating_input=cfg.MODEL.MULTI_GRANULARITY_GATING_INPUT,
         multi_granularity_gating_tau=cfg.MODEL.MULTI_GRANULARITY_GATING_TAU,
         multi_granularity_gating_normalization=cfg.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION,
+        multi_granularity_gating_controller=cfg.MODEL.MULTI_GRANULARITY_GATING_CONTROLLER,
+        multi_granularity_gating_hidden_dim=cfg.MODEL.MULTI_GRANULARITY_GATING_HIDDEN_DIM,
     )
     return model

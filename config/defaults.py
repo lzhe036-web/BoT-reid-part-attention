@@ -65,6 +65,10 @@ _C.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING = False
 _C.MODEL.MULTI_GRANULARITY_GATING_INPUT = "global"
 _C.MODEL.MULTI_GRANULARITY_GATING_TAU = 1.0
 _C.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION = "scaled_softmax"
+# Keep the historical G1/G2 controller and state-dict keys as the default.
+# Experimental controller capacity is opt-in through an explicit configuration.
+_C.MODEL.MULTI_GRANULARITY_GATING_CONTROLLER = "linear"
+_C.MODEL.MULTI_GRANULARITY_GATING_HIDDEN_DIM = 0
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5
