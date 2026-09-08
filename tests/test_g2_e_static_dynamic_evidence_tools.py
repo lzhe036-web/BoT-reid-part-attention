@@ -1,10 +1,13 @@
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tools.analyze_g2_e_static_dynamic_alpha0p3_tau0p5 import _coefficient_rows, _statistics
 from tools import recover_g2_e_static_dynamic_alpha0p3_tau0p5_experiment as e_recovery
 from tools import recover_g2_global_local_experiment as shared_recovery
-from tools.package_g2_e_static_dynamic_alpha0p3_tau0p5_result import package
+from tools.package_g2_e_static_dynamic_alpha0p3_tau0p5_result import _write, package
 
 
 class G2EEvidenceToolsTest(unittest.TestCase):
@@ -54,6 +57,23 @@ class G2EEvidenceToolsTest(unittest.TestCase):
     def test_package_fails_closed_when_result_is_missing(self):
         with self.assertRaises(FileNotFoundError):
             package("missing-output-dir")
+
+    def test_delivery_writer_projects_analyzer_only_columns(self):
+        """Raw analyzer metadata must not make a strict delivery schema fail."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "per_sample_gating.tsv"
+            _write(path, ["stable_sample_key", "split", "p2"], [{
+                "stable_sample_key": "hashed-key",
+                "dataset_split": "query",
+                "entropy": "1.0",
+                "split": "query",
+                "p2": "0.5",
+            }], delimiter="\t")
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(rows, [{
+            "stable_sample_key": "hashed-key", "split": "query", "p2": "0.5",
+        }])
 
 
 if __name__ == "__main__":

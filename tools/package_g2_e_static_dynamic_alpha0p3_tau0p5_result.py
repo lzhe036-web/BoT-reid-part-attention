@@ -61,7 +61,13 @@ def _write(path, fields, rows, delimiter=","):
     writer = csv.DictWriter(buffer, fieldnames=fields, delimiter=delimiter,
                             lineterminator="\n")
     writer.writeheader()
-    writer.writerows(rows)
+    # Analyzer rows preserve provenance-only columns such as ``dataset_split``
+    # and ``entropy``.  Delivery tables have their own explicit schema (for
+    # example, the canonical ``split`` reconstructed from the stable key), so
+    # project each row onto that schema before serializing.  Indexing rather
+    # than ``get`` deliberately remains fail-closed for a missing required
+    # delivery field while harmless source-only columns cannot break export.
+    writer.writerows({field: row[field] for field in fields} for row in rows)
     _atomic_text(path, buffer.getvalue())
 
 
