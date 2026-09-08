@@ -211,6 +211,16 @@ def _nested(mapping, dotted_path):
     return value
 
 
+def _optional_nested(mapping, dotted_path, default):
+    """Read a post-baseline optional experiment setting without breaking old YAML."""
+    value = mapping
+    for part in dotted_path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return default
+        value = value[part]
+    return value
+
+
 def _load_yaml_text(text, label):
     value = yaml.safe_load(text)
     if not isinstance(value, dict):
@@ -340,6 +350,15 @@ def _fusion_signature(configuration, dynamic):
             "temperature": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_TAU"),
             "normalization": _nested(
                 configuration, "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION"
+            ),
+            "sparsification": _optional_nested(
+                configuration, "MODEL.MULTI_GRANULARITY_GATING_SPARSIFICATION", "none"
+            ),
+            "topk": _optional_nested(
+                configuration, "MODEL.MULTI_GRANULARITY_GATING_TOPK", 0
+            ),
+            "tie_break": _optional_nested(
+                configuration, "MODEL.MULTI_GRANULARITY_GATING_TIE_BREAK", "scale_order"
             ),
             "weight_scale": 3.0,
             "weight_initialization": "zeros",

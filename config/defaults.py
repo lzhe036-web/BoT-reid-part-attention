@@ -65,6 +65,13 @@ _C.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING = False
 _C.MODEL.MULTI_GRANULARITY_GATING_INPUT = "global"
 _C.MODEL.MULTI_GRANULARITY_GATING_TAU = 1.0
 _C.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION = "scaled_softmax"
+# Keep the historical dense controller behaviour unless an experiment opts in
+# to a declared sparse rule.  ``topk`` is intentionally separate from the
+# scaled-softmax normalization: it changes which scale probabilities can take
+# part in fusion, not the three-scale weight sum.
+_C.MODEL.MULTI_GRANULARITY_GATING_SPARSIFICATION = "none"
+_C.MODEL.MULTI_GRANULARITY_GATING_TOPK = 0
+_C.MODEL.MULTI_GRANULARITY_GATING_TIE_BREAK = "scale_order"
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5

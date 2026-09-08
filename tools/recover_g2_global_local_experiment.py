@@ -61,6 +61,10 @@ METHOD_VARIANT = "g2_global_local_per_sample_dynamic_gating"
 METHOD_LABEL = "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]"
 BASELINE_LABEL = "C2-L03 + MGP concat"
 REQUIRE_RESULT_GATING_TEMPERATURE = False
+REQUIRE_GATING_TOPK = False
+EXPECTED_GATING_SPARSIFICATION = None
+EXPECTED_GATING_TOPK = None
+EXPECTED_GATING_TIE_BREAK = None
 DEFAULT_CONFIG = (
     REPO_ROOT
     / "configs"
@@ -153,6 +157,21 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
                         label, ".".join(keys), actual, expected
                     )
                 )
+    if REQUIRE_GATING_TOPK:
+        topk_checks = (
+            (("MODEL", "MULTI_GRANULARITY_GATING_SPARSIFICATION"),
+             EXPECTED_GATING_SPARSIFICATION),
+            (("MODEL", "MULTI_GRANULARITY_GATING_TOPK"), EXPECTED_GATING_TOPK),
+            (("MODEL", "MULTI_GRANULARITY_GATING_TIE_BREAK"), EXPECTED_GATING_TIE_BREAK),
+        )
+        for keys, expected in topk_checks:
+            for label, payload in (("source", source), ("resolved", resolved)):
+                if _nested(payload, *keys) != expected:
+                    raise G2RecoveryError(
+                        "G2 {} Top-k config mismatch {}: {!r} != {!r}".format(
+                            label, ".".join(keys), _nested(payload, *keys), expected
+                        )
+                    )
     for label, payload in (("source", source), ("resolved", resolved)):
         configured_output = Path(str(_nested(payload, "OUTPUT_DIR"))).resolve()
         if configured_output != output_dir:
@@ -252,6 +271,20 @@ def _validate_result(output_dir, result, commit, validation_records,
         raise G2RecoveryError("G2 result has the wrong controller input")
     if result.get("gate_outputs") != ["w2", "w4", "w6"]:
         raise G2RecoveryError("G2 result has the wrong gate-output semantics")
+    if REQUIRE_GATING_TOPK:
+        expected_sparse = {
+            "gate_sparsification": EXPECTED_GATING_SPARSIFICATION,
+            "gate_topk": EXPECTED_GATING_TOPK,
+            "gate_tie_break": EXPECTED_GATING_TIE_BREAK,
+            "weight_scale": 3.0,
+        }
+        for key, expected in expected_sparse.items():
+            if result.get(key) != expected:
+                raise G2RecoveryError(
+                    "G2 result Top-k identity mismatch {}: {!r} != {!r}".format(
+                        key, result.get(key), expected
+                    )
+                )
 
     observed_validation_epochs = tuple(int(row["epoch"]) for row in validation_records)
     if observed_validation_epochs != EXPECTED_EPOCHS:

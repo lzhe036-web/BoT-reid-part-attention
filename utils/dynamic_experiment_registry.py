@@ -377,6 +377,9 @@ def validate_dynamic_configuration(configuration, static_configuration,
         "MODEL.MULTI_GRANULARITY_GATING_INPUT",
         "MODEL.MULTI_GRANULARITY_GATING_TAU",
         "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION",
+        "MODEL.MULTI_GRANULARITY_GATING_SPARSIFICATION",
+        "MODEL.MULTI_GRANULARITY_GATING_TOPK",
+        "MODEL.MULTI_GRANULARITY_GATING_TIE_BREAK",
         "OUTPUT_DIR",
     }
     if run_kind == "smoke":

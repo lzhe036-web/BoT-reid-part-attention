@@ -212,10 +212,13 @@ class MultiGranularityDynamicGate(nn.Module):
     """
 
     VALID_GATING_INPUTS = ('global', 'concat_global_local')
+    VALID_SPARSIFICATION = ('none', 'topk')
+    VALID_TIE_BREAKS = ('scale_order',)
 
     def __init__(self, in_planes, num_scales, temperature=1.0,
                  gating_input='global', normalization='scaled_softmax',
-                 local_feature_dim=None):
+                 local_feature_dim=None, sparsification='none', topk=0,
+                 tie_break='scale_order'):
         super(MultiGranularityDynamicGate, self).__init__()
         if gating_input not in self.VALID_GATING_INPUTS:
             raise ValueError(
@@ -238,12 +241,38 @@ class MultiGranularityDynamicGate(nn.Module):
         if (not isinstance(num_scales, int) or isinstance(num_scales, bool)
                 or num_scales <= 0):
             raise ValueError('num_scales must be a positive integer')
+        sparsification = str(sparsification).lower()
+        tie_break = str(tie_break).lower()
+        if sparsification not in self.VALID_SPARSIFICATION:
+            raise ValueError(
+                "MULTI_GRANULARITY_GATING_SPARSIFICATION must be one of {}, "
+                "got {!r}".format(self.VALID_SPARSIFICATION, sparsification)
+            )
+        if tie_break not in self.VALID_TIE_BREAKS:
+            raise ValueError(
+                "MULTI_GRANULARITY_GATING_TIE_BREAK must be one of {}, got {!r}"
+                .format(self.VALID_TIE_BREAKS, tie_break)
+            )
+        if isinstance(topk, bool) or not isinstance(topk, int):
+            raise ValueError('MULTI_GRANULARITY_GATING_TOPK must be an integer')
+        if sparsification == 'none' and topk != 0:
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_TOPK must be 0 when sparsification is none'
+            )
+        if sparsification == 'topk' and not 0 < topk < num_scales:
+            raise ValueError(
+                'MULTI_GRANULARITY_GATING_TOPK must be in [1, num_scales) for topk'
+            )
 
         self.in_planes = int(in_planes)
         self.num_scales = int(num_scales)
         self.temperature = float(temperature)
         self.gating_input = gating_input
         self.normalization = normalization
+        self.sparsification = sparsification
+        self.topk = int(topk)
+        self.tie_break = tie_break
+        self._last_sparsification = None
         self.local_feature_dim = (
             None if local_feature_dim is None else int(local_feature_dim)
         )
@@ -293,8 +322,40 @@ class MultiGranularityDynamicGate(nn.Module):
     def forward(self, global_feat, scale_features=None):
         controller_input = self.controller_input(global_feat, scale_features)
         logits = self.controller(controller_input)
-        probabilities = F.softmax(logits / self.temperature, dim=1)
+        scaled_logits = logits / self.temperature
+        dense_probabilities = F.softmax(scaled_logits, dim=1)
+        if self.sparsification == 'none':
+            probabilities = dense_probabilities
+            selection_mask = torch.ones_like(probabilities, dtype=torch.bool)
+            selection_boundary_tie = torch.zeros(
+                probabilities.size(0), dtype=torch.bool, device=probabilities.device
+            )
+        else:
+            # Stable sorting preserves the declared K2, K4, K6 order whenever
+            # logits tie.  The selected logits retain the normal softmax/loss
+            # gradient path; only the discrete membership decision is hard.
+            ranked = torch.argsort(scaled_logits, dim=1, descending=True, stable=True)
+            selected = ranked[:, :self.topk]
+            selection_mask = torch.zeros_like(scaled_logits, dtype=torch.bool)
+            selection_mask.scatter_(1, selected, True)
+            masked_logits = scaled_logits.masked_fill(~selection_mask, float('-inf'))
+            probabilities = F.softmax(masked_logits, dim=1)
+            if self.topk < self.num_scales:
+                sorted_logits = scaled_logits.gather(1, ranked)
+                selection_boundary_tie = torch.eq(
+                    sorted_logits[:, self.topk - 1], sorted_logits[:, self.topk]
+                )
+            else:
+                selection_boundary_tie = torch.zeros(
+                    probabilities.size(0), dtype=torch.bool, device=probabilities.device
+                )
         weights = float(self.num_scales) * probabilities
+        self._last_sparsification = {
+            'scaled_logits': scaled_logits,
+            'dense_probabilities': dense_probabilities,
+            'selection_mask': selection_mask,
+            'selection_boundary_tie': selection_boundary_tie,
+        }
         return logits, probabilities, weights
 
 
@@ -311,7 +372,10 @@ class Baseline(nn.Module):
                   multi_granularity_dynamic_gating=False,
                   multi_granularity_gating_input='global',
                   multi_granularity_gating_tau=1.0,
-                  multi_granularity_gating_normalization='scaled_softmax'):
+                  multi_granularity_gating_normalization='scaled_softmax',
+                  multi_granularity_gating_sparsification='none',
+                  multi_granularity_gating_topk=0,
+                  multi_granularity_gating_tie_break='scale_order'):
         super(Baseline, self).__init__()
         if part_attention and multi_granularity_part:
             raise ValueError(
@@ -464,6 +528,9 @@ class Baseline(nn.Module):
                         multi_granularity_gating_normalization
                     ).lower(),
                     local_feature_dim=self.multi_granularity_part_head.projection_dim,
+                    sparsification=multi_granularity_gating_sparsification,
+                    topk=multi_granularity_gating_topk,
+                    tie_break=multi_granularity_gating_tie_break,
                 )
 
         if self.neck == 'no':
@@ -500,6 +567,21 @@ class Baseline(nn.Module):
                     'logits': gate_logits.detach(),
                     'probabilities': probabilities.detach(),
                     'weights': weights.detach(),
+                    'dense_probabilities': (
+                        self.multi_granularity_dynamic_gate._last_sparsification[
+                            'dense_probabilities'
+                        ].detach()
+                    ),
+                    'selection_mask': (
+                        self.multi_granularity_dynamic_gate._last_sparsification[
+                            'selection_mask'
+                        ].detach()
+                    ),
+                    'selection_boundary_tie': (
+                        self.multi_granularity_dynamic_gate._last_sparsification[
+                            'selection_boundary_tie'
+                        ].detach()
+                    ),
                 }
             else:
                 self._last_dynamic_gating = None
