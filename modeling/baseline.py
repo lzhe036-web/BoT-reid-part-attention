@@ -311,7 +311,9 @@ class Baseline(nn.Module):
                   multi_granularity_dynamic_gating=False,
                   multi_granularity_gating_input='global',
                   multi_granularity_gating_tau=1.0,
-                  multi_granularity_gating_normalization='scaled_softmax'):
+                  multi_granularity_gating_normalization='scaled_softmax',
+                  multi_granularity_static_dynamic_residual=False,
+                  multi_granularity_static_dynamic_alpha=0.0):
         super(Baseline, self).__init__()
         if part_attention and multi_granularity_part:
             raise ValueError(
@@ -425,10 +427,43 @@ class Baseline(nn.Module):
         self.multi_granularity_dynamic_gating = multi_granularity_dynamic_gating
         self._last_dynamic_gating = None
 
+        if type(multi_granularity_static_dynamic_residual) is not bool:
+            raise ValueError(
+                'MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL must be a boolean, '
+                'got {!r}'.format(multi_granularity_static_dynamic_residual)
+            )
+        if (isinstance(multi_granularity_static_dynamic_alpha, bool)
+                or not isinstance(
+                    multi_granularity_static_dynamic_alpha, (int, float)
+                )
+                or not math.isfinite(
+                    float(multi_granularity_static_dynamic_alpha)
+                )
+                or float(multi_granularity_static_dynamic_alpha) < 0.0):
+            raise ValueError(
+                'MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA must be finite and '
+                'non-negative, got {!r}'.format(
+                    multi_granularity_static_dynamic_alpha
+                )
+            )
+        self.multi_granularity_static_dynamic_residual = (
+            multi_granularity_static_dynamic_residual
+        )
+        # This is a configured scalar, deliberately not an nn.Parameter.
+        self.multi_granularity_static_dynamic_alpha = float(
+            multi_granularity_static_dynamic_alpha
+        )
+
         if self.multi_granularity_dynamic_gating and not self.multi_granularity_part:
             raise ValueError(
                 'MODEL.MULTI_GRANULARITY_DYNAMIC_GATING=True requires '
                 'MODEL.MULTI_GRANULARITY_PART=True'
+            )
+        if (self.multi_granularity_static_dynamic_residual
+                and not self.multi_granularity_dynamic_gating):
+            raise ValueError(
+                'MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL=True requires '
+                'MODEL.MULTI_GRANULARITY_DYNAMIC_GATING=True'
             )
 
         if self.part_attention:
@@ -492,15 +527,44 @@ class Baseline(nn.Module):
                 gate_logits, probabilities, weights = (
                     self.multi_granularity_dynamic_gate(global_feat, scale_features)
                 )
-                scale_features = tuple(
-                    scale_feature * weights[:, index:index + 1]
-                    for index, scale_feature in enumerate(scale_features)
-                )
+                if self.multi_granularity_static_dynamic_residual:
+                    # G2-E: preserve z_static=[g,z2,z4,z6] and add only a
+                    # local residual alpha*[0,w2*z2,w4*z4,w6*z6].  The gate
+                    # has already consumed the original, unweighted features.
+                    residual_coefficients = (
+                        self.multi_granularity_static_dynamic_alpha * weights
+                    )
+                    local_coefficients = 1.0 + residual_coefficients
+                    applied_scale_features = tuple(
+                        scale_feature * local_coefficients[:, index:index + 1]
+                        for index, scale_feature in enumerate(scale_features)
+                    )
+                else:
+                    residual_coefficients = None
+                    local_coefficients = None
+                    # Original G2/G2-A dynamic fusion, intentionally unchanged.
+                    applied_scale_features = tuple(
+                        scale_feature * weights[:, index:index + 1]
+                        for index, scale_feature in enumerate(scale_features)
+                    )
                 self._last_dynamic_gating = {
                     'logits': gate_logits.detach(),
                     'probabilities': probabilities.detach(),
                     'weights': weights.detach(),
+                    'residual_coefficients': (
+                        None if residual_coefficients is None
+                        else residual_coefficients.detach()
+                    ),
+                    'local_coefficients': (
+                        None if local_coefficients is None
+                        else local_coefficients.detach()
+                    ),
+                    'static_dynamic_residual_enabled': (
+                        self.multi_granularity_static_dynamic_residual
+                    ),
+                    'static_dynamic_alpha': self.multi_granularity_static_dynamic_alpha,
                 }
+                scale_features = applied_scale_features
             else:
                 self._last_dynamic_gating = None
             fused_pre_bn = torch.cat((global_feat,) + scale_features, dim=1)

@@ -34,5 +34,11 @@ def build_model(cfg, num_classes):
         multi_granularity_gating_input=cfg.MODEL.MULTI_GRANULARITY_GATING_INPUT,
         multi_granularity_gating_tau=cfg.MODEL.MULTI_GRANULARITY_GATING_TAU,
         multi_granularity_gating_normalization=cfg.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION,
+        multi_granularity_static_dynamic_residual=(
+            cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL
+        ),
+        multi_granularity_static_dynamic_alpha=(
+            cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA
+        ),
     )
     return model

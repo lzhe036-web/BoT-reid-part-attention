@@ -55,12 +55,14 @@ EXPECTED_EPOCHS = (40, 80, 120)
 EXPECTED_GATE_EPOCHS = tuple(range(1, 121))
 EXPECTED_GATING_INPUT = "concat_global_local"
 EXPECTED_GATING_TAU = 1.0
-SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
 RESULT_FILENAME = "g2_formal_result.json"
+FORMAL_RESULT_ARTIFACT_TYPE = "g2_formal_result"
 METHOD_VARIANT = "g2_global_local_per_sample_dynamic_gating"
 METHOD_LABEL = "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]"
 BASELINE_LABEL = "C2-L03 + MGP concat"
-REQUIRE_RESULT_GATING_TEMPERATURE = False
+REQUIRE_STATIC_DYNAMIC_RESIDUAL = False
+EXPECTED_STATIC_DYNAMIC_ALPHA = None
+SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
 DEFAULT_CONFIG = (
     REPO_ROOT
     / "configs"
@@ -153,6 +155,18 @@ def _validate_configuration(config_path, resolved_path, output_dir, reproducibil
                         label, ".".join(keys), actual, expected
                     )
                 )
+    if REQUIRE_STATIC_DYNAMIC_RESIDUAL:
+        for label, payload in (("source", source), ("resolved", resolved)):
+            if _nested(payload, "MODEL", "MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL") is not True:
+                raise G2RecoveryError(
+                    "{} config does not enable static-dynamic residual fusion".format(label)
+                )
+            if not _same_number(
+                    _nested(payload, "MODEL", "MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA"),
+                    EXPECTED_STATIC_DYNAMIC_ALPHA):
+                raise G2RecoveryError(
+                    "{} config residual alpha does not match expected value".format(label)
+                )
     for label, payload in (("source", source), ("resolved", resolved)):
         configured_output = Path(str(_nested(payload, "OUTPUT_DIR"))).resolve()
         if configured_output != output_dir:
@@ -244,14 +258,19 @@ def _validate_result(output_dir, result, commit, validation_records,
         raise G2RecoveryError("G2 result branch/commit does not match training evidence")
     if result.get("seed") != 42:
         raise G2RecoveryError("G2 result does not record Seed=42")
-    if REQUIRE_RESULT_GATING_TEMPERATURE and not _same_number(
-            result.get("gating_temperature"), EXPECTED_GATING_TAU
-    ):
+    if not _same_number(result.get("gating_temperature", EXPECTED_GATING_TAU),
+                        EXPECTED_GATING_TAU):
         raise G2RecoveryError("G2 result has the wrong gating temperature")
     if result.get("gating_input") != "concat([g, z2, z4, z6])":
         raise G2RecoveryError("G2 result has the wrong controller input")
     if result.get("gate_outputs") != ["w2", "w4", "w6"]:
         raise G2RecoveryError("G2 result has the wrong gate-output semantics")
+    if REQUIRE_STATIC_DYNAMIC_RESIDUAL:
+        if result.get("fusion_mode") != "static_concat_plus_gated_residual":
+            raise G2RecoveryError("Residual result has the wrong fusion mode")
+        if not _same_number(result.get("static_dynamic_alpha"),
+                            EXPECTED_STATIC_DYNAMIC_ALPHA):
+            raise G2RecoveryError("Residual result has the wrong residual alpha")
 
     observed_validation_epochs = tuple(int(row["epoch"]) for row in validation_records)
     if observed_validation_epochs != EXPECTED_EPOCHS:
@@ -510,7 +529,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
     checkpoint_manifest_path = _require_file(
         output_dir / "checkpoint_manifest.tsv", "checkpoint manifest"
     )
-    result_path = _require_file(output_dir / RESULT_FILENAME, "G2 formal result")
+    result_path = _require_file(output_dir / RESULT_FILENAME, "formal result")
 
     reproducibility = _read_json(reproducibility_path, "reproducibility record")
     commit = _validate_reproducibility(reproducibility)
@@ -520,7 +539,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
     validation_records = read_validation_history(validation_path)
     gate_records = read_gating_epoch_records(gate_stats_path)
     checkpoint_rows = _read_checkpoint_manifest(checkpoint_manifest_path)
-    result = _read_json(result_path, "G2 formal result")
+    result = _read_json(result_path, "formal result")
     best, selected_row, gating_statistics, checkpoint_path, checkpoint_sha = _validate_result(
         output_dir, result, commit, validation_records, checkpoint_rows, gate_records
     )
@@ -553,7 +572,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
         checkpoint_manifest_snapshot = _copy_atomic(
             checkpoint_manifest_path, temporary_dir / "checkpoint_manifest.tsv"
         )
-        result_snapshot = _copy_atomic(result_path, temporary_dir / "g2_formal_result.json")
+        result_snapshot = _copy_atomic(result_path, temporary_dir / RESULT_FILENAME)
         analysis_manifest_snapshot = _copy_atomic(
             analysis_manifest_path, temporary_dir / "g2_gating_analysis_manifest.json"
         )
@@ -585,7 +604,7 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "selected_checkpoint": _file_evidence(
                 checkpoint_path, checkpoint_sha, SELECTION_RULE
             ),
-            "g2_formal_result": _file_evidence(result_snapshot),
+            FORMAL_RESULT_ARTIFACT_TYPE: _file_evidence(result_snapshot),
             "g2_gating_analysis_manifest": _file_evidence(analysis_manifest_snapshot),
             "dynamic_gating_summary": _file_evidence(
                 summary_snapshot, checkpoint_sha, summary.get("selection_rule", SELECTION_RULE)
@@ -670,6 +689,8 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
                 "Recovered from existing machine-generated G2 evidence; numeric values "
                 "were not edited. Launch commit/worktree state comes from reproducibility.json."
             ),
+            "fusion_mode": result.get("fusion_mode", "pure_dynamic_weighted_concat"),
+            "static_dynamic_alpha": result.get("static_dynamic_alpha", NOT_APPLICABLE),
             "records_root": str(records_root),
             "experiments_path": str(experiments_path),
             "source_config": artifacts["source_config"],

@@ -65,6 +65,10 @@ _C.MODEL.MULTI_GRANULARITY_DYNAMIC_GATING = False
 _C.MODEL.MULTI_GRANULARITY_GATING_INPUT = "global"
 _C.MODEL.MULTI_GRANULARITY_GATING_TAU = 1.0
 _C.MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION = "scaled_softmax"
+# Opt-in static-concatenation plus dynamic-residual fusion.  The defaults
+# deliberately retain the original dynamic-gating fusion and checkpoint schema.
+_C.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL = False
+_C.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA = 0.0
 # Enable camera-aware triplet loss branch. Disabled by default to keep existing experiments unchanged.
 _C.MODEL.CAMERA_AWARE_TRIPLET = False
 _C.MODEL.CAMERA_AWARE_TRIPLET_LAMBDA = 0.5

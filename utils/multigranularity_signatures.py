@@ -117,6 +117,27 @@ def _contains_dynamic_gating(node):
     return "dynamic_gating" in ast.dump(node, include_attributes=False).lower()
 
 
+def _is_fusion_only_name(name):
+    """Whether a field belongs to a post-descriptor fusion ablation only."""
+    lowered = str(name).lower()
+    return (
+        "dynamic_gating" in lowered
+        or "gating_" in lowered
+        or "static_dynamic" in lowered
+    )
+
+
+def _contains_fusion_only_reference(node):
+    for item in ast.walk(node):
+        if isinstance(item, ast.Name) and _is_fusion_only_name(item.id):
+            return True
+        if isinstance(item, ast.Attribute) and _is_fusion_only_name(item.attr):
+            return True
+        if isinstance(item, ast.arg) and _is_fusion_only_name(item.arg):
+            return True
+    return False
+
+
 class _SharedBaselineNormalizer(ast.NodeTransformer):
     """Remove only the declared gating experiment variable from shared methods."""
 
@@ -127,7 +148,7 @@ class _SharedBaselineNormalizer(ast.NodeTransformer):
         default_offset = len(node.args) - len(defaults)
         retained_defaults = []
         for index, argument in enumerate(node.args):
-            if "dynamic_gating" in argument.arg or "gating_" in argument.arg:
+            if _is_fusion_only_name(argument.arg):
                 continue
             retained.append(argument)
             if index >= default_offset:
@@ -137,17 +158,18 @@ class _SharedBaselineNormalizer(ast.NodeTransformer):
         return node
 
     def visit_If(self, node):
-        if _contains_dynamic_gating(node.test):
+        if (_contains_dynamic_gating(node.test)
+                or _contains_fusion_only_reference(node.test)):
             return None
         return self.generic_visit(node)
 
     def visit_Assign(self, node):
-        if _contains_dynamic_gating(node):
+        if _contains_dynamic_gating(node) or _contains_fusion_only_reference(node):
             return None
         return self.generic_visit(node)
 
     def visit_AnnAssign(self, node):
-        if _contains_dynamic_gating(node):
+        if _contains_dynamic_gating(node) or _contains_fusion_only_reference(node):
             return None
         return self.generic_visit(node)
 
@@ -345,6 +367,23 @@ def _fusion_signature(configuration, dynamic):
             "weight_initialization": "zeros",
             "bias_initialization": "zeros",
         }
+        residual_enabled = configuration.get("MODEL", {}).get(
+            "MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL", False
+        )
+        if residual_enabled:
+            alpha = configuration.get("MODEL", {}).get(
+                "MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA"
+            )
+            if isinstance(alpha, bool) or not isinstance(alpha, (int, float)):
+                raise FeatureCompatibilityError(
+                    "Static-dynamic residual alpha must be numeric"
+                )
+            payload["static_dynamic_residual"] = {
+                "enabled": True,
+                "alpha": float(alpha),
+                "global_block": "unchanged",
+                "local_formula": "(1+alpha*w_k)*z_k",
+            }
     else:
         payload["controller"] = "not_applicable"
     return payload, _sha256_text(_canonical_json(payload))
