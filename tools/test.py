@@ -36,6 +36,12 @@ def main():
         cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
+    alpha_variant = (cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL
+                     and cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA in (0.1, 0.5)
+                     and cfg.MODEL.MULTI_GRANULARITY_GATING_TAU == 0.5)
+    if alpha_variant:
+        from utils.g2_e_checkpoint_identity import validate
+        validate(cfg.TEST.WEIGHT, cfg)
 
     output_dir = cfg.OUTPUT_DIR
     if output_dir and not os.path.exists(output_dir):
@@ -58,7 +64,12 @@ def main():
 
     train_loader, val_loader, num_query, num_classes = make_data_loader(cfg)
     model = build_model(cfg, num_classes)
-    model.load_param(cfg.TEST.WEIGHT)
+    if alpha_variant:
+        from tools.analyze_dynamic_gating import _state_dict
+        checkpoint = torch.load(cfg.TEST.WEIGHT, map_location="cpu")
+        model.load_state_dict(_state_dict(checkpoint), strict=True)
+    else:
+        model.load_param(cfg.TEST.WEIGHT)
 
     inference(cfg, model, val_loader, num_query)
 
