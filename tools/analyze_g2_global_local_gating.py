@@ -20,9 +20,6 @@ import sys
 import uuid
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -123,6 +120,9 @@ def _block_rows(state, configuration, checkpoint_sha256):
 
 
 def _plot_block_magnitudes(rows, output_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     labels = ("g", "z2", "z4", "z6")
     positions = np.arange(len(labels), dtype=np.float64)
     width = 0.22
@@ -162,6 +162,9 @@ def _history_rows(records):
 
 
 def _plot_history(rows, output_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     if not rows:
         return False
     epochs = [int(row["epoch"]) for row in rows]
@@ -214,6 +217,9 @@ def _sample_weight_rows(samples_path):
 
 
 def _plot_sample_weight_distribution(series, output_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     figure, axis = plt.subplots(figsize=(7.2, 4.8), dpi=180)
     axis.boxplot(series, labels=["w2", "w4", "w6"], showmeans=True)
     axis.set_xlabel("Applied local-scale gate weight")
@@ -230,7 +236,7 @@ def _sha256_text(path):
 
 
 def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
-            sample_limit=256, device=None, expected_gating_tau=None):
+            sample_limit=256, device=None, expected_gating_tau=None, render_plots=True, selected_epoch=None):
     config_path = Path(config_path).resolve()
     checkpoint_path = Path(checkpoint_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -248,7 +254,8 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     block_csv = output_dir / "g2_controller_input_block_norms.csv"
     _write_csv(block_csv, list(block_rows[0].keys()), block_rows)
     block_png = output_dir / "g2_controller_input_block_norms.png"
-    _plot_block_magnitudes(block_rows, block_png)
+    if render_plots:
+        _plot_block_magnitudes(block_rows, block_png)
 
     epoch_records = read_gating_epoch_records(epoch_stats_path)
     if not epoch_records:
@@ -257,17 +264,19 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
     history_csv = output_dir / "g2_gate_training_history.csv"
     _write_csv(history_csv, history_fields, history_rows)
     history_png = output_dir / "g2_gate_training_history.png"
-    _plot_history(history_rows, history_png)
+    if render_plots:
+        _plot_history(history_rows, history_png)
 
     summary_path, samples_path, evidence_summary = generate_dynamic_gating_evidence(
         configuration, checkpoint_path, output_dir,
-        epoch_records[-1], limit=sample_limit, device=device,
+        next(row for row in epoch_records if int(row["epoch"]) == int(selected_epoch)) if selected_epoch is not None else epoch_records[-1], limit=sample_limit, device=device,
     )
     weight_rows, series = _sample_weight_rows(samples_path)
     weights_csv = output_dir / "g2_gate_test_weight_summary.csv"
     _write_csv(weights_csv, list(weight_rows[0].keys()), weight_rows)
     weights_png = output_dir / "g2_gate_test_weight_distribution.png"
-    _plot_sample_weight_distribution(series, weights_png)
+    if render_plots:
+        _plot_sample_weight_distribution(series, weights_png)
 
     manifest = {
         "analysis_type": "G2 global-plus-local Dynamic Gating observation",
@@ -292,15 +301,18 @@ def analyze(config_path, checkpoint_path, output_dir, epoch_stats_path,
         "test_weight_sample_count": evidence_summary["selected_sample_count"],
         "files": {
             "controller_block_norms_csv": {"path": str(block_csv), "sha256": _sha256_text(block_csv)},
-            "controller_block_norms_png": {"path": str(block_png), "sha256": _sha256_text(block_png)},
+            "controller_block_norms_png": {"path": str(block_png), "sha256": _sha256_text(block_png) if render_plots else None},
             "training_history_csv": {"path": str(history_csv), "sha256": _sha256_text(history_csv)},
-            "training_history_png": {"path": str(history_png), "sha256": _sha256_text(history_png)},
+            "training_history_png": {"path": str(history_png), "sha256": _sha256_text(history_png) if render_plots else None},
             "test_gate_samples_tsv": {"path": str(samples_path), "sha256": _sha256_text(samples_path)},
             "test_weight_summary_csv": {"path": str(weights_csv), "sha256": _sha256_text(weights_csv)},
-            "test_weight_distribution_png": {"path": str(weights_png), "sha256": _sha256_text(weights_png)},
+            "test_weight_distribution_png": {"path": str(weights_png), "sha256": _sha256_text(weights_png) if render_plots else None},
             "dynamic_gating_summary_json": {"path": str(summary_path), "sha256": _sha256_text(summary_path)},
         },
     }
+    manifest["plots_deferred"] = not render_plots
+    if not render_plots:
+        manifest["files"] = {key: value for key, value in manifest["files"].items() if not key.endswith("_png")}
     manifest_path = output_dir / "g2_gating_analysis_manifest.json"
     _atomic_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     return manifest_path

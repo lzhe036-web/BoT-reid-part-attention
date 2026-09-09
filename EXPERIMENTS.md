@@ -148,3 +148,12 @@ Market 已按 `pid>0` 重做为 `market_epoch120_person_only_v2`；旧的含 `pi
 | C2-L03-MGDG-G2-GL-T1-S42-fa4e7f88f7-49a766fb52 | C2-L03-MGDG-G2-GL-T1-S42 | formal | resnet50_checkpoint_22320.pt | 327027980 | 120 | 22320 | 49a766fb520cca5dfe9121f272994185db9fddee45709c9d61446c6781dc7d45 | true |
 | C2-L03-MGDG-G2-GL-T1-S42-fa4e7f88f7-49a766fb52 | C2-L03-MGDG-G2-GL-T1-S42 | formal | resnet50_checkpoint_7440.pt | 327027980 | 40 | 7440 | 07db4a8e727704007d97af69c70c5c3033a28f8a9840f424337700b37dffca91 | false |
 <!-- AUTO-CHECKPOINT-EVIDENCE:END -->
+
+<!-- g2-e-alpha-sweep-implementation -->
+## G2-E alpha=0.1 实现与运行入口
+
+直接基线：codex/g2-e-static-dynamic-alpha0p3-tau0p5 @ 63761021a40693694f037d850066deb2237a5c41。
+唯一算法变量为 residual alpha；tau=0.5、2816维静态拼接+门控残差及其余配置保持一致。
+本条是实现记录，尚无本分支的 AutoDL 正式训练指标；不属于正式成功结果表。
+运行、补录、下载及对照命令见 [G2_E_ALPHA_SWEEP_AUTODL.md](G2_E_ALPHA_SWEEP_AUTODL.md)。
+正式流程先登记 registry/EXPERIMENTS.md，后绘图打包。固定样本统计和后处理状态由脚本按 run_id 自动维护。

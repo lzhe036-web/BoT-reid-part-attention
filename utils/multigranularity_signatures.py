@@ -358,7 +358,7 @@ def _fusion_signature(configuration, dynamic):
     if dynamic:
         payload["controller"] = {
             "input": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT"),
-            "linear": [2048, 3],
+            "linear": [2816 if _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_INPUT") == "concat_global_local" else 2048, 3],
             "temperature": _nested(configuration, "MODEL.MULTI_GRANULARITY_GATING_TAU"),
             "normalization": _nested(
                 configuration, "MODEL.MULTI_GRANULARITY_GATING_NORMALIZATION"

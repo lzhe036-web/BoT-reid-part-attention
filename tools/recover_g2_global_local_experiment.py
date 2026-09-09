@@ -61,6 +61,7 @@ METHOD_VARIANT = "g2_global_local_per_sample_dynamic_gating"
 METHOD_LABEL = "C2-L03 + G2 Dynamic Gating [g,z2,z4,z6] -> [w2,w4,w6]"
 BASELINE_LABEL = "C2-L03 + MGP concat"
 REQUIRE_STATIC_DYNAMIC_RESIDUAL = False
+ALLOW_DEFERRED_PLOTS = False
 EXPECTED_STATIC_DYNAMIC_ALPHA = None
 SELECTION_RULE = "highest Rank-1; if tied, highest mAP; if still tied, earliest epoch"
 DEFAULT_CONFIG = (
@@ -370,6 +371,8 @@ def _validate_analysis(output_dir, result, checkpoint_sha, config_path,
         "test_weight_distribution_png",
         "dynamic_gating_summary_json",
     }
+    if ALLOW_DEFERRED_PLOTS and analysis.get("plots_deferred") is True:
+        required -= {"controller_block_norms_png", "test_weight_distribution_png"}
     if not required.issubset(set(analysis_files)):
         raise G2RecoveryError(
             "G2 analysis is missing required artifacts: {}".format(
@@ -706,6 +709,17 @@ def recover(config_path, output_dir, console_log, records_root, experiments_path
             "gating_samples": artifacts["gating_samples"],
             "artifacts": artifacts,
         }
+        if REQUIRE_STATIC_DYNAMIC_RESIDUAL and ALLOW_DEFERRED_PLOTS:
+            from utils.g2_e_checkpoint_identity import validate as validate_checkpoint_identity
+            identity = validate_checkpoint_identity(checkpoint_path, _resolved_config)
+            identity_path = _copy_atomic(Path(str(checkpoint_path)+".metadata.json"), temporary_dir/"selected_checkpoint.metadata.json")
+            manifest["artifacts"]["checkpoint_identity"] = _file_evidence(identity_path)
+            manifest.update({"gating_input_dim": result["gating_input_dim"],
+                             "descriptor_dim": result["descriptor_dim"],
+                             "controller": result["controller"],
+                             "fusion_formula": result["fusion_formula"],
+                             "gating_signature_sha256": identity["feature_signature_sha256"],
+                             "checkpoint_feature_signature": identity["feature_signature"]})
         _refresh_partial_artifact_manifest(temporary_dir, manifest)
         atomic_write_json(temporary_dir / "run_manifest.json", manifest)
         atomic_write_json(temporary_dir / "run_status.json", {

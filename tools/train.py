@@ -234,6 +234,11 @@ def main():
     )
     logger.info("Reproducibility metadata saved to {}".format(metadata_path))
     train(cfg)
+    if (cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_RESIDUAL
+            and cfg.MODEL.MULTI_GRANULARITY_STATIC_DYNAMIC_ALPHA in (0.1, 0.5)
+            and cfg.MODEL.MULTI_GRANULARITY_GATING_TAU == 0.5):
+        from utils.g2_e_checkpoint_identity import seal
+        seal(output_dir)
 
 
 if __name__ == '__main__':
